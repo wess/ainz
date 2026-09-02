@@ -46,42 +46,14 @@ pub enum ProviderPreset {
   ClaudeCode,
 }
 
+// the arguments themselves live with the config, so a saved profile can be compared against
+// the preset it came from when its shape changes
 pub(crate) fn preset_profile(preset: ProviderPreset) -> ProviderConfig {
   match preset {
-    ProviderPreset::Ollama => ProviderConfig::http("http://127.0.0.1:11434/v1", ""),
-    // a LiteLLM proxy speaks the same chat-completions API for every model behind it
-    ProviderPreset::LiteLlm => ProviderConfig::http("http://127.0.0.1:4000/v1", "LITELLM_API_KEY"),
-    ProviderPreset::Codex => ProviderConfig::process(
-      "codex",
-      strings(&[
-        "exec",
-        "--ephemeral",
-        "--color",
-        "never",
-        "--sandbox",
-        "{sandbox}",
-        "-C",
-        "{workspace}",
-        "--model",
-        "{model}",
-        "-",
-      ]),
-      ProcessOutput::Text,
-    ),
-    ProviderPreset::ClaudeCode => ProviderConfig::process(
-      "claude",
-      strings(&[
-        "-p",
-        "--output-format",
-        "json",
-        "--no-session-persistence",
-        "--model",
-        "{model}",
-        "--permission-mode",
-        "{permission}",
-      ]),
-      ProcessOutput::JsonResult,
-    ),
+    ProviderPreset::Ollama => ProviderConfig::ollama(),
+    ProviderPreset::LiteLlm => ProviderConfig::lite_llm(),
+    ProviderPreset::Codex => ProviderConfig::codex(),
+    ProviderPreset::ClaudeCode => ProviderConfig::claude_code(),
   }
 }
 
@@ -167,6 +139,10 @@ pub enum ProviderCommand {
     models: Vec<String>,
     #[arg(long)]
     json_result: bool,
+    /// Read one JSON object per line as the command writes them, the way `claude -p
+    /// --output-format stream-json` reports itself
+    #[arg(long)]
+    stream_json: bool,
   },
   Remove {
     name: String,
@@ -700,6 +676,7 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
       api_key_env,
       models,
       json_result,
+      stream_json,
     } => {
       if config.providers.contains_key(&name) {
         anyhow::bail!("provider {name} already exists");
@@ -714,10 +691,10 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
           (None, Some(command)) => ProviderConfig::process(
             command,
             args,
-            if json_result {
-              ProcessOutput::JsonResult
-            } else {
-              ProcessOutput::Text
+            match (stream_json, json_result) {
+              (true, _) => ProcessOutput::StreamJson,
+              (false, true) => ProcessOutput::JsonResult,
+              (false, false) => ProcessOutput::Text,
             },
           ),
           (Some(_), Some(_)) => anyhow::bail!("choose either --endpoint or --command"),
@@ -886,10 +863,6 @@ fn print_providers(config: &Config, json: bool) -> Result<()> {
     }
   }
   Ok(())
-}
-
-fn strings(values: &[&str]) -> Vec<String> {
-  values.iter().map(|value| (*value).to_string()).collect()
 }
 
 fn print_plugins(catalog: &PluginCatalog, json: bool) -> Result<()> {

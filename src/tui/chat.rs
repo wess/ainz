@@ -3,7 +3,7 @@ use std::{
   collections::BTreeMap,
   path::PathBuf,
   sync::Arc,
-  time::{SystemTime, UNIX_EPOCH},
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ainz::{
@@ -69,6 +69,8 @@ enum Wake {
   Agent(Option<UiEvent>),
   Finished(Box<Result<RunOutput>>),
   Input(Option<std::io::Result<InputEvent>>),
+  // nothing happened; the run is still going and the clock on it needs redrawing
+  Tick,
 }
 
 struct CommandData {
@@ -141,7 +143,8 @@ struct ChatState {
   active: Option<String>,
   roster: bool,
   scroll: u16,
-  busy: bool,
+  // when the running turn started, so a quiet provider still shows it is alive; None when idle
+  started: Option<Instant>,
   // set by the first ctrl+c of a run; the second abandons the run
   cancelled: bool,
   approval: Option<Approval>,
@@ -161,7 +164,7 @@ impl Default for ChatState {
       active: None,
       roster: true,
       scroll: 0,
-      busy: false,
+      started: None,
       cancelled: false,
       approval: None,
       command_selected: 0,
@@ -173,6 +176,10 @@ impl Default for ChatState {
 }
 
 impl ChatState {
+  fn busy(&self) -> bool {
+    self.started.is_some()
+  }
+
   fn select_header(&mut self, preference: &str, catalog: &HeaderCatalog) {
     let (style, custom) = selected_header(preference, catalog);
     self.splash_style = style;
@@ -393,7 +400,7 @@ async fn run_chat_inner(
     let (run_controller, mut inbox) = run_control();
     controller = Some(run_controller);
     let run_options = options.clone();
-    state.busy = true;
+    state.started = Some(Instant::now());
     task = Some(tokio::spawn(async move {
       let result = local_agent
         .run_controlled(&mut local_session, expanded, run_options, &mut inbox)
@@ -412,13 +419,14 @@ async fn run_chat_inner(
       message = rx.recv() => Wake::Agent(message),
       joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
       event = input.next() => Wake::Input(event),
+      () = tokio::time::sleep(Duration::from_secs(1)), if state.busy() => Wake::Tick,
     };
     let key = match wake {
       Wake::Agent(Some(message)) => {
         apply_event(&mut state, message);
         continue;
       }
-      Wake::Agent(None) => continue,
+      Wake::Agent(None) | Wake::Tick => continue,
       Wake::Finished(joined) => {
         task = None;
         // events emitted just before the run returned are still queued; show them first
@@ -432,7 +440,7 @@ async fn run_chat_inner(
         store.save(&returned_session).await?;
         session = Some(returned_session);
         controller = None;
-        state.busy = false;
+        state.started = None;
         state.cancelled = false;
         state.primary.assistant = None;
         state.primary.tools.clear();
@@ -447,7 +455,7 @@ async fn run_chat_inner(
       Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => key,
       Wake::Input(Some(Ok(InputEvent::Paste(text)))) => {
         if state.active.is_none() && state.approval.is_none() {
-          state.input.push_str(&text.replace(['\r', '\n'], " "));
+          state.input.push_str(&super::flatten_paste(&text));
           state.command_selected = 0;
         }
         continue;
@@ -564,14 +572,14 @@ async fn run_chat_inner(
       }
       KeyCode::PageUp => state.scroll = state.scroll.saturating_add(8),
       KeyCode::PageDown => state.scroll = state.scroll.saturating_sub(8),
-      KeyCode::Esc if state.busy => {
+      KeyCode::Esc if state.busy() => {
         if let Some(controller) = &controller {
           controller.cancel();
         }
       }
       KeyCode::Enter if state.active.is_none() && !state.input.trim().is_empty() => {
         let input = std::mem::take(&mut state.input);
-        if state.busy {
+        if state.busy() {
           if input.trim() == "/cancel" {
             if let Some(controller) = &controller {
               controller.cancel();
@@ -750,7 +758,7 @@ async fn run_chat_inner(
             let (run_controller, mut inbox) = run_control();
             controller = Some(run_controller);
             let run_options = options.clone();
-            state.busy = true;
+            state.started = Some(Instant::now());
             task = Some(tokio::spawn(async move {
               let result = if images.is_empty() {
                 local_agent
@@ -1557,7 +1565,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   } else {
     permission_name(config.permissions)
   };
-  let activity = view
+  let mut activity = view
     .tools
     .values()
     .next()
@@ -1569,12 +1577,18 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
           AgentState::Done => "done".into(),
           AgentState::Error => "error".into(),
         }
-      } else if state.busy {
+      } else if state.busy() {
         "thinking".into()
       } else {
         "ready".into()
       }
     });
+  // a headless coding agent can work for minutes without a word; the clock says it has not wedged
+  if let Some(seconds) = state.started.map(|start| start.elapsed().as_secs())
+    && seconds > 0
+  {
+    activity = format!("{activity} {}", elapsed(seconds));
+  }
   let model = &config.model;
   // what memory this session has, since it changes what the model can be expected to know
   let memory = match (config.memory.backend, config.mesh_active()) {
@@ -1604,6 +1618,13 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
     ),
     area,
   );
+}
+
+fn elapsed(seconds: u64) -> String {
+  match seconds {
+    seconds if seconds < 60 => format!("{seconds}s"),
+    seconds => format!("{}m{:02}s", seconds / 60, seconds % 60),
+  }
 }
 
 fn compact_count(value: u64) -> String {
@@ -1638,7 +1659,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     );
     return;
   }
-  let prefix = if state.busy { "↳ " } else { "> " };
+  let prefix = if state.busy() { "↳ " } else { "> " };
   // long input keeps its tail in view, where the cursor is
   let capacity = area.width.saturating_sub(3) as usize;
   let skipped = state.input.chars().count().saturating_sub(capacity);

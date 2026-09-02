@@ -84,8 +84,16 @@ ainz providers add runner \
 ```
 
 Plain process providers return stdout as the assistant response. Add `--json-result` when the
-command returns a JSON object whose `result` field contains the final text.
+command returns a JSON object whose `result` field contains the final text, or `--stream-json`
+when it writes one JSON object per line while it works, the way `claude -p --output-format
+stream-json` does. A streaming command reports itself as it runs: its text appears a piece at
+a time, its tool calls show up in the transcript and the status bar, and the run's token counts
+come back with the result. The other two modes stay silent until the command exits.
+
+The Claude Code preset uses the streaming mode. A profile saved by an earlier version on the
+buffered `--output-format json` arguments is moved onto it when the config loads.
 
 Process providers are adapters around complete coding agents, not raw model APIs. Their own
 tools and session behavior remain authoritative; Ainz does not pass them its tool schemas.
-They currently return no token usage and omit image content from the rendered transcript.
+They omit image content from the rendered transcript, and report token usage only in the
+streaming mode.

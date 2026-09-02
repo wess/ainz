@@ -90,7 +90,10 @@ impl Choice {
       ),
       Self::Preset(ProviderPreset::ClaudeCode) => (
         "Headless coding agent",
-        "Uses print mode with structured output. The CLI keeps authority over its own tools.",
+        concat!(
+          "Runs the installed CLI in print mode and shows its answer and tool calls as they ",
+          "happen. The CLI keeps authority over its own tools."
+        ),
       ),
       Self::Existing(_) => (
         "Saved provider",
@@ -102,7 +105,10 @@ impl Choice {
       ),
       Self::Process => (
         "Executable adapter",
-        "Send the transcript over stdin and use stdout, or a JSON result field, as the response.",
+        concat!(
+          "Send the transcript over stdin and read the reply from stdout: plain text, a JSON ",
+          "result field, or a stream of JSON lines reported as they are written."
+        ),
       ),
     }
   }
@@ -391,16 +397,16 @@ async fn configure_inner(
           Field::new("Command", ""),
           Field::new("Arguments", ""),
           Field::new("Model", ""),
-          Field::new("JSON result field?", "no"),
+          Field::new("Output: text, json, or stream?", "text"),
         ],
       )?
       else {
         return Ok(None);
       };
-      let output = if matches!(values[4].as_str(), "y" | "yes") {
-        ProcessOutput::JsonResult
-      } else {
-        ProcessOutput::Text
+      let output = match values[4].trim().to_ascii_lowercase().as_str() {
+        "json" | "j" | "y" | "yes" => ProcessOutput::JsonResult,
+        "stream" | "s" | "stream-json" => ProcessOutput::StreamJson,
+        _ => ProcessOutput::Text,
       };
       let profile = ProviderConfig::process(
         &values[1],
@@ -491,6 +497,11 @@ fn select_model(
   }
 }
 
+/// A bracketed paste arrives whole, newlines and all, and every input here is one line.
+pub(super) fn flatten_paste(text: &str) -> String {
+  text.replace(['\r', '\n'], " ")
+}
+
 #[derive(Clone)]
 struct Field {
   label: &'static str,
@@ -514,12 +525,16 @@ fn edit_fields(
   let mut selected = 0;
   loop {
     terminal.draw(|frame| render_fields(frame, title, &fields, selected))?;
-    let InputEvent::Key(key) = event::read()? else {
-      continue;
+    // a terminal with bracketed paste sends the whole clipboard as one event rather than as
+    // keystrokes, so a field that only reads keys silently swallows every paste
+    let key = match event::read()? {
+      InputEvent::Paste(text) => {
+        fields[selected].value.push_str(flatten_paste(&text).trim());
+        continue;
+      }
+      InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,
+      _ => continue,
     };
-    if key.kind == KeyEventKind::Release {
-      continue;
-    }
     match key.code {
       KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(None),
       KeyCode::Char(ch) => fields[selected].value.push(ch),
@@ -668,8 +683,20 @@ fn render_fields(frame: &mut Frame, title: &str, fields: &[Field], selected: usi
   let rows = Layout::vertical(constraints).spacing(1).split(area);
   for (index, field) in fields.iter().enumerate() {
     let border = if index == selected { ACCENT } else { MUTED };
+    // a pasted key is longer than its box; the field being edited shows its end, not its start
+    let scroll = if index == selected {
+      let inner = rows[index].width.saturating_sub(4) as usize;
+      let width = field.value.chars().count();
+      width
+        .saturating_sub(inner)
+        .saturating_add(1)
+        .min(u16::MAX as usize) as u16
+    } else {
+      0
+    };
     frame.render_widget(
       Paragraph::new(field.value.as_str())
+        .scroll((0, scroll))
         .style(Style::default().fg(INK))
         .block(
           Block::default()

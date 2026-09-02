@@ -6,7 +6,10 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+  io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+  process::Command,
+};
 
 use crate::{
   config::{PermissionMode, ProcessOutput},
@@ -15,8 +18,10 @@ use crate::{
   sse::SseDecoder,
 };
 
+mod stream;
 mod wire;
 
+use stream::{Completion, StreamState};
 use wire::{PartialCall, parse_data, parse_response, wire_message};
 
 #[derive(Clone, Debug)]
@@ -271,6 +276,14 @@ impl ChatProvider for ProcessProvider {
       .stdin
       .take()
       .context("provider command stdin was unavailable")?;
+    let stdout = child
+      .stdout
+      .take()
+      .context("provider command stdout was unavailable")?;
+    let stderr = child
+      .stderr
+      .take()
+      .context("provider command stderr was unavailable")?;
     let prompt = render_prompt(messages);
     // the prompt is fed while output drains, so a chatty command cannot fill its pipe and stall.
     // a write error is left to the exit status: a command that quit early explains itself on stderr
@@ -278,32 +291,64 @@ impl ChatProvider for ProcessProvider {
       drop(stdin.write_all(prompt.as_bytes()).await);
       drop(stdin.shutdown().await);
     };
-    let (_, output) = tokio::join!(feed, child.wait_with_output());
-    let output = output.context("wait for provider command")?;
-    if !output.status.success() {
-      let error = String::from_utf8_lossy(&output.stderr);
-      bail!(
-        "provider command failed ({}): {}",
-        output.status,
-        error.trim()
-      );
-    }
-    let stdout = String::from_utf8(output.stdout).context("provider output was not UTF-8")?;
-    let text = match self.output {
-      ProcessOutput::Text => stdout.trim().to_string(),
-      ProcessOutput::JsonResult => serde_json::from_str::<serde_json::Value>(&stdout)
-        .context("invalid provider JSON output")?
-        .get("result")
-        .and_then(serde_json::Value::as_str)
-        .context("provider JSON output had no result string")?
-        .to_string(),
+    // stderr drains on its own task for the same reason the prompt is fed on one
+    let errors = tokio::spawn(async move {
+      let mut text = String::new();
+      drop(BufReader::new(stderr).read_to_string(&mut text).await);
+      text
+    });
+    let mut stream = StreamState::default();
+    let read = async {
+      let mut reader = BufReader::new(stdout);
+      let mut buffered = String::new();
+      if self.output == ProcessOutput::StreamJson {
+        let mut lines = reader.lines();
+        while let Some(line) = lines.next_line().await.context("read provider output")? {
+          stream.push(&line, events);
+        }
+      } else {
+        // the other modes want the whole of stdout, so read it in one piece
+        reader
+          .read_to_string(&mut buffered)
+          .await
+          .context("read provider output")?;
+      }
+      anyhow::Ok(buffered)
     };
-    if !text.is_empty() {
-      events.emit(Event::TextDelta { text: text.clone() });
+    let (_, buffered) = tokio::join!(feed, read);
+    let buffered = buffered?;
+    let status = child.wait().await.context("wait for provider command")?;
+    let errors = errors.await.unwrap_or_default();
+    if !status.success() {
+      // a command that dies early may explain itself on either pipe
+      let detail = match errors.trim() {
+        "" => buffered.trim(),
+        error => error,
+      };
+      bail!("provider command failed ({status}): {detail}");
+    }
+
+    let reply = match self.output {
+      ProcessOutput::Text => Completion::whole(buffered.trim().to_string()),
+      ProcessOutput::JsonResult => Completion::whole(
+        serde_json::from_str::<serde_json::Value>(buffered.trim())
+          .context("invalid provider JSON output")?
+          .get("result")
+          .and_then(serde_json::Value::as_str)
+          .context("provider JSON output had no result string")?
+          .to_string(),
+      ),
+      ProcessOutput::StreamJson => stream.finish()?,
+    };
+    // text that already reached the screen as it arrived must not be sent a second time
+    if !reply.text.is_empty() && !reply.streamed {
+      events.emit(Event::TextDelta {
+        text: reply.text.clone(),
+      });
     }
     Ok(ProviderReply {
-      message: Message::text(Role::Assistant, text),
-      usage: Usage::default(),
+      message: Message::text(Role::Assistant, reply.text),
+      usage: reply.usage,
     })
   }
 }

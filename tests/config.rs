@@ -102,3 +102,48 @@ async fn memory_defaults_to_local_and_synapse_stays_off() {
   assert!(!loaded.synapse_active());
   assert!(!loaded.mesh_active());
 }
+
+#[tokio::test]
+async fn the_buffered_claude_preset_is_moved_to_the_streaming_one() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(
+    &path,
+    r#"
+provider = "claude"
+model = "opus"
+
+[providers.claude]
+kind = "process"
+command = "claude"
+args = ["-p", "--output-format", "json", "--no-session-persistence", "--model", "{model}", "--permission-mode", "{permission}"]
+output = "json_result"
+models = ["sonnet", "opus"]
+
+[providers.mine]
+kind = "process"
+command = "claude"
+args = ["-p", "--output-format", "json"]
+output = "json_result"
+"#,
+  )
+  .await
+  .unwrap();
+
+  let loaded = Config::load_from(&path).await.unwrap();
+
+  let claude = &loaded.providers["claude"];
+  assert_eq!(claude.output, ProcessOutput::StreamJson);
+  assert!(claude.args.iter().any(|arg| arg == "stream-json"));
+  assert!(
+    claude
+      .args
+      .iter()
+      .any(|arg| arg == "--include-partial-messages")
+  );
+  assert_eq!(claude.models, ["sonnet", "opus"]);
+  // a hand-written profile is left exactly as its owner wrote it
+  let mine = &loaded.providers["mine"];
+  assert_eq!(mine.output, ProcessOutput::JsonResult);
+  assert_eq!(mine.args, ["-p", "--output-format", "json"]);
+}

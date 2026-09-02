@@ -29,6 +29,9 @@ pub enum ProcessOutput {
   #[default]
   Text,
   JsonResult,
+  /// One JSON object per line, read as the command writes it, so a long run is visible while
+  /// it happens instead of arriving all at once at the end.
+  StreamJson,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -132,6 +135,10 @@ fn is_text_output(output: &ProcessOutput) -> bool {
   *output == ProcessOutput::Text
 }
 
+fn strings(values: &[&str]) -> Vec<String> {
+  values.iter().map(|value| (*value).to_string()).collect()
+}
+
 impl ProviderConfig {
   pub fn http(endpoint: impl Into<String>, api_key_env: impl Into<String>) -> Self {
     Self {
@@ -155,6 +162,54 @@ impl ProviderConfig {
       output,
       models: Vec::new(),
     }
+  }
+
+  pub fn ollama() -> Self {
+    Self::http("http://127.0.0.1:11434/v1", "")
+  }
+
+  /// A LiteLLM proxy speaks the same chat-completions API for every model behind it.
+  pub fn lite_llm() -> Self {
+    Self::http("http://127.0.0.1:4000/v1", "LITELLM_API_KEY")
+  }
+
+  pub fn codex() -> Self {
+    Self::process(
+      "codex",
+      strings(&[
+        "exec",
+        "--ephemeral",
+        "--color",
+        "never",
+        "--sandbox",
+        "{sandbox}",
+        "-C",
+        "{workspace}",
+        "--model",
+        "{model}",
+        "-",
+      ]),
+      ProcessOutput::Text,
+    )
+  }
+
+  pub fn claude_code() -> Self {
+    Self::process(
+      "claude",
+      strings(&[
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--no-session-persistence",
+        "--model",
+        "{model}",
+        "--permission-mode",
+        "{permission}",
+      ]),
+      ProcessOutput::StreamJson,
+    )
   }
 
   pub fn validate(&self, name: &str) -> Result<()> {
@@ -267,7 +322,35 @@ impl Config {
       config.synapse.enabled = matches!(value.trim(), "1" | "on" | "true" | "yes");
     }
 
+    config.refresh_presets();
     Ok(config)
+  }
+
+  /// The first Claude Code preset asked for one buffered JSON result, so nothing reached the
+  /// screen until the whole run was over. A profile still carrying exactly those arguments was
+  /// written by setup, not by hand, so it is moved to the streaming ones.
+  fn refresh_presets(&mut self) {
+    const BUFFERED_CLAUDE: [&str; 8] = [
+      "-p",
+      "--output-format",
+      "json",
+      "--no-session-persistence",
+      "--model",
+      "{model}",
+      "--permission-mode",
+      "{permission}",
+    ];
+    for provider in self.providers.values_mut() {
+      if provider.kind == ProviderKind::Process
+        && provider.command.as_deref() == Some("claude")
+        && provider.output == ProcessOutput::JsonResult
+        && provider.args == BUFFERED_CLAUDE
+      {
+        let preset = ProviderConfig::claude_code();
+        provider.args = preset.args;
+        provider.output = preset.output;
+      }
+    }
   }
 
   pub async fn save(&self) -> Result<()> {
