@@ -138,6 +138,17 @@ fn tool_ends(value: &Value, events: &EventSink) {
     };
     let output = match block.get("content") {
       Some(Value::String(text)) => text.clone(),
+      // a result can also arrive as content blocks; read them rather than printing their JSON
+      Some(Value::Array(blocks)) => blocks
+        .iter()
+        .filter_map(|block| {
+          field(block, "text")
+            .or_else(|| field(block, "tool_name"))
+            .or_else(|| field(block, "name"))
+            .or_else(|| field(block, "type"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n"),
       Some(other) => other.to_string(),
       None => String::new(),
     };

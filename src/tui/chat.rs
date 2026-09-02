@@ -1149,10 +1149,10 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       view.tools.insert(call.id.clone(), call.name.clone());
       view.entries.push(Entry::new(
         EntryKind::Tool,
-        format!("running {}", call.name),
+        tool_label(&call.name, &call.arguments),
       ));
     }
-    Event::ToolEnd { id, error, .. } => {
+    Event::ToolEnd { id, output, error } => {
       let view = state.view_mut(session_id);
       if let Some(name) = view.tools.remove(&id) {
         view.entries.push(Entry::new(
@@ -1161,7 +1161,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
           } else {
             EntryKind::Tool
           },
-          format!("{} {}", name, if error { "failed" } else { "complete" }),
+          tool_result(&name, &output, error),
         ));
       }
     }
@@ -1620,6 +1620,84 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   );
 }
 
+// what the call is actually doing, the way the coding agents put it: shell(git status).
+// the key order is what these tools name their subject, whichever harness sent the call
+fn tool_label(name: &str, arguments: &serde_json::Value) -> String {
+  const SUBJECT: [&str; 12] = [
+    "name",
+    "tool",
+    "command",
+    "action",
+    "path",
+    "file_path",
+    "pattern",
+    "query",
+    "url",
+    "description",
+    "task",
+    "prompt",
+  ];
+  let subject = SUBJECT.iter().find_map(|key| {
+    arguments
+      .get(key)
+      .and_then(serde_json::Value::as_str)
+      .map(str::trim)
+      .filter(|value| !value.is_empty())
+  });
+  match subject {
+    // a path is identified by its end, so an overlong one keeps its tail rather than its root
+    Some(subject) if subject.contains('/') && !subject.contains(char::is_whitespace) => {
+      format!("{name}({})", clip_start(subject, 72))
+    }
+    Some(subject) => format!("{name}({})", clip(subject, 72)),
+    None => name.to_string(),
+  }
+}
+
+fn clip_start(text: &str, width: usize) -> String {
+  let count = text.chars().count();
+  if count <= width {
+    return text.to_string();
+  }
+  ['…']
+    .into_iter()
+    .chain(text.chars().skip(count - width + 1))
+    .collect()
+}
+
+/// The first few lines of what a tool actually returned, under the call that asked for it.
+fn tool_result(name: &str, output: &str, error: bool) -> String {
+  let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+  let preview: Vec<_> = lines.by_ref().take(3).map(|line| clip(line, 160)).collect();
+  let rest = lines.count();
+  let mut text = match (preview.first(), error) {
+    (None, _) => return format!("⎿ {name} {}", if error { "failed" } else { "done" }),
+    // an error says which tool failed, since the failure is the part worth reading
+    (Some(first), true) => format!("⎿ {name} failed: {first}"),
+    (Some(first), false) => format!("⎿ {first}"),
+  };
+  for line in preview.iter().skip(1) {
+    text.push_str("\n  ");
+    text.push_str(line);
+  }
+  if rest > 0 {
+    text.push_str(&format!("\n  … +{rest} lines"));
+  }
+  text
+}
+
+fn clip(text: &str, width: usize) -> String {
+  let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+  if flat.chars().count() <= width {
+    return flat;
+  }
+  flat
+    .chars()
+    .take(width.saturating_sub(1))
+    .chain(['…'])
+    .collect()
+}
+
 fn elapsed(seconds: u64) -> String {
   match seconds {
     seconds if seconds < 60 => format!("{seconds}s"),
@@ -1731,4 +1809,53 @@ fn clock() -> String {
     .as_secs()
     % 86_400;
   format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::{tool_label, tool_result};
+
+  #[test]
+  fn a_call_is_labelled_by_what_it_acts_on() {
+    assert_eq!(
+      tool_label("shell", &json!({"command": "git status --short"})),
+      "shell(git status --short)"
+    );
+    assert_eq!(
+      tool_label("Read", &json!({"file_path": "/tmp/notes.md"})),
+      "Read(/tmp/notes.md)"
+    );
+    // nothing recognisable to name, so the tool stands alone rather than showing raw JSON
+    assert_eq!(tool_label("TodoWrite", &json!({"todos": []})), "TodoWrite");
+  }
+
+  #[test]
+  fn a_long_path_keeps_the_end_that_names_the_file() {
+    let path = format!("/{}/notes.md", "deep".repeat(30));
+
+    let label = tool_label("Read", &json!({ "file_path": path }));
+
+    assert!(label.ends_with("deepdeep/notes.md)"), "{label}");
+    assert!(label.starts_with("Read(…"), "{label}");
+  }
+
+  #[test]
+  fn a_result_shows_the_first_lines_and_counts_the_rest() {
+    let output = (1..=6).map(|n| format!("line {n}")).collect::<Vec<_>>();
+
+    let text = tool_result("shell", &output.join("\n"), false);
+
+    assert_eq!(text, "⎿ line 1\n  line 2\n  line 3\n  … +3 lines");
+  }
+
+  #[test]
+  fn a_failure_names_the_tool_that_failed() {
+    assert_eq!(
+      tool_result("edit", "no such file", true),
+      "⎿ edit failed: no such file"
+    );
+    assert_eq!(tool_result("write", "", false), "⎿ write done");
+  }
 }

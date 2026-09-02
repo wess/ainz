@@ -282,3 +282,38 @@ async fn process_provider_surfaces_a_streaming_failure() {
 
   assert!(format!("{error:#}").contains("out of turns"));
 }
+
+#[tokio::test]
+async fn process_provider_reads_a_block_shaped_tool_result() {
+  let script = [
+    r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"ToolSearch","input":{"query":"select:Read"}}]}}"#,
+    r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"Read"},{"type":"text","text":"found it"}]}]}}"#,
+    r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+  ]
+  .join("\n");
+  let provider = ProcessProvider::new(
+    "/bin/sh".into(),
+    vec![
+      "-c".into(),
+      format!("cat > /dev/null; printf '%s\\n' '{script}'"),
+    ],
+    "test".into(),
+    std::env::current_dir().unwrap(),
+    PermissionMode::ReadOnly,
+    ProcessOutput::StreamJson,
+  );
+  let (events, mut received) = EventSink::channel();
+
+  provider
+    .complete(&[Message::text(Role::User, "look")], &[], &events)
+    .await
+    .unwrap();
+
+  let mut outputs = Vec::new();
+  while let Ok(event) = received.try_recv() {
+    if let ainz::Event::ToolEnd { output, .. } = event {
+      outputs.push(output);
+    }
+  }
+  assert_eq!(outputs, ["Read\nfound it"]);
+}
