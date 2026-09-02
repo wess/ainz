@@ -134,7 +134,8 @@ noninteractive request may write files or execute commands.
 `--yeet` is the blunt version: every tool call runs without asking, and every plugin on disk
 loads whether or not it was approved. `/yeet` does the same inside a session. Nothing is
 written — not the config file, not the plugin grants — so both end with the process, and the
-status line says `yeet` while it is on. It runs code you have not vetted, which is what the
+status line says `yeet` while it is on. Choosing a mode with `/permissions` or in `/settings`
+ends it early. It runs code you have not vetted, which is what the
 name is for.
 
 In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts

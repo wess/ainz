@@ -697,6 +697,8 @@ async fn run_chat_inner(
           }
           CommandResult::SetPermissions(mode) => {
             config.permissions = mode;
+            // choosing a mode is taking the wheel back, so it also ends yeet's plugin trust
+            config.yeet = false;
             config.save().await?;
             let (new_agent, new_options) =
               make_agent_with(&workspace, config, events.clone(), approver.clone()).await?;

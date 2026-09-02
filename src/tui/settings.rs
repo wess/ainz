@@ -192,6 +192,7 @@ impl Row {
           PermissionMode::ReadOnly,
         ];
         config.permissions = step(&modes, config.permissions, forward);
+        config.yeet = false;
       }
       Self::Memory => {
         let backends = [
