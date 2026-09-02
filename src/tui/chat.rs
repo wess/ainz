@@ -1,5 +1,5 @@
 use std::{
-  cell::RefCell,
+  cell::{Cell, RefCell},
   collections::BTreeMap,
   path::PathBuf,
   sync::Arc,
@@ -16,7 +16,9 @@ use ainz::{
   tool::Risk,
 };
 use anyhow::{Context, Result};
-use crossterm::event::{Event as InputEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+  Event as InputEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures_util::StreamExt;
 use ratatui::{
   Frame,
@@ -33,7 +35,7 @@ use uuid::Uuid;
 
 use super::{
   ACCENT, ACTIVE, BLUE, CYAN, INK, MAGENTA, MUTED, RED, Term, YELLOW, centered, enter_terminal,
-  leave_terminal, masthead,
+  input::Input, leave_terminal, masthead,
 };
 use crate::app::{expand_prompt, make_agent_with};
 
@@ -137,7 +139,7 @@ impl AgentView {
 }
 
 struct ChatState {
-  input: String,
+  input: Input,
   primary: AgentView,
   agents: BTreeMap<String, AgentView>,
   active: Option<String>,
@@ -153,12 +155,14 @@ struct ChatState {
   custom_header: Option<HeaderArt>,
   // the splash is thousands of cell puts that depend only on size and choice; paint it once
   splash_cache: RefCell<Option<(usize, usize, Vec<Line<'static>>)>>,
+  // how far back the transcript actually reaches, learned while drawing it
+  reach: Cell<u16>,
 }
 
 impl Default for ChatState {
   fn default() -> Self {
     Self {
-      input: String::new(),
+      input: Input::default(),
       primary: AgentView::new(AgentState::Running),
       agents: BTreeMap::new(),
       active: None,
@@ -171,6 +175,7 @@ impl Default for ChatState {
       splash_style: 0,
       custom_header: None,
       splash_cache: RefCell::new(None),
+      reach: Cell::new(0),
     }
   }
 }
@@ -178,6 +183,15 @@ impl Default for ChatState {
 impl ChatState {
   fn busy(&self) -> bool {
     self.started.is_some()
+  }
+
+  // scrolling stops where the transcript does, so coming back down takes as long as going up did
+  fn scroll_back(&mut self, lines: u16) {
+    self.scroll = self.scroll.saturating_add(lines).min(self.reach.get());
+  }
+
+  fn scroll_forward(&mut self, lines: u16) {
+    self.scroll = self.scroll.saturating_sub(lines);
   }
 
   fn select_header(&mut self, preference: &str, catalog: &HeaderCatalog) {
@@ -374,7 +388,20 @@ async fn run_chat_inner(
   let mut session = Some(initial_session);
   let session_id = session.as_ref().unwrap().id;
   let (splash_style, custom_header) = selected_header(&config.ui.header, &command_data.headers);
+  // what was asked before in this session, so the walk back through prompts survives a resume
+  let history = session
+    .as_ref()
+    .map(|session| {
+      session
+        .nodes
+        .iter()
+        .filter(|node| node.message.role == ainz::protocol::Role::User)
+        .filter_map(|node| node.message.content.clone())
+        .collect()
+    })
+    .unwrap_or_default();
   let mut state = ChatState {
+    input: Input::with_history(history),
     primary: AgentView {
       entries: session_entries(session.as_ref().unwrap()),
       usage: session.as_ref().unwrap().usage.clone(),
@@ -455,8 +482,16 @@ async fn run_chat_inner(
       Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => key,
       Wake::Input(Some(Ok(InputEvent::Paste(text)))) => {
         if state.active.is_none() && state.approval.is_none() {
-          state.input.push_str(&super::flatten_paste(&text));
+          state.input.insert_str(&super::flatten_paste(&text));
           state.command_selected = 0;
+        }
+        continue;
+      }
+      Wake::Input(Some(Ok(InputEvent::Mouse(mouse)))) => {
+        match mouse.kind {
+          MouseEventKind::ScrollUp => state.scroll_back(3),
+          MouseEventKind::ScrollDown => state.scroll_forward(3),
+          _ => {}
         }
         continue;
       }
@@ -486,6 +521,17 @@ async fn run_chat_inner(
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
       match key.code {
+        // the line editing every other prompt on this machine already answers to
+        KeyCode::Char('a') => state.input.home(),
+        KeyCode::Char('e') => state.input.end(),
+        KeyCode::Char('u') => state.input.kill_to_start(),
+        KeyCode::Char('k') => state.input.kill_to_end(),
+        KeyCode::Char('w') | KeyCode::Backspace => {
+          state.input.delete_word();
+          state.command_selected = 0;
+        }
+        KeyCode::Left => state.input.word_left(),
+        KeyCode::Right => state.input.word_right(),
         KeyCode::Char('1') => state.select_slot(0),
         KeyCode::Char(digit @ '2'..='9') => {
           state.select_slot(digit.to_digit(10).unwrap_or(1) as usize - 1);
@@ -530,7 +576,7 @@ async fn run_chat_inner(
       }
       continue;
     }
-    let suggestion_count = command_matches(&commands, &state.input).len();
+    let suggestion_count = command_matches(&commands, state.input.as_str()).len();
     if suggestion_count > 0 {
       match key.code {
         KeyCode::Up => {
@@ -554,31 +600,71 @@ async fn run_chat_inner(
           state.command_selected = 0;
           continue;
         }
-        KeyCode::Enter if !command_is_exact(&state.input, &commands) => {
+        KeyCode::Enter if !command_is_exact(state.input.as_str(), &commands) => {
           accept_command(&mut state, &commands);
           continue;
         }
         _ => {}
       }
     }
+    // control keys are answered above; alt is the other word-wise modifier
+    let word = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
       KeyCode::Char(ch) if state.active.is_none() => {
-        state.input.push(ch);
+        state.input.insert(ch);
+        state.command_selected = 0;
+      }
+      KeyCode::Backspace if word => {
+        state.input.delete_word();
         state.command_selected = 0;
       }
       KeyCode::Backspace => {
-        state.input.pop();
+        state.input.backspace();
         state.command_selected = 0;
       }
-      KeyCode::PageUp => state.scroll = state.scroll.saturating_add(8),
-      KeyCode::PageDown => state.scroll = state.scroll.saturating_sub(8),
+      KeyCode::Delete => {
+        state.input.delete();
+        state.command_selected = 0;
+      }
+      KeyCode::Left if word => state.input.word_left(),
+      KeyCode::Left => state.input.left(),
+      KeyCode::Right if word => state.input.word_right(),
+      KeyCode::Right => state.input.right(),
+      KeyCode::Home => state.input.home(),
+      KeyCode::End => state.input.end(),
+      // the transcript is on the alternate screen, so it needs its own scrollback
+      KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => state.scroll_back(1),
+      KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => state.scroll_forward(1),
+      KeyCode::Up => {
+        state.input.previous();
+        state.command_selected = 0;
+      }
+      KeyCode::Down => {
+        state.input.next();
+        state.command_selected = 0;
+      }
+      KeyCode::PageUp => state.scroll_back(8),
+      KeyCode::PageDown => state.scroll_forward(8),
       KeyCode::Esc if state.busy() => {
         if let Some(controller) = &controller {
           controller.cancel();
         }
       }
-      KeyCode::Enter if state.active.is_none() && !state.input.trim().is_empty() => {
-        let input = std::mem::take(&mut state.input);
+      // a newline where the terminal can say so, and a trailing backslash where it cannot
+      KeyCode::Enter
+        if state.active.is_none()
+          && (key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            || state.input.as_str().ends_with('\\')) =>
+      {
+        if state.input.as_str().ends_with('\\') {
+          state.input.backspace();
+        }
+        state.input.insert('\n');
+      }
+      KeyCode::Enter if state.active.is_none() && !state.input.as_str().trim().is_empty() => {
+        let input = state.input.submit();
         if state.busy() {
           if input.trim() == "/cancel" {
             if let Some(controller) = &controller {
@@ -924,8 +1010,14 @@ fn command(
       state.primary.entries.push(Entry::new(
         EntryKind::System,
         format!(
-          "{listing}\n\nctrl+1…9 select agent  ctrl+= / ctrl+- cycle  ctrl+l roster  \
-           ctrl+c cancel  page up/down scroll"
+          "{listing}\n\n\
+           up/down    earlier prompts        shift+enter  newline\n\
+           ctrl+a/e   line start/end         ctrl+w       delete word\n\
+           ctrl+u/k   clear before/after     alt+←/→      move a word\n\
+           wheel      scroll the transcript  page up/down  scroll a screen\n\
+           shift+↑/↓  scroll a line          esc          cancel a run\n\
+           ctrl+1…9   select agent           ctrl+= / ctrl+-  cycle agents\n\
+           ctrl+l     roster                 ctrl+c       quit"
         ),
       ));
       Ok(CommandResult::Handled)
@@ -1113,9 +1205,9 @@ fn command_is_exact(input: &str, commands: &[SlashCommand]) -> bool {
 }
 
 fn accept_command(state: &mut ChatState, commands: &[SlashCommand]) {
-  let matches = command_matches(commands, &state.input);
+  let matches = command_matches(commands, state.input.as_str());
   if let Some(command) = matches.get(state.command_selected.min(matches.len().saturating_sub(1))) {
-    state.input = command.completion();
+    state.input.set(command.completion());
   }
   state.command_selected = 0;
 }
@@ -1242,11 +1334,13 @@ fn render(
   workspace: &std::path::Path,
   commands: &[SlashCommand],
 ) {
+  // the prompt grows with what is written in it, up to a few lines
+  let prompt_rows = (state.input.as_str().matches('\n').count() + 1).clamp(1, 6) as u16;
   let [header, body, status, input] = Layout::vertical([
     Constraint::Length(1),
     Constraint::Min(8),
     Constraint::Length(1),
-    Constraint::Length(1),
+    Constraint::Length(prompt_rows),
   ])
   .areas(frame.area());
   render_title(frame, header, state, config, session_id, workspace);
@@ -1277,7 +1371,7 @@ fn render_command_palette(
   state: &ChatState,
   commands: &[SlashCommand],
 ) {
-  let matches = command_matches(commands, &state.input);
+  let matches = command_matches(commands, state.input.as_str());
   if matches.is_empty() {
     return;
   }
@@ -1386,6 +1480,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
       .border_style(Style::default().fg(BLUE)),
   );
   let bottom = rendered_lines.saturating_sub(area.height as usize);
+  state.reach.set(bottom.min(u16::MAX as usize) as u16);
   let scroll = bottom
     .saturating_sub(state.scroll as usize)
     .min(u16::MAX as usize) as u16;
@@ -1738,27 +1833,46 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     return;
   }
   let prefix = if state.busy() { "↳ " } else { "> " };
-  // long input keeps its tail in view, where the cursor is
-  let capacity = area.width.saturating_sub(3) as usize;
-  let skipped = state.input.chars().count().saturating_sub(capacity);
-  let shown: String = state.input.chars().skip(skipped).collect();
-  let width = shown.chars().count();
-  frame.render_widget(
-    Paragraph::new(Line::from(vec![
-      Span::styled(
-        prefix,
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-      ),
-      Span::styled(shown, Style::default().fg(INK)),
-    ])),
-    area,
-  );
+  let capacity = area.width.saturating_sub(3).max(1) as usize;
+  let text = state.input.as_str();
+  let before = &text[..state.input.cursor()];
+  let row = before.matches('\n').count();
+  let column = before
+    .rsplit('\n')
+    .next()
+    .unwrap_or_default()
+    .chars()
+    .count();
+  // a line longer than the box scrolls to keep the cursor in view
+  let skipped = column.saturating_sub(capacity);
+  let lines: Vec<Line> = text
+    .split('\n')
+    .enumerate()
+    .map(|(index, line)| {
+      let shown: String = line
+        .chars()
+        .skip(if index == row { skipped } else { 0 })
+        .collect();
+      Line::from(vec![
+        Span::styled(
+          if index == 0 { prefix } else { "  " },
+          Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(shown, Style::default().fg(INK)),
+      ])
+    })
+    .collect();
+  frame.render_widget(Paragraph::new(lines), area);
   let x = area
     .x
     .saturating_add(2)
-    .saturating_add(width.min(u16::MAX as usize) as u16)
+    .saturating_add((column - skipped).min(u16::MAX as usize) as u16)
     .min(area.right().saturating_sub(1));
-  frame.set_cursor_position((x, area.y));
+  let y = area
+    .y
+    .saturating_add(row.min(u16::MAX as usize) as u16)
+    .min(area.bottom().saturating_sub(1));
+  frame.set_cursor_position((x, y));
 }
 
 // the arguments are the decision, so they are shown, clipped to what fits

@@ -7,9 +7,9 @@ use ainz::{Config, HttpProvider, ProcessOutput, ProviderConfig};
 use anyhow::{Context, Result};
 use crossterm::{
   event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event as InputEvent, KeyCode, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as InputEvent, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
   },
   execute,
   terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -27,6 +27,7 @@ use crate::command::{ProviderPreset, preset_profile};
 
 mod chat;
 mod import;
+mod input;
 mod masthead;
 mod settings;
 
@@ -263,7 +264,12 @@ pub(super) fn enter_terminal() -> Result<Term> {
   });
   enable_raw_mode()?;
   let mut stdout = io::stdout();
-  if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
+  if let Err(error) = execute!(
+    stdout,
+    EnterAlternateScreen,
+    EnableBracketedPaste,
+    EnableMouseCapture
+  ) {
     restore_terminal();
     return Err(error.into());
   }
@@ -297,6 +303,7 @@ fn restore_terminal() {
   drop(execute!(stdout, PopKeyboardEnhancementFlags));
   drop(execute!(
     stdout,
+    DisableMouseCapture,
     DisableBracketedPaste,
     LeaveAlternateScreen
   ));
