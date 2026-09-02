@@ -1,16 +1,11 @@
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use agentx::{
-  Config, EventSink, Session, SessionStore,
-  protocol::{Image, ToolCall},
-  run_control,
-  tool::Risk,
-};
+use agentx::{Config, EventSink, Session, SessionStore, deny_all, protocol::Image, run_control};
 
 use super::app::make_agent_with;
 
@@ -30,8 +25,7 @@ pub async fn run(workspace: PathBuf, config: Config, no_save: bool) -> Result<()
       json!({"jsonrpc": "2.0", "method": "event", "params": event})
     );
   });
-  let approver = Arc::new(|_: &ToolCall, _: Risk| false) as agentx::agent::Approver;
-  let (agent, options) = make_agent_with(&workspace, &config, events, approver).await?;
+  let (agent, options) = make_agent_with(&workspace, &config, events, deny_all()).await?;
   let store = SessionStore::default_store()?;
   let mut session = Session::new(workspace);
   let mut lines = BufReader::new(tokio::io::stdin()).lines();

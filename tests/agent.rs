@@ -1,7 +1,4 @@
-use std::{
-  collections::VecDeque,
-  sync::{Arc, Mutex},
-};
+use std::{collections::VecDeque, sync::Mutex};
 
 use agentx::{
   Agent, EventSink, PermissionMode, RunOptions, Session,
@@ -76,7 +73,7 @@ async fn agent_runs_tools_until_a_final_message() {
     tools,
     temp.path().into(),
     EventSink::default(),
-    Arc::new(|_, _| false),
+    agentx::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
 
@@ -136,7 +133,7 @@ async fn steering_is_queued_at_a_safe_conversation_boundary() {
     ToolSet::default(),
     temp.path().into(),
     EventSink::default(),
-    Arc::new(|_, _| false),
+    agentx::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
   let (controller, mut inbox) = run_control();
@@ -170,7 +167,7 @@ async fn cancellation_interrupts_an_in_flight_provider_request() {
     ToolSet::default(),
     temp.path().into(),
     EventSink::default(),
-    Arc::new(|_, _| false),
+    agentx::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
   let (controller, mut inbox) = run_control();
@@ -210,7 +207,7 @@ async fn agent_compacts_before_the_context_limit() {
     ToolSet::default(),
     temp.path().into(),
     events,
-    Arc::new(|_, _| false),
+    agentx::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
   for index in 0..4 {

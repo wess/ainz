@@ -4,11 +4,15 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::{fs, process::Command, time::timeout};
+use tokio::{
+  fs,
+  io::{AsyncBufReadExt, BufReader},
+  process::Command,
+  time::timeout,
+};
 
 use super::{Risk, Tool, ToolContext, truncate};
-use crate::protocol::ToolSpec;
-use crate::workspace;
+use crate::{process::GroupGuard, protocol::ToolSpec, workspace};
 
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
   ["read", "list", "search", "write", "edit", "shell"]
@@ -128,20 +132,36 @@ fn dot() -> String {
   ".".into()
 }
 
+// streams lines so a large file costs only the requested window, not the whole file
 async fn read(context: &ToolContext, value: Value) -> Result<String> {
   let args: PathArgs = serde_json::from_value(value)?;
   let path = workspace::existing(&context.workspace, &args.path).await?;
-  let text = fs::read_to_string(&path)
+  let file = fs::File::open(&path)
     .await
     .with_context(|| format!("read {}", path.display()))?;
+  let mut lines = BufReader::new(file).lines();
   let offset = args.offset.unwrap_or(1).saturating_sub(1);
   let limit = args.limit.unwrap_or(2_000);
-  let output = text
-    .lines()
-    .skip(offset)
-    .take(limit)
-    .collect::<Vec<_>>()
-    .join("\n");
+  let mut output = String::new();
+  let mut index = 0;
+  let mut taken = 0;
+  while let Some(line) = lines
+    .next_line()
+    .await
+    .with_context(|| format!("read {}", path.display()))?
+  {
+    if index >= offset {
+      if taken == limit || output.len() > context.max_output_bytes {
+        break;
+      }
+      if taken > 0 {
+        output.push('\n');
+      }
+      output.push_str(&line);
+      taken += 1;
+    }
+    index += 1;
+  }
   Ok(truncate(output, context.max_output_bytes))
 }
 
@@ -181,20 +201,17 @@ async fn search(context: &ToolContext, value: Value) -> Result<String> {
   let args: SearchArgs = serde_json::from_value(value)?;
   let path = workspace::existing(&context.workspace, &args.path).await?;
   let max_results = args.max_results.to_string();
+  // NB: the query goes through -e and the path after -- so neither can be read as an rg flag
   let output = Command::new("rg")
-    .args([
-      "--line-number",
-      "--color",
-      "never",
-      "--max-count",
-      &max_results,
-    ])
-    .arg(&args.query)
+    .args(["--line-number", "--color", "never", "--max-count"])
+    .arg(&max_results)
+    .args(["-e", &args.query, "--"])
     .arg(path)
     .current_dir(&context.workspace)
+    .stdin(Stdio::null())
     .output()
     .await
-    .context("run rg")?;
+    .context("run rg (ripgrep must be installed)")?;
   if !output.status.success() && output.status.code() != Some(1) {
     bail!("rg failed: {}", String::from_utf8_lossy(&output.stderr));
   }
@@ -216,7 +233,9 @@ async fn write(context: &ToolContext, value: Value) -> Result<String> {
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent).await?;
   }
-  fs::write(&path, args.content.as_bytes()).await?;
+  fs::write(&path, args.content.as_bytes())
+    .await
+    .with_context(|| format!("write {}", args.path))?;
   Ok(format!(
     "wrote {} bytes to {}",
     args.content.len(),
@@ -233,13 +252,20 @@ struct EditArgs {
 
 async fn edit(context: &ToolContext, value: Value) -> Result<String> {
   let args: EditArgs = serde_json::from_value(value)?;
+  if args.old.is_empty() {
+    bail!("old text must not be empty");
+  }
   let path = workspace::existing(&context.workspace, &args.path).await?;
-  let text = fs::read_to_string(&path).await?;
+  let text = fs::read_to_string(&path)
+    .await
+    .with_context(|| format!("read {}", args.path))?;
   let count = text.matches(&args.old).count();
   if count != 1 {
     bail!("expected one match in {}, found {count}", args.path);
   }
-  fs::write(&path, text.replacen(&args.old, &args.new, 1)).await?;
+  fs::write(&path, text.replacen(&args.old, &args.new, 1))
+    .await
+    .with_context(|| format!("write {}", args.path))?;
   Ok(format!("edited {}", args.path))
 }
 
@@ -257,21 +283,34 @@ fn default_timeout() -> u64 {
 async fn shell(context: &ToolContext, value: Value) -> Result<String> {
   let args: ShellArgs = serde_json::from_value(value)?;
   let child = Command::new("sh")
-    .args(["-lc", &args.command])
+    .args(["-c", &args.command])
     .current_dir(&context.workspace)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true)
-    .spawn()?;
-  let output = timeout(
+    .process_group(0)
+    .spawn()
+    .context("start shell")?;
+  let guard = GroupGuard::new(child.id());
+  let Ok(output) = timeout(
     Duration::from_millis(args.timeout_ms),
     child.wait_with_output(),
   )
   .await
-  .context("command timed out")??;
+  else {
+    bail!("command timed out after {} ms", args.timeout_ms);
+  };
+  let output = output.context("wait for shell")?;
+  guard.disarm();
   let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-  text.push_str(&String::from_utf8_lossy(&output.stderr));
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  if !stderr.is_empty() {
+    if !text.is_empty() && !text.ends_with('\n') {
+      text.push('\n');
+    }
+    text.push_str(&stderr);
+  }
   text.push_str(&format!("\n[exit {}]", output.status.code().unwrap_or(-1)));
   Ok(truncate(text, context.max_output_bytes))
 }

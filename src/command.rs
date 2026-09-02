@@ -7,7 +7,6 @@ use uuid::Uuid;
 use agentx::{
   Config, HttpProvider, McpProfile, McpServerConfig, McpTransport, PluginCatalog, ProcessOutput,
   PromptCatalog, ProviderConfig, ProviderKind, Session, SessionStore, SkillCatalog,
-  session::workspace_matches,
 };
 
 #[derive(Subcommand)]
@@ -135,19 +134,23 @@ pub enum ModelCommand {
 
 pub async fn load_session(workspace: &Path, id: Option<Uuid>) -> Result<Session> {
   let store = SessionStore::default_store()?;
-  if let Some(id) = id {
-    let session = store.load(id).await?;
-    if !workspace_matches(&session, workspace) {
-      anyhow::bail!("session {id} belongs to a different workspace");
+  let id = match id {
+    Some(id) => id,
+    None => {
+      store
+        .list()
+        .await?
+        .into_iter()
+        .find(|session| session.workspace == workspace)
+        .context("no saved session for this workspace")?
+        .id
     }
-    return Ok(session);
+  };
+  let session = store.load(id).await?;
+  if session.workspace != workspace {
+    anyhow::bail!("session {id} belongs to a different workspace");
   }
-  store
-    .list()
-    .await?
-    .into_iter()
-    .find(|session| workspace_matches(session, workspace))
-    .context("no saved session for this workspace")
+  Ok(session)
 }
 
 pub async fn list_sessions(workspace: &Path, json: bool) -> Result<()> {
@@ -155,7 +158,7 @@ pub async fn list_sessions(workspace: &Path, json: bool) -> Result<()> {
     .list()
     .await?
     .into_iter()
-    .filter(|session| workspace_matches(session, workspace))
+    .filter(|session| session.workspace == workspace)
     .collect();
   if json {
     println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -164,7 +167,7 @@ pub async fn list_sessions(workspace: &Path, json: bool) -> Result<()> {
       println!(
         "{}  {} nodes  {}{}",
         session.id,
-        session.nodes.len(),
+        session.nodes,
         session.updated_at,
         session
           .parent_id
@@ -231,7 +234,7 @@ pub async fn usage(workspace: &Path, json: bool) -> Result<()> {
     .list()
     .await?
     .into_iter()
-    .filter(|session| workspace_matches(session, workspace))
+    .filter(|session| session.workspace == workspace)
     .collect();
   let input_tokens: u64 = sessions
     .iter()
@@ -266,6 +269,9 @@ pub async fn mcp(command: Option<McpCommand>, json: bool) -> Result<()> {
       required,
       command,
     }) => {
+      if !agentx::mcp::valid_name(&name) {
+        anyhow::bail!("MCP server name {name:?} may only use letters, digits, '.', '_' and '-'");
+      }
       if profile.servers.contains_key(&name) {
         anyhow::bail!("MCP server {name} is already configured");
       }
@@ -299,7 +305,7 @@ pub async fn mcp(command: Option<McpCommand>, json: bool) -> Result<()> {
     None => {}
   }
   if json {
-    println!("{}", serde_json::to_string_pretty(&profile)?);
+    println!("{}", serde_json::to_string_pretty(&redacted(profile))?);
   } else {
     println!("profile  {}", McpProfile::path()?.display());
     for (name, server) in profile.servers {
@@ -322,11 +328,28 @@ pub async fn mcp(command: Option<McpCommand>, json: bool) -> Result<()> {
   Ok(())
 }
 
+// header and env values are the only places a secret can sit in the profile
+fn redacted(mut profile: McpProfile) -> McpProfile {
+  for server in profile.servers.values_mut() {
+    for value in server.headers.values_mut().chain(server.env.values_mut()) {
+      *value = "<redacted>".into();
+    }
+  }
+  profile
+}
+
 pub async fn plugins(workspace: &Path, command: PluginCommand) -> Result<()> {
   let mut catalog = PluginCatalog::discover(workspace).await?;
   match command {
     PluginCommand::List { json } => print_plugins(&catalog, json)?,
     PluginCommand::Approve { name } => {
+      let plugin = catalog
+        .plugins
+        .iter()
+        .find(|plugin| plugin.manifest.plugin.name == name)
+        .with_context(|| format!("plugin {name} was not found"))?;
+      // what is being trusted goes on the record before the grant is written
+      println!("{}", describe_plugin(plugin));
       catalog.approve(&name).await?;
       println!("approved {name}; changing pinned plugin content revokes this approval");
     }
@@ -449,7 +472,9 @@ pub async fn models(config: &mut Config, command: ModelCommand) -> Result<()> {
           config.api_key_for(&profile)?,
         )?;
         let models = provider.models().await?;
-        config.providers.get_mut(&name).unwrap().models = models.clone();
+        if let Some(profile) = config.providers.get_mut(&name) {
+          profile.models = models.clone();
+        }
         config.save().await?;
         models
       } else {
@@ -557,21 +582,41 @@ fn print_plugins(catalog: &PluginCatalog, json: bool) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&rows)?);
   } else {
     for plugin in &catalog.plugins {
-      println!(
-        "{} {}  {}  {:?}  {}",
-        plugin.manifest.plugin.name,
-        plugin.manifest.plugin.version,
-        if plugin.approved {
-          "approved"
-        } else {
-          "pending"
-        },
-        plugin.format,
-        plugin.path.display()
-      );
+      println!("{}", describe_plugin(plugin));
+    }
+    for issue in &catalog.issues {
+      println!("invalid  {issue}");
     }
   }
   Ok(())
+}
+
+fn describe_plugin(plugin: &agentx::plugin::DiscoveredPlugin) -> String {
+  let manifest = &plugin.manifest;
+  let artifact = plugin
+    .artifact()
+    .map(|path| path.display().to_string())
+    .unwrap_or_else(|| "skills and MCP servers".into());
+  let capabilities = manifest
+    .capabilities
+    .iter()
+    .map(|capability| format!("{capability:?}").to_lowercase())
+    .collect::<Vec<_>>()
+    .join(",");
+  format!(
+    "{} {}  {}  {:?} {:?}  {}  [{capabilities}]  {}",
+    manifest.plugin.name,
+    manifest.plugin.version,
+    if plugin.approved {
+      "approved"
+    } else {
+      "pending"
+    },
+    plugin.format,
+    manifest.runtime.kind,
+    artifact,
+    plugin.root().display()
+  )
 }
 
 pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {

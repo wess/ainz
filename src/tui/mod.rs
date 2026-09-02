@@ -1,16 +1,23 @@
-use std::io::{self, Stdout};
+use std::{
+  io::{self, Stdout},
+  sync::Once,
+};
 
 use agentx::{Config, HttpProvider, ProcessOutput, ProviderConfig};
 use anyhow::{Context, Result};
 use crossterm::{
-  event::{self, Event as InputEvent, KeyCode, KeyEventKind},
+  event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event as InputEvent, KeyCode, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+  },
   execute,
   terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
   Frame, Terminal,
   backend::CrosstermBackend,
-  layout::{Alignment, Constraint, Direction, Layout, Rect},
+  layout::{Alignment, Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
   widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -19,6 +26,7 @@ use ratatui::{
 use crate::command::{ProviderPreset, preset_profile};
 
 mod chat;
+mod masthead;
 
 pub(crate) use chat::run_chat;
 
@@ -28,6 +36,11 @@ const INK: Color = Color::Rgb(218, 222, 226);
 const MUTED: Color = Color::Rgb(128, 138, 148);
 const ACCENT: Color = Color::Rgb(83, 196, 190);
 const ACTIVE: Color = Color::Rgb(145, 210, 138);
+const BLUE: Color = Color::Rgb(24, 66, 128);
+const CYAN: Color = Color::Rgb(72, 205, 214);
+const YELLOW: Color = Color::Rgb(230, 199, 92);
+const RED: Color = Color::Rgb(224, 103, 103);
+const MAGENTA: Color = Color::Rgb(198, 118, 205);
 
 #[derive(Clone)]
 enum Choice {
@@ -57,7 +70,10 @@ impl Choice {
       ),
       Self::Preset(ProviderPreset::Codex) => (
         "Headless coding agent",
-        "Runs the installed CLI noninteractively. Read-only by default; workspace writes follow automatic permission mode.",
+        concat!(
+          "Runs the installed CLI noninteractively. Read-only by default; ",
+          "workspace writes follow automatic permission mode."
+        ),
       ),
       Self::Preset(ProviderPreset::ClaudeCode) => (
         "Headless coding agent",
@@ -113,29 +129,57 @@ pub async fn configure(config: &mut Config) -> Result<()> {
   }
 }
 
+static PANIC_HOOK: Once = Once::new();
+
 pub(super) fn enter_terminal() -> Result<Term> {
+  // a panic must not leave the shell in raw mode on the alternate screen
+  PANIC_HOOK.call_once(|| {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+      restore_terminal();
+      previous(info);
+    }));
+  });
   enable_raw_mode()?;
   let mut stdout = io::stdout();
-  if let Err(error) = execute!(stdout, EnterAlternateScreen) {
-    drop(disable_raw_mode());
+  if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
+    restore_terminal();
     return Err(error.into());
+  }
+  // ctrl+digit and ctrl+= only exist as distinct keys under the kitty keyboard protocol
+  if matches!(
+    crossterm::terminal::supports_keyboard_enhancement(),
+    Ok(true)
+  ) {
+    drop(execute!(
+      stdout,
+      PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    ));
   }
   match Terminal::new(CrosstermBackend::new(stdout)) {
     Ok(terminal) => Ok(terminal),
     Err(error) => {
-      drop(disable_raw_mode());
-      let mut stdout = io::stdout();
-      drop(execute!(stdout, LeaveAlternateScreen));
+      restore_terminal();
       Err(error.into())
     }
   }
 }
 
 pub(super) fn leave_terminal(terminal: &mut Term) -> Result<()> {
-  disable_raw_mode()?;
-  execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+  restore_terminal();
   terminal.show_cursor()?;
   Ok(())
+}
+
+fn restore_terminal() {
+  let mut stdout = io::stdout();
+  drop(execute!(stdout, PopKeyboardEnhancementFlags));
+  drop(execute!(
+    stdout,
+    DisableBracketedPaste,
+    LeaveAlternateScreen
+  ));
+  drop(disable_raw_mode());
 }
 
 async fn configure_inner(
@@ -289,6 +333,9 @@ fn select_model(
     let InputEvent::Key(key) = event::read()? else {
       continue;
     };
+    if key.kind == KeyEventKind::Release {
+      continue;
+    }
     match key.code {
       KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
       KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(models.len() - 1),
@@ -335,6 +382,7 @@ fn edit_fields(
       continue;
     }
     match key.code {
+      KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(None),
       KeyCode::Char(ch) => fields[selected].value.push(ch),
       KeyCode::Backspace => {
         fields[selected].value.pop();
@@ -536,11 +584,11 @@ fn render_footer(frame: &mut Frame, area: Rect, text: &str) {
   );
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
   let [area] = Layout::horizontal([Constraint::Length(width)])
     .flex(ratatui::layout::Flex::Center)
     .areas(area);
-  let [area] = Layout::new(Direction::Vertical, [Constraint::Length(height)])
+  let [area] = Layout::vertical([Constraint::Length(height)])
     .flex(ratatui::layout::Flex::Center)
     .areas(area);
   area

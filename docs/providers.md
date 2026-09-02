@@ -1,8 +1,9 @@
 # Providers
 
-AgentX keeps named provider profiles in `~/.config/agentx/config.toml`. The active provider
-and model remain global CLI overrides through `--provider`, `--model`, `AGENTX_PROVIDER`, and
-`AGENTX_MODEL`.
+AgentX keeps named provider profiles in `config.toml` under the platform config directory
+(`~/Library/Application Support/agentx` on macOS, `~/.config/agentx` on Linux; `AGENTX_CONFIG`
+overrides the path). The active provider and model remain global CLI overrides through
+`--provider`, `--model`, `AGENTX_PROVIDER`, and `AGENTX_MODEL`.
 
 With no configured model, `agentx` opens an interactive setup flow before starting the first
 session. Enter `/config` later to add a provider or switch the active provider and model without
@@ -40,17 +41,20 @@ agentx providers add gateway \
   --known-model example-model
 ```
 
-HTTP providers support streaming, AgentX tools, usage tracking, and image inputs.
+HTTP providers support streaming, AgentX tools, usage tracking, and image inputs. Requests have
+a 15 second connect timeout and no read timeout, because a local model can take minutes before
+its first token; cancel a stuck run with `Ctrl+C`. When no tools are offered, the request omits
+`tools` and `tool_choice`, which some compatible servers reject when empty.
 
 ## Custom process providers
 
 Process providers receive the full transcript on stdin. AgentX invokes the executable
 directly, never through a shell. Arguments support four placeholders:
 
-- `{model}` — active model
-- `{workspace}` — canonical workspace path
-- `{sandbox}` — `read-only` or `workspace-write`
-- `{permission}` — `plan` or `acceptEdits`
+- `{model}`: active model
+- `{workspace}`: canonical workspace path
+- `{sandbox}`: `read-only` or `workspace-write`
+- `{permission}`: `plan` or `acceptEdits`
 
 ```sh
 agentx providers add runner \

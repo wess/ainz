@@ -164,3 +164,46 @@ async fn read_request(socket: &mut TcpStream) -> Vec<u8> {
   }
   request
 }
+
+#[tokio::test]
+async fn provider_reassembles_multibyte_text_split_across_chunks() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let request = read_request(&mut socket).await;
+    // the compaction request offers no tools, so neither key may appear
+    assert!(!String::from_utf8_lossy(&request).contains("\"tools\""));
+    let body =
+      "data: {\"choices\":[{\"delta\":{\"content\":\"caf\u{e9} \u{1f600}\"}}]}\n\ndata: [DONE]\n\n";
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    socket.write_all(head.as_bytes()).await.unwrap();
+    // split inside the four-byte emoji and inside the two-byte e-acute
+    let bytes = body.as_bytes();
+    let cuts = [
+      bytes.iter().position(|b| *b == 0xC3).unwrap() + 1,
+      bytes.iter().position(|b| *b == 0xF0).unwrap() + 2,
+    ];
+    socket.write_all(&bytes[..cuts[0]]).await.unwrap();
+    socket.flush().await.unwrap();
+    socket.write_all(&bytes[cuts[0]..cuts[1]]).await.unwrap();
+    socket.flush().await.unwrap();
+    socket.write_all(&bytes[cuts[1]..]).await.unwrap();
+  });
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None).unwrap();
+
+  let reply = provider
+    .complete(
+      &[Message::text(Role::User, "hi")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(
+    reply.message.content.as_deref(),
+    Some("caf\u{e9} \u{1f600}")
+  );
+  server.await.unwrap();
+}

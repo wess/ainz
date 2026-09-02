@@ -8,10 +8,12 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use agentx::{
-  Agent, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile, PermissionMode,
-  PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig, ProviderKind,
-  RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
-  SubagentResult, instruction,
+  Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
+  PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
+  ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
+  SubagentResult,
+  agent::Approval,
+  deny_all, instruction,
   protocol::{Image, ToolCall},
   run_control, subagent_tool,
   tool::{Risk, ToolSet, builtins},
@@ -25,11 +27,7 @@ async fn make_agent(
   json: bool,
 ) -> Result<(Agent<RuntimeProvider>, RunOptions)> {
   let events = output_events(json);
-  let approver: agentx::agent::Approver = if json {
-    Arc::new(|_: &ToolCall, _: Risk| false)
-  } else {
-    Arc::new(approve)
-  };
+  let approver = if json { deny_all() } else { Arc::new(approve) };
   make_agent_with(workspace, config, events, approver).await
 }
 
@@ -37,7 +35,7 @@ pub(crate) async fn make_agent_with(
   workspace: &std::path::Path,
   config: &Config,
   events: EventSink,
-  approver: agentx::agent::Approver,
+  approver: Approver,
 ) -> Result<(Agent<RuntimeProvider>, RunOptions)> {
   let profile = config.active_provider()?;
   let provider = match profile.kind {
@@ -77,11 +75,13 @@ pub(crate) async fn make_agent_with(
   if !mcp.is_empty() {
     mcp.ready().await?;
   }
-  tools.extend(catalog.approved_tools()?)?;
+  tools.extend(catalog.approved_tools().await?)?;
   let mut instructions = instruction::load(workspace).await?;
-  for external in mcp.instructions().await? {
-    instructions.push_str("\n\nInstructions from an MCP server:\n");
-    instructions.push_str(external.trim());
+  for (name, text) in mcp.instructions().await? {
+    instructions.push_str(&format!(
+      "\n\nInstructions from MCP server {name}:\n{}",
+      text.trim()
+    ));
   }
   if !mcp.is_empty() {
     tools.insert(mcp.tool())?;
@@ -565,9 +565,18 @@ fn output_events(json: bool) -> EventSink {
   })
 }
 
-fn approve(call: &ToolCall, risk: Risk) -> bool {
-  eprint!("\nallow {} ({risk:?})? [y/N] ", call.name);
-  drop(std::io::stderr().flush());
-  let mut answer = String::new();
-  std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
+// the prompt reads the terminal directly on a blocking thread so the runtime keeps streaming
+fn approve(call: &ToolCall, risk: Risk) -> Approval {
+  let name = call.name.clone();
+  let arguments = call.arguments.to_string();
+  Box::pin(async move {
+    tokio::task::spawn_blocking(move || {
+      eprint!("\nallow {name} ({risk:?}) {arguments}? [y/N] ");
+      drop(std::io::stderr().flush());
+      let mut answer = String::new();
+      std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
+    })
+    .await
+    .unwrap_or(false)
+  })
 }

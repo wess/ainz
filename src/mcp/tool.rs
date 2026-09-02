@@ -24,7 +24,7 @@ impl McpTool {
     let query = query.to_lowercase();
     let mut matches = Vec::new();
     for (server, tools) in self.hub.searchable_tools().await? {
-      for tool in tools {
+      for tool in tools.iter() {
         if query.is_empty()
           || tool.name.to_lowercase().contains(&query)
           || tool.description.to_lowercase().contains(&query)
@@ -56,20 +56,14 @@ impl Tool for McpTool {
     }
   }
 
+  // the server's own readOnlyHint/destructiveHint annotations decide; nothing is trusted by name
   fn risk(&self, arguments: &Value) -> Risk {
     if arguments.get("command").and_then(Value::as_str) != Some("call") {
       return Risk::Read;
     }
-    match (
-      arguments.get("server").and_then(Value::as_str),
-      arguments.get("name").and_then(Value::as_str),
-    ) {
-      (
-        Some("synapse"),
-        Some("recall" | "vaultstatus" | "agents" | "channels" | "whoami" | "inbox" | "workers"),
-      ) => Risk::Read,
-      (Some("synapse"), Some("remember")) => Risk::Write,
-      _ => Risk::Execute,
+    match target(arguments) {
+      Ok((server, name)) => self.hub.cached_risk(server, name),
+      Err(_) => Risk::Execute,
     }
   }
 
@@ -86,11 +80,9 @@ impl Tool for McpTool {
       }
       "schema" => {
         let (server, name) = target(&arguments)?;
-        let tool = self
-          .hub
-          .tools(server)
-          .await?
-          .into_iter()
+        let tools = self.hub.tools(server).await?;
+        let tool = tools
+          .iter()
           .find(|tool| tool.name == name)
           .with_context(|| format!("tool {server}/{name} was not found"))?;
         serde_json::to_string_pretty(&json!({

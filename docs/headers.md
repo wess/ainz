@@ -1,8 +1,10 @@
 # Custom headers
 
-AgentX can render user-made ASCII and ANSI artwork on an empty transcript. Put artwork in either:
+AgentX can render user-made ASCII and ANSI artwork on an empty transcript. Paint one in the
+[masthead studio](https://wess.io/agentx/masthead/) or bring your own. Put files in either:
 
-- `~/.config/agentx/headers/` for every workspace
+- `headers/` under the config directory (`~/Library/Application Support/agentx` on macOS,
+  `~/.config/agentx` on Linux) for every workspace
 - `.agentx/headers/` in a project for that project and its descendants
 
 Files must use a `.ans`, `.ansi`, or `.txt` extension. The filename becomes the header name, so
@@ -23,7 +25,16 @@ inside AgentX's built-in collection. A named choice is remembered in `config.tom
 Headers appear only on an empty transcript. If the selected artwork does not fit the current
 terminal width and height, AgentX uses a responsive built-in header for that render.
 
-## Format
+## Pixel art
+
+The [masthead studio](https://wess.io/agentx/masthead/) paints on a grid where every pixel is
+half a terminal cell, then writes ordinary ANSI: one `▀`, `▄` or `█` per cell, with the top
+pixel as the foreground colour and the bottom as the background. Nothing about that encoding is
+special to AgentX, so the files open in other ANSI editors and in `less -R`, and the studio
+reopens any half-block art, including art it did not write. It stops at anything it cannot place
+on the grid, such as shade characters or letters.
+
+## ANSI files
 
 Artwork is UTF-8 text. Plain ASCII works as-is. ANSI files may use Select Graphic Rendition (SGR)
 sequences for:
@@ -62,7 +73,8 @@ escape sequences to the terminal.
   color usually loses the ACiD-style sense of material and shadow.
 
 Limits are 128 KiB, 80 lines, and 240 terminal columns. Files must be regular files; symlinks are
-ignored. `/headers` reports invalid artwork and its reason.
+ignored. `/headers` reports invalid artwork and its reason, and an unreadable headers directory
+is reported the same way instead of stopping the chat.
 
 For a quick preview outside AgentX, use `less -R artwork.ans`. Always open downloaded ANSI files in
 a text editor before previewing them in another terminal program; other viewers may execute control

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::fs;
 
 use crate::{
+  frontmatter,
   protocol::ToolSpec,
   tool::{Risk, Tool, ToolContext, truncate},
 };
@@ -81,40 +82,20 @@ async fn discover_root(root: &Path) -> Result<Vec<Skill>> {
       Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     let fallback = entry.file_name().to_string_lossy().into_owned();
-    let (name, description) = metadata(&text, &fallback);
+    let front = frontmatter::parse(&text);
+    let name = front.field("name").unwrap_or(fallback);
     if name.trim().is_empty() {
       continue;
     }
     skills.push(Skill {
       name,
-      description,
+      description: front
+        .field("description")
+        .unwrap_or_else(|| first_heading(&text)),
       path,
     });
   }
   Ok(skills)
-}
-
-fn metadata(text: &str, fallback: &str) -> (String, String) {
-  let Some(rest) = text.strip_prefix("---\n") else {
-    return (fallback.into(), first_heading(text));
-  };
-  let Some(end) = rest.find("\n---") else {
-    return (fallback.into(), first_heading(text));
-  };
-  let mut name = fallback.to_string();
-  let mut description = String::new();
-  for line in rest[..end].lines() {
-    if let Some(value) = line.strip_prefix("name:") {
-      name = clean(value);
-    } else if let Some(value) = line.strip_prefix("description:") {
-      description = clean(value);
-    }
-  }
-  (name, description)
-}
-
-fn clean(value: &str) -> String {
-  value.trim().trim_matches(['"', '\'']).to_string()
 }
 
 fn first_heading(text: &str) -> String {

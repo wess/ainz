@@ -63,15 +63,18 @@ async fn discover_root(
   headers: &mut BTreeMap<String, HeaderArt>,
   issues: &mut Vec<String>,
 ) -> Result<()> {
+  // a bad headers directory is reported next to bad art rather than blocking the chat
   let mut entries = match fs::read_dir(root).await {
     Ok(entries) => entries,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-    Err(error) => return Err(error).with_context(|| format!("read {}", root.display())),
+    Err(error) => {
+      issues.push(format!("{}: {error}", root.display()));
+      return Ok(());
+    }
   };
   while let Some(entry) = entries.next_entry().await? {
     let path = entry.path();
-    let file_type = entry.file_type().await?;
-    if !file_type.is_file() || file_type.is_symlink() || !supported(&path) {
+    if !entry.file_type().await?.is_file() || !supported(&path) {
       continue;
     }
     let Some(name) = path.file_stem().and_then(|name| name.to_str()) else {
@@ -114,11 +117,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 async fn load(path: &Path, name: &str) -> Result<HeaderArt> {
-  let metadata = fs::metadata(path).await?;
-  if metadata.len() > MAX_BYTES {
-    bail!("header exceeds the {MAX_BYTES} byte limit");
-  }
-  let mut bytes = Vec::with_capacity(metadata.len() as usize);
+  let mut bytes = Vec::new();
   fs::File::open(path)
     .await?
     .take(MAX_BYTES + 1)

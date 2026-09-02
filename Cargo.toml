@@ -1,13 +1,15 @@
 [package]
 name = "agentx"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 description = "A small, embeddable agent harness"
-documentation = "https://docs.rs/agentx"
-keywords = ["agent", "ai", "tokio", "tools", "wasm"]
-categories = ["command-line-utilities", "development-tools"]
+repository = "https://github.com/wess/agentx"
+homepage = "https://wess.io/agentx/"
+# the crates.io name belongs to an unrelated project; agentx ships as a binary through
+# GitHub releases, Homebrew, and `cargo install --git`
+publish = false
 
 [dependencies]
 anyhow = "1.0"
@@ -15,9 +17,10 @@ async-trait = "0.1"
 base64 = "0.22"
 bytes = "1.10"
 clap = { version = "4.5", features = ["derive"] }
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6.0"
 futures-util = "0.3"
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -1,11 +1,11 @@
 use std::{
   collections::HashMap,
-  path::{Path, PathBuf},
+  path::PathBuf,
   time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 use tokio::fs;
 use uuid::Uuid;
 
@@ -185,6 +185,46 @@ impl Session {
   }
 }
 
+// what a listing needs, read without materializing every message or attachment
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionInfo {
+  pub id: Uuid,
+  pub parent_id: Option<Uuid>,
+  pub workspace: PathBuf,
+  pub created_at: u64,
+  pub updated_at: u64,
+  pub usage: Usage,
+  pub nodes: usize,
+}
+
+#[derive(Deserialize)]
+struct SessionHead {
+  id: Uuid,
+  #[serde(default)]
+  parent_id: Option<Uuid>,
+  workspace: PathBuf,
+  created_at: u64,
+  updated_at: u64,
+  #[serde(default)]
+  usage: Usage,
+  #[serde(default)]
+  nodes: Vec<IgnoredAny>,
+}
+
+impl From<SessionHead> for SessionInfo {
+  fn from(head: SessionHead) -> Self {
+    Self {
+      id: head.id,
+      parent_id: head.parent_id,
+      workspace: head.workspace,
+      created_at: head.created_at,
+      updated_at: head.updated_at,
+      usage: head.usage,
+      nodes: head.nodes.len(),
+    }
+  }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionStore {
   root: PathBuf,
@@ -239,8 +279,8 @@ impl SessionStore {
     serde_json::from_slice(&data).with_context(|| format!("parse session {id}"))
   }
 
-  pub async fn list(&self) -> Result<Vec<Session>> {
-    let mut sessions = HashMap::new();
+  pub async fn list(&self) -> Result<Vec<SessionInfo>> {
+    let mut sessions: HashMap<Uuid, SessionInfo> = HashMap::new();
     let roots = self.legacy_root.iter().chain(std::iter::once(&self.root));
     for root in roots {
       let mut entries = match fs::read_dir(root).await {
@@ -251,9 +291,9 @@ impl SessionStore {
       while let Some(entry) = entries.next_entry().await? {
         if entry.path().extension().is_some_and(|ext| ext == "json")
           && let Ok(data) = fs::read(entry.path()).await
-          && let Ok(session) = serde_json::from_slice::<Session>(&data)
+          && let Ok(head) = serde_json::from_slice::<SessionHead>(&data)
         {
-          sessions.insert(session.id, session);
+          sessions.insert(head.id, head.into());
         }
       }
     }
@@ -272,8 +312,4 @@ fn now() -> u64 {
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
     .as_secs()
-}
-
-pub fn workspace_matches(session: &Session, workspace: &Path) -> bool {
-  session.workspace == workspace
 }

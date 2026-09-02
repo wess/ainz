@@ -48,12 +48,16 @@ impl Image {
       Some("webp") => "image/webp",
       _ => bail!("unsupported image type: {}", path.display()),
     };
+    let size = tokio::fs::metadata(path)
+      .await
+      .with_context(|| format!("read image {}", path.display()))?
+      .len();
+    if size > 20 * 1024 * 1024 {
+      bail!("image exceeds the 20 MiB limit: {}", path.display());
+    }
     let data = tokio::fs::read(path)
       .await
       .with_context(|| format!("read image {}", path.display()))?;
-    if data.len() > 20 * 1024 * 1024 {
-      bail!("image exceeds the 20 MiB limit: {}", path.display());
-    }
     Ok(Self {
       url: format!("data:{media_type};base64,{}", STANDARD.encode(data)),
       detail: None,

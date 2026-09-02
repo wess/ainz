@@ -26,7 +26,7 @@ jobs:
           tag="${GITHUB_REF_NAME:-v${version}}"
           test "$tag" = "v${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-      - run: sh -n install.sh scripts/package.sh
+      - run: for script in install.sh scripts/package.sh scripts/version.sh; do sh -n "$script"; done
 
   build:
     needs: validate
@@ -81,7 +81,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "AgentX ${VERSION}" \
-            --notes "$(printf '%s\n\n%s\n\n%s\n' \
-              'Initial AgentX release.' \
-              'A terminal-native agent harness and session multiplexer with Ollama, Codex, Claude Code, custom providers, resumable sessions, subagents, MCP, plugins, and Synapse compatibility.' \
+            --generate-notes \
+            --notes "$(printf '%s\n' \
               'Install with Homebrew using `brew install wess/packages/agentx`, or download the archive for your platform below. The install script verifies the matching SHA-256 file before installing.')"

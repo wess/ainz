@@ -23,7 +23,7 @@ while IFS= read -r request; do
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"},"instructions":"Recall project memory before acting."}}'
       ;;
     *'"method":"tools/list"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}},"annotations":{"readOnlyHint":true}},{"name":"wipe","description":"Wipe","inputSchema":{"type":"object"}}]}}'
       ;;
     *'"method":"tools/call"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"called"}],"isError":false}}'
@@ -72,7 +72,10 @@ done
   let hub = Arc::new(McpHub::new(profile));
   assert_eq!(
     hub.instructions().await.unwrap(),
-    ["Recall project memory before acting."]
+    [(
+      "fixture".to_string(),
+      "Recall project memory before acting.".to_string()
+    )]
   );
   let tool = hub.tool();
   let context = ToolContext {
@@ -98,10 +101,16 @@ done
   assert!(schema.contains("input_schema"));
   assert_eq!(tool.risk(&json!({"command": "call"})), Risk::Execute);
   assert_eq!(
-    tool.risk(&json!({
-      "command": "call", "server": "synapse", "name": "recall"
-    })),
+    tool.risk(&json!({"command": "call", "server": "fixture", "name": "echo"})),
     Risk::Read
+  );
+  assert_eq!(
+    tool.risk(&json!({"command": "call", "server": "fixture", "name": "wipe"})),
+    Risk::Execute
+  );
+  assert_eq!(
+    tool.risk(&json!({"command": "call", "server": "nowhere", "name": "echo"})),
+    Risk::Execute
   );
   let result = tool
     .execute(
@@ -315,4 +324,93 @@ async fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {
       return request;
     }
   }
+}
+
+#[tokio::test]
+async fn stdio_servers_skip_banners_and_restart_after_dying() {
+  let temp = tempfile::tempdir().unwrap();
+  let server = temp.path().join("server.sh");
+  let counter = temp.path().join("starts");
+  // the server prints a banner first, answers one call, then quits without warning
+  tokio::fs::write(
+    &server,
+    format!(
+      r#"#!/bin/sh
+echo "starting up..."
+printf 'x' >> "{}"
+while IFS= read -r request; do
+  id=$(printf '%s' "$request" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$request" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"2025-11-25","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"flaky","version":"1"}}}}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"once","description":"Answer once","inputSchema":{{"type":"object"}}}}]}}}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"answered"}}]}}}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+      counter.display()
+    ),
+  )
+  .await
+  .unwrap();
+  std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let profile = McpProfile {
+    servers: BTreeMap::from([(
+      "flaky".into(),
+      McpServerConfig {
+        transport: McpTransport::Stdio,
+        command: vec![server.to_string_lossy().into_owned()],
+        url: None,
+        header_env: BTreeMap::new(),
+        headers: BTreeMap::new(),
+        env: BTreeMap::new(),
+        cwd: None,
+        enabled: true,
+        required: true,
+        timeout_ms: 2_000,
+      },
+    )]),
+  };
+  let tool = Arc::new(McpHub::new(profile)).tool();
+  let context = ToolContext {
+    workspace: temp.path().into(),
+    session_id: uuid::Uuid::nil(),
+    max_output_bytes: 4096,
+  };
+  let call = json!({"command": "call", "server": "flaky", "name": "once"});
+  assert_eq!(
+    tool.execute(&context, call.clone()).await.unwrap(),
+    "answered"
+  );
+  // once the process is gone the next call must start a fresh one rather than fail forever
+  tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+  assert_eq!(tool.execute(&context, call).await.unwrap(), "answered");
+  assert_eq!(
+    tokio::fs::read_to_string(&counter).await.unwrap().len(),
+    2,
+    "expected exactly one restart"
+  );
+}
+
+#[tokio::test]
+async fn profiles_reject_names_that_cannot_be_addressed() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("launch.mcp.json");
+  tokio::fs::write(
+    &path,
+    serde_json::to_vec(&json!({
+      "mcpServers": {"bad name/here": {"command": "/bin/true"}}
+    }))
+    .unwrap(),
+  )
+  .await
+  .unwrap();
+  let error = McpProfile::load_with(Some(&path)).await.unwrap_err();
+  assert!(error.to_string().contains("bad name/here"));
 }

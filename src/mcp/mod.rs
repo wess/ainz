@@ -4,17 +4,23 @@ mod tool;
 use std::{
   collections::BTreeMap,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex as SyncMutex, PoisonError},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{fs, sync::Mutex};
+use tokio::{
+  fs,
+  sync::{MappedMutexGuard, Mutex, MutexGuard},
+};
 
-use crate::tool::Tool;
+use crate::tool::{Risk, Tool, truncate};
 
 use self::{client::Client, tool::McpTool};
+
+const MAX_INSTRUCTIONS: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct McpProfile {
@@ -41,8 +47,8 @@ pub struct McpServerConfig {
 struct McpServerConfigFile {
   #[serde(default)]
   transport: McpTransport,
-  #[serde(default)]
-  command: CommandField,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  command: Option<CommandField>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   args: Vec<String>,
   url: Option<String>,
@@ -61,21 +67,19 @@ struct McpServerConfigFile {
   timeout_ms: u64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum CommandField {
   String(String),
   List(Vec<String>),
-  #[default]
-  Empty,
 }
 
 impl From<McpServerConfigFile> for McpServerConfig {
   fn from(file: McpServerConfigFile) -> Self {
     let command = match file.command {
-      CommandField::String(command) => std::iter::once(command).chain(file.args).collect(),
-      CommandField::List(command) => command.into_iter().chain(file.args).collect(),
-      CommandField::Empty => file.args,
+      Some(CommandField::String(command)) => std::iter::once(command).chain(file.args).collect(),
+      Some(CommandField::List(command)) => command.into_iter().chain(file.args).collect(),
+      None => file.args,
     };
     Self {
       transport: file.transport,
@@ -97,7 +101,7 @@ impl From<McpServerConfig> for McpServerConfigFile {
     let mut command = config.command.into_iter();
     Self {
       transport: config.transport,
-      command: command.next().map(CommandField::String).unwrap_or_default(),
+      command: command.next().map(CommandField::String),
       args: command.collect(),
       url: config.url,
       header_env: config.header_env,
@@ -127,6 +131,15 @@ fn default_timeout() -> u64 {
   30_000
 }
 
+// server names appear in tool descriptions and `server/tool` targets, so keep them plain
+pub fn valid_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.len() <= 64
+    && name
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
 impl McpProfile {
   pub fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("AGENTX_MCP_PROFILE") {
@@ -150,11 +163,12 @@ impl McpProfile {
       } else {
         &path
       };
-    let profile = match fs::read_to_string(source).await {
-      Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display())),
+    let profile: Self = match fs::read_to_string(source).await {
+      Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", source.display())),
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-      Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+      Err(error) => Err(error).with_context(|| format!("read {}", source.display())),
     }?;
+    profile.validate()?;
     if source == &legacy {
       profile.save_to(&path).await?;
     }
@@ -173,7 +187,7 @@ impl McpProfile {
       .with_context(|| format!("parse MCP configuration {}", path.display()))?;
     for (name, server) in file.servers {
       if server.command.trim().is_empty() {
-        anyhow::bail!("MCP server {name} has an empty command");
+        bail!("MCP server {name} has an empty command");
       }
       profile.servers.insert(
         name,
@@ -191,7 +205,20 @@ impl McpProfile {
         },
       );
     }
+    profile.validate()?;
     Ok(profile)
+  }
+
+  pub fn validate(&self) -> Result<()> {
+    for (name, server) in &self.servers {
+      if !valid_name(name) {
+        bail!("MCP server name {name:?} may only use letters, digits, '.', '_' and '-'");
+      }
+      if server.timeout_ms == 0 {
+        bail!("MCP server {name} needs a timeout above zero");
+      }
+    }
+    Ok(())
   }
 
   pub async fn save(&self) -> Result<()> {
@@ -204,6 +231,12 @@ impl McpProfile {
     }
     let temporary = path.with_extension("toml.tmp");
     fs::write(&temporary, toml::to_string_pretty(self)?).await?;
+    // header and env values may be secrets, so the profile is private to the user
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).await?;
+    }
     fs::rename(&temporary, path)
       .await
       .with_context(|| format!("write {}", path.display()))
@@ -240,10 +273,6 @@ impl McpHub {
     Self { servers }
   }
 
-  pub async fn load() -> Result<Self> {
-    Ok(Self::new(McpProfile::load().await?))
-  }
-
   pub fn is_empty(&self) -> bool {
     self.servers.is_empty()
   }
@@ -256,45 +285,46 @@ impl McpHub {
     self.servers.keys().map(String::as_str).collect()
   }
 
+  // required servers start together so startup pays for the slowest one, not the sum
   pub async fn ready(&self) -> Result<()> {
-    for server in self
+    let required = self
       .servers
       .values()
-      .filter(|server| server.config.required)
-    {
-      server.tools().await?;
+      .filter(|server| server.config.required);
+    for result in join_all(required.map(|server| server.tools())).await {
+      result?;
     }
     Ok(())
   }
 
-  pub async fn instructions(&self) -> Result<Vec<String>> {
+  pub async fn instructions(&self) -> Result<Vec<(String, String)>> {
     let mut instructions = Vec::new();
-    for server in self
-      .servers
-      .values()
-      .filter(|server| server.config.required)
-    {
-      if let Some(value) = server.instructions().await? {
-        instructions.push(value);
+    for (name, server) in &self.servers {
+      if !server.config.required {
+        continue;
+      }
+      if let Some(text) = server.instructions().await? {
+        instructions.push((name.clone(), truncate(text, MAX_INSTRUCTIONS)));
       }
     }
     Ok(instructions)
   }
 
-  pub(super) async fn tools(&self, server: &str) -> Result<Vec<RemoteTool>> {
-    self
-      .servers
-      .get(server)
-      .with_context(|| format!("server {server} was not found"))?
-      .tools()
-      .await
+  pub(super) async fn tools(&self, server: &str) -> Result<Arc<[RemoteTool]>> {
+    self.server(server)?.tools().await
   }
 
-  pub(super) async fn searchable_tools(&self) -> Result<Vec<(&str, Vec<RemoteTool>)>> {
+  // an optional server that already failed is left alone until something names it directly
+  pub(super) async fn searchable_tools(&self) -> Result<Vec<(&str, Arc<[RemoteTool]>)>> {
+    let attempts = self
+      .servers
+      .iter()
+      .filter(|(_, server)| server.config.required || !server.failed())
+      .map(|(name, server)| async move { (name.as_str(), server, server.tools().await) });
     let mut found = Vec::new();
-    for (name, server) in &self.servers {
-      match server.tools().await {
-        Ok(tools) => found.push((name.as_str(), tools)),
+    for (name, server, result) in join_all(attempts).await {
+      match result {
+        Ok(tools) => found.push((name, tools)),
         Err(error) if server.config.required => return Err(error),
         Err(_) => {}
       }
@@ -303,12 +333,28 @@ impl McpHub {
   }
 
   pub(super) async fn call(&self, server: &str, name: &str, arguments: Value) -> Result<String> {
+    self.server(server)?.call(name, arguments).await
+  }
+
+  // only what the server already told us counts; an unknown tool is treated as executing
+  pub(super) fn cached_risk(&self, server: &str, name: &str) -> Risk {
+    let Some(server) = self.servers.get(server) else {
+      return Risk::Execute;
+    };
+    let ToolCache::Ready(tools) = &*server.cache() else {
+      return Risk::Execute;
+    };
+    tools
+      .iter()
+      .find(|tool| tool.name == name)
+      .map_or(Risk::Execute, |tool| tool.annotations.risk())
+  }
+
+  fn server(&self, name: &str) -> Result<&Arc<Server>> {
     self
       .servers
-      .get(server)
-      .with_context(|| format!("server {server} was not found"))?
-      .call(name, arguments)
-      .await
+      .get(name)
+      .with_context(|| format!("server {name} was not found"))
   }
 }
 
@@ -316,7 +362,13 @@ struct Server {
   name: String,
   config: McpServerConfig,
   client: Mutex<Option<Client>>,
-  tools: Mutex<Option<Vec<RemoteTool>>>,
+  tools: SyncMutex<ToolCache>,
+}
+
+enum ToolCache {
+  Unknown,
+  Ready(Arc<[RemoteTool]>),
+  Failed,
 }
 
 impl Server {
@@ -325,42 +377,60 @@ impl Server {
       name,
       config,
       client: Mutex::new(None),
-      tools: Mutex::new(None),
+      tools: SyncMutex::new(ToolCache::Unknown),
     }
   }
 
-  async fn tools(&self) -> Result<Vec<RemoteTool>> {
-    if let Some(tools) = self.tools.lock().await.clone() {
-      return Ok(tools);
+  fn cache(&self) -> std::sync::MutexGuard<'_, ToolCache> {
+    self.tools.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn failed(&self) -> bool {
+    matches!(*self.cache(), ToolCache::Failed)
+  }
+
+  // a broken client is dropped, which ends its process, before a replacement starts
+  async fn connect(&self) -> Result<MappedMutexGuard<'_, Client>> {
+    let mut guard = self.client.lock().await;
+    if guard.as_mut().is_none_or(Client::broken) {
+      *guard = None;
+      *guard = Some(Client::start(&self.name, &self.config).await?);
     }
-    let mut client = self.client.lock().await;
-    if client.is_none() {
-      *client = Some(Client::start(&self.name, &self.config).await?);
+    Ok(MutexGuard::map(guard, |client| {
+      client.as_mut().expect("client was just started")
+    }))
+  }
+
+  async fn tools(&self) -> Result<Arc<[RemoteTool]>> {
+    if let ToolCache::Ready(tools) = &*self.cache() {
+      return Ok(tools.clone());
     }
-    let tools = client.as_mut().unwrap().list_tools().await?;
-    *self.tools.lock().await = Some(tools.clone());
-    Ok(tools)
+    let listed = async {
+      let mut client = self.connect().await?;
+      client.list_tools().await
+    }
+    .await;
+    match listed {
+      Ok(tools) => {
+        let tools: Arc<[RemoteTool]> = tools.into();
+        *self.cache() = ToolCache::Ready(tools.clone());
+        Ok(tools)
+      }
+      Err(error) => {
+        *self.cache() = ToolCache::Failed;
+        Err(error)
+      }
+    }
   }
 
   async fn call(&self, name: &str, arguments: Value) -> Result<String> {
-    let mut client = self.client.lock().await;
-    if client.is_none() {
-      *client = Some(Client::start(&self.name, &self.config).await?);
-    }
-    client.as_mut().unwrap().call_tool(name, arguments).await
+    let mut client = self.connect().await?;
+    client.call_tool(name, arguments).await
   }
 
   async fn instructions(&self) -> Result<Option<String>> {
-    let mut client = self.client.lock().await;
-    if client.is_none() {
-      *client = Some(Client::start(&self.name, &self.config).await?);
-    }
-    Ok(
-      client
-        .as_ref()
-        .and_then(Client::instructions)
-        .map(str::to_owned),
-    )
+    let client = self.connect().await?;
+    Ok(client.instructions().map(str::to_owned))
   }
 }
 
@@ -371,4 +441,26 @@ pub(super) struct RemoteTool {
   pub description: String,
   #[serde(rename = "inputSchema")]
   pub input_schema: Value,
+  #[serde(default)]
+  pub annotations: ToolAnnotations,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(super) struct ToolAnnotations {
+  #[serde(default, rename = "readOnlyHint")]
+  read_only: bool,
+  #[serde(rename = "destructiveHint")]
+  destructive: Option<bool>,
+}
+
+impl ToolAnnotations {
+  fn risk(&self) -> Risk {
+    if self.read_only {
+      Risk::Read
+    } else if self.destructive == Some(false) {
+      Risk::Write
+    } else {
+      Risk::Execute
+    }
+  }
 }

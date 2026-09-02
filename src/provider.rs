@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
+use std::{collections::BTreeMap, path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -10,13 +10,14 @@ use tokio::{io::AsyncWriteExt, process::Command};
 
 use crate::{
   config::{PermissionMode, ProcessOutput},
-  event::EventSink,
+  event::{Event, EventSink},
   protocol::{Message, Role, ToolSpec, Usage},
+  sse::SseDecoder,
 };
 
 mod wire;
 
-use wire::{PartialCall, parse_event, parse_response, wire_message};
+use wire::{PartialCall, parse_data, parse_response, wire_message};
 
 #[derive(Clone, Debug)]
 pub struct ProviderReply {
@@ -65,8 +66,13 @@ pub struct HttpProvider {
 
 impl HttpProvider {
   pub fn new(endpoint: String, model: String, api_key: Option<String>) -> Result<Self> {
+    // NB: no read timeout on purpose; a local model can sit for minutes before its first token
+    let client = Client::builder()
+      .connect_timeout(Duration::from_secs(15))
+      .build()
+      .context("build HTTP client")?;
     Ok(Self {
-      client: Client::builder().build()?,
+      client,
       endpoint: endpoint.trim_end_matches('/').into(),
       model,
       api_key,
@@ -118,14 +124,20 @@ impl ChatProvider for HttpProvider {
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
-    let body = json!({
+    let mut body = json!({
       "model": self.model,
       "messages": messages.iter().map(wire_message).collect::<Vec<_>>(),
-      "tools": tools.iter().map(|tool| json!({"type": "function", "function": tool})).collect::<Vec<_>>(),
-      "tool_choice": "auto",
       "stream": true,
       "stream_options": {"include_usage": true},
     });
+    // an empty tools array with tool_choice is rejected by several OpenAI-compatible servers
+    if !tools.is_empty() {
+      body["tools"] = tools
+        .iter()
+        .map(|tool| json!({"type": "function", "function": tool}))
+        .collect();
+      body["tool_choice"] = json!("auto");
+    }
     let mut request = self
       .client
       .post(format!("{}/chat/completions", self.endpoint))
@@ -155,20 +167,17 @@ impl ChatProvider for HttpProvider {
     }
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut decoder = SseDecoder::default();
     let mut content = String::new();
     let mut calls: BTreeMap<usize, PartialCall> = BTreeMap::new();
     let mut usage = Usage::default();
     while let Some(chunk) = stream.next().await {
-      buffer.push_str(std::str::from_utf8(&chunk?).context("stream was not UTF-8")?);
-      while let Some((end, separator_len)) = event_boundary(&buffer) {
-        let event = buffer[..end].to_string();
-        buffer.drain(..end + separator_len);
-        parse_event(&event, &mut content, &mut calls, &mut usage, events)?;
+      for data in decoder.push(&chunk.context("read model stream")?) {
+        parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
       }
     }
-    if !buffer.trim().is_empty() {
-      parse_event(&buffer, &mut content, &mut calls, &mut usage, events)?;
+    for data in decoder.finish() {
+      parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
     }
 
     let tool_calls = calls
@@ -258,17 +267,19 @@ impl ChatProvider for ProcessProvider {
       .kill_on_drop(true)
       .spawn()
       .with_context(|| format!("start provider command {}", self.command))?;
-    child
+    let mut stdin = child
       .stdin
       .take()
-      .context("provider command stdin was unavailable")?
-      .write_all(render_prompt(messages).as_bytes())
-      .await
-      .context("write provider prompt")?;
-    let output = child
-      .wait_with_output()
-      .await
-      .context("wait for provider command")?;
+      .context("provider command stdin was unavailable")?;
+    let prompt = render_prompt(messages);
+    // the prompt is fed while output drains, so a chatty command cannot fill its pipe and stall.
+    // a write error is left to the exit status: a command that quit early explains itself on stderr
+    let feed = async move {
+      drop(stdin.write_all(prompt.as_bytes()).await);
+      drop(stdin.shutdown().await);
+    };
+    let (_, output) = tokio::join!(feed, child.wait_with_output());
+    let output = output.context("wait for provider command")?;
     if !output.status.success() {
       let error = String::from_utf8_lossy(&output.stderr);
       bail!(
@@ -288,7 +299,7 @@ impl ChatProvider for ProcessProvider {
         .to_string(),
     };
     if !text.is_empty() {
-      events.emit(crate::event::Event::TextDelta { text: text.clone() });
+      events.emit(Event::TextDelta { text: text.clone() });
     }
     Ok(ProviderReply {
       message: Message::text(Role::Assistant, text),
@@ -321,14 +332,4 @@ fn render_prompt(messages: &[Message]) -> String {
     prompt.push('\n');
   }
   prompt
-}
-
-fn event_boundary(buffer: &str) -> Option<(usize, usize)> {
-  match (buffer.find("\n\n"), buffer.find("\r\n\r\n")) {
-    (Some(a), Some(b)) if a <= b => Some((a, 2)),
-    (Some(_), Some(b)) => Some((b, 4)),
-    (Some(a), None) => Some((a, 2)),
-    (None, Some(b)) => Some((b, 4)),
-    (None, None) => None,
-  }
 }

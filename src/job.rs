@@ -1,4 +1,5 @@
 use std::{
+  io::SeekFrom,
   path::{Path, PathBuf},
   process::Stdio,
   sync::Arc,
@@ -9,16 +10,22 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{fs, process::Command};
+use tokio::{
+  fs,
+  io::{AsyncReadExt, AsyncSeekExt},
+  process::Command,
+};
 use uuid::Uuid;
 
 use crate::{
+  process::kill_group,
   protocol::ToolSpec,
   tool::{Risk, Tool, ToolContext, truncate},
 };
 
+// $0 carries the job id through the ps command line so a reused pid is never mistaken for ours
 const RUNNER: &str = r#"
-sh -lc "$2"
+sh -c "$2"
 code=$?
 printf '%s\n' "$code" > "$1.tmp"
 mv "$1.tmp" "$1"
@@ -179,14 +186,7 @@ impl JobStore {
     if !self.owns_process(record).await? {
       bail!("job {} is not running", record.id);
     }
-    let status = Command::new("kill")
-      .args(["-TERM", &format!("-{}", record.pid)])
-      .status()
-      .await
-      .context("stop background job")?;
-    if !status.success() {
-      bail!("could not stop job {}", record.id);
-    }
+    kill_group(record.pid, libc::SIGTERM).with_context(|| format!("stop job {}", record.id))?;
     fs::write(self.root.join(record.id.to_string()).join("stopped"), b"").await?;
     Ok(())
   }
@@ -263,7 +263,7 @@ impl Tool for JobTool {
           .root
           .join(record.id.to_string())
           .join("output.log");
-        String::from_utf8_lossy(&fs::read(path).await?).into_owned()
+        tail(&path, context.max_output_bytes).await?
       }
       "stop" => {
         let record = self.record(&arguments, context).await?;
@@ -286,6 +286,32 @@ impl JobTool {
       .context("id must be a UUID")?;
     self.store.load(id, &context.workspace).await
   }
+}
+
+const OMITTED: &str = "[earlier output omitted]\n";
+
+// the end of a log is where the failure is, so a long log keeps its tail rather than its head.
+// the result fits `budget` with the marker included, so the caller's truncate never clips it
+async fn tail(path: &Path, budget: usize) -> Result<String> {
+  let mut file = fs::File::open(path)
+    .await
+    .with_context(|| format!("read {}", path.display()))?;
+  let length = file.metadata().await?.len();
+  let mut bytes = Vec::new();
+  if usize::try_from(length).is_ok_and(|length| length <= budget) {
+    file.read_to_end(&mut bytes).await?;
+    return Ok(String::from_utf8_lossy(&bytes).into_owned());
+  }
+  let limit = budget.saturating_sub(OMITTED.len());
+  file
+    .seek(SeekFrom::End(-i64::try_from(limit).unwrap_or(i64::MAX)))
+    .await?;
+  file.read_to_end(&mut bytes).await?;
+  let mut text = String::from_utf8_lossy(&bytes).into_owned();
+  if let Some(newline) = text.find('\n') {
+    text.drain(..=newline);
+  }
+  Ok(format!("{OMITTED}{text}"))
 }
 
 fn now() -> u64 {

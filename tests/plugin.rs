@@ -58,6 +58,7 @@ async fn plugins_require_content_pinned_approval() {
     .unwrap();
   let tool = catalog
     .approved_tools()
+    .await
     .unwrap()
     .into_iter()
     .find(|tool| tool.spec().name == "echo_say")
@@ -258,6 +259,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .unwrap();
   let tool = catalog
     .approved_tools()
+    .await
     .unwrap()
     .into_iter()
     .find(|tool| tool.spec().name == "component_echo_echo")
@@ -278,7 +280,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
   tokio::fs::write(temp.path().join("input.txt"), "host read")
     .await
     .unwrap();
-  let tools = catalog.approved_tools().unwrap();
+  let tools = catalog.approved_tools().await.unwrap();
   let read = tools
     .iter()
     .find(|tool| tool.spec().name == "component_echo_read")
@@ -409,4 +411,85 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .find(|plugin| plugin.manifest.plugin.name == "component_echo")
     .unwrap();
   assert!(!plugin.approved);
+}
+
+#[tokio::test]
+async fn a_broken_manifest_is_reported_without_hiding_the_others() {
+  let temp = tempfile::tempdir().unwrap();
+  let good = temp.path().join(".agentx/plugins/echo");
+  tokio::fs::create_dir_all(&good).await.unwrap();
+  tokio::fs::write(good.join("plugin.toml"), MANIFEST)
+    .await
+    .unwrap();
+  tokio::fs::write(good.join("run.sh"), "#!/bin/sh\n")
+    .await
+    .unwrap();
+  let bad = temp.path().join(".agentx/plugins/broken");
+  tokio::fs::create_dir_all(&bad).await.unwrap();
+  tokio::fs::write(bad.join("plugin.toml"), "this is not toml = [")
+    .await
+    .unwrap();
+  let grants = temp.path().join("grants.json");
+
+  let catalog = PluginCatalog::discover_with_grants(temp.path(), &grants)
+    .await
+    .unwrap();
+
+  assert_eq!(catalog.plugins.len(), 1);
+  assert_eq!(catalog.plugins[0].manifest.plugin.name, "echo");
+  assert_eq!(catalog.issues.len(), 1);
+  assert!(catalog.issues[0].contains("broken"));
+}
+
+#[tokio::test]
+async fn a_program_swapped_after_approval_is_refused_at_run_time() {
+  let temp = tempfile::tempdir().unwrap();
+  let root = temp.path().join(".agentx/plugins/echo");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("plugin.toml"), MANIFEST)
+    .await
+    .unwrap();
+  let runner = root.join("run.sh");
+  tokio::fs::write(
+    &runner,
+    "#!/bin/sh\nread request\nprintf '{\"result\":\"first\"}\\n'\n",
+  )
+  .await
+  .unwrap();
+  std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let grants = temp.path().join("grants.json");
+  let mut catalog = PluginCatalog::discover_with_grants(temp.path(), &grants)
+    .await
+    .unwrap();
+  catalog.approve_with("echo", &grants).await.unwrap();
+  let catalog = PluginCatalog::discover_with_grants(temp.path(), &grants)
+    .await
+    .unwrap();
+  let tool = catalog
+    .approved_tools()
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|tool| tool.spec().name == "echo_say")
+    .unwrap();
+  let context = ToolContext {
+    workspace: temp.path().into(),
+    session_id: uuid::Uuid::nil(),
+    max_output_bytes: 1024,
+  };
+  assert_eq!(tool.execute(&context, json!({})).await.unwrap(), "first");
+
+  // the model, or anyone else, rewrites the program mid-session
+  tokio::fs::write(
+    &runner,
+    "#!/bin/sh\nread request\nprintf '{\"result\":\"swapped\"}\\n'\n",
+  )
+  .await
+  .unwrap();
+  let error = tool.execute(&context, json!({})).await.unwrap_err();
+  assert!(
+    error
+      .to_string()
+      .contains("changed since the plugin was approved")
+  );
 }

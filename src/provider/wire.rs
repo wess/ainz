@@ -187,46 +187,46 @@ pub(super) fn parse_response(
   })
 }
 
-pub(super) fn parse_event(
-  event: &str,
+pub(super) fn parse_data(
+  data: &str,
   content: &mut String,
   calls: &mut BTreeMap<usize, PartialCall>,
   usage: &mut Usage,
   events: &EventSink,
 ) -> Result<()> {
-  for line in event.lines() {
-    let Some(data) = line.strip_prefix("data:") else {
-      continue;
-    };
-    let data = data.trim();
-    if data == "[DONE]" {
-      continue;
+  let data = data.trim();
+  if data == "[DONE]" {
+    return Ok(());
+  }
+  let chunk: StreamChunk = serde_json::from_str(data)
+    .with_context(|| format!("invalid stream event: {}", excerpt(data)))?;
+  if let Some(wire) = chunk.usage {
+    usage.input_tokens = wire.prompt_tokens;
+    usage.output_tokens = wire.completion_tokens;
+  }
+  for choice in chunk.choices {
+    if let Some(text) = choice.delta.content {
+      content.push_str(&text);
+      events.emit(Event::TextDelta { text });
     }
-    let chunk: StreamChunk = serde_json::from_str(data).context("invalid stream event")?;
-    if let Some(wire) = chunk.usage {
-      usage.input_tokens = wire.prompt_tokens;
-      usage.output_tokens = wire.completion_tokens;
-    }
-    for choice in chunk.choices {
-      if let Some(text) = choice.delta.content {
-        content.push_str(&text);
-        events.emit(Event::TextDelta { text });
+    for delta in choice.delta.tool_calls {
+      let call = calls.entry(delta.index).or_default();
+      if let Some(id) = delta.id {
+        call.id = id;
       }
-      for delta in choice.delta.tool_calls {
-        let call = calls.entry(delta.index).or_default();
-        if let Some(id) = delta.id {
-          call.id = id;
+      if let Some(function) = delta.function {
+        if let Some(name) = function.name {
+          call.name.push_str(&name);
         }
-        if let Some(function) = delta.function {
-          if let Some(name) = function.name {
-            call.name.push_str(&name);
-          }
-          if let Some(arguments) = function.arguments {
-            call.arguments.push_str(&arguments);
-          }
+        if let Some(arguments) = function.arguments {
+          call.arguments.push_str(&arguments);
         }
       }
     }
   }
   Ok(())
+}
+
+fn excerpt(data: &str) -> String {
+  data.chars().take(200).collect()
 }

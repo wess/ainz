@@ -6,6 +6,8 @@ use std::{
 use anyhow::{Context, Result};
 use tokio::fs;
 
+use crate::frontmatter;
+
 #[derive(Clone, Debug)]
 pub struct PromptTemplate {
   pub name: String,
@@ -50,8 +52,9 @@ impl PromptCatalog {
       .find(|prompt| prompt.name == name)
       .with_context(|| format!("prompt template {name} was not found"))?;
     let text = fs::read_to_string(&prompt.path).await?;
-    let body = strip_frontmatter(&text);
-    let mut output = body.replace("{{args}}", &args.join(" "));
+    let mut output = frontmatter::parse(&text)
+      .body
+      .replace("{{args}}", &args.join(" "));
     for (index, value) in args.iter().enumerate() {
       output = output.replace(&format!("{{{{{}}}}}", index + 1), value);
     }
@@ -77,48 +80,15 @@ async fn discover_root(root: &Path) -> Result<Vec<PromptTemplate>> {
       .unwrap_or_default()
       .to_string_lossy()
       .into_owned();
-    let (name, description) = metadata(&text, &fallback);
+    let front = frontmatter::parse(&text);
+    let name = front.field("name").unwrap_or(fallback);
     if !name.is_empty() {
       prompts.push(PromptTemplate {
         name,
-        description,
+        description: front.field("description").unwrap_or_default(),
         path,
       });
     }
   }
   Ok(prompts)
-}
-
-fn metadata(text: &str, fallback: &str) -> (String, String) {
-  let Some(rest) = text.strip_prefix("---\n") else {
-    return (fallback.into(), String::new());
-  };
-  let Some(end) = rest.find("\n---") else {
-    return (fallback.into(), String::new());
-  };
-  let mut name = fallback.to_string();
-  let mut description = String::new();
-  for line in rest[..end].lines() {
-    if let Some(value) = line.strip_prefix("name:") {
-      name = clean(value);
-    }
-    if let Some(value) = line.strip_prefix("description:") {
-      description = clean(value);
-    }
-  }
-  (name, description)
-}
-
-fn strip_frontmatter(text: &str) -> &str {
-  let Some(rest) = text.strip_prefix("---\n") else {
-    return text;
-  };
-  let Some(end) = rest.find("\n---") else {
-    return text;
-  };
-  rest[end + 4..].trim_start()
-}
-
-fn clean(value: &str) -> String {
-  value.trim().trim_matches(['"', '\'']).to_string()
 }

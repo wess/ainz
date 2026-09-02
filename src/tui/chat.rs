@@ -1,12 +1,13 @@
 use std::{
+  cell::RefCell,
   collections::BTreeMap,
   path::PathBuf,
-  sync::{Arc, mpsc as sync_mpsc},
-  time::{Duration, SystemTime, UNIX_EPOCH},
+  sync::Arc,
+  time::{SystemTime, UNIX_EPOCH},
 };
 
 use agentx::{
-  Agent, Config, Event, EventSink, HeaderArt, HeaderCatalog, McpProfile, PermissionMode,
+  Agent, Approver, Config, Event, EventSink, HeaderArt, HeaderCatalog, McpProfile, PermissionMode,
   PluginCatalog, PromptCatalog, RunController, RuntimeProvider, Session, SessionStore,
   SkillCatalog,
   command_palette::{SlashCommand, builtins as builtin_commands, matches as command_matches},
@@ -15,27 +16,29 @@ use agentx::{
   tool::Risk,
 };
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event as InputEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event as InputEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use futures_util::StreamExt;
 use ratatui::{
   Frame,
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+  widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+  sync::{mpsc, oneshot},
+  task::JoinHandle,
+};
 use uuid::Uuid;
 
-use super::{ACCENT, ACTIVE, INK, MUTED, Term, enter_terminal, leave_terminal};
+use super::{
+  ACCENT, ACTIVE, BLUE, CYAN, INK, MAGENTA, MUTED, RED, Term, YELLOW, centered, enter_terminal,
+  leave_terminal, masthead,
+};
 use crate::app::{expand_prompt, make_agent_with};
 
-type RunTask = JoinHandle<(Agent<RuntimeProvider>, Session, Result<String>)>;
-
-const BLUE: Color = Color::Rgb(24, 66, 128);
-const CYAN: Color = Color::Rgb(72, 205, 214);
-const YELLOW: Color = Color::Rgb(230, 199, 92);
-const RED: Color = Color::Rgb(224, 103, 103);
-const MAGENTA: Color = Color::Rgb(198, 118, 205);
+type RunOutput = (Agent<RuntimeProvider>, Session, Result<String>);
+type RunTask = JoinHandle<RunOutput>;
 
 pub(crate) struct ChatOutcome {
   pub session: Session,
@@ -44,17 +47,20 @@ pub(crate) struct ChatOutcome {
 
 enum UiEvent {
   Agent(Event),
-  Approval {
-    call: ToolCall,
-    risk: Risk,
-    reply: sync_mpsc::SyncSender<bool>,
-  },
+  Approval(Approval),
 }
 
 struct Approval {
   call: ToolCall,
   risk: Risk,
-  reply: sync_mpsc::SyncSender<bool>,
+  reply: oneshot::Sender<bool>,
+}
+
+// whatever woke the loop; owning the payload keeps the select! borrows out of the handlers
+enum Wake {
+  Agent(Option<UiEvent>),
+  Finished(Box<Result<RunOutput>>),
+  Input(Option<std::io::Result<InputEvent>>),
 }
 
 struct CommandData {
@@ -77,6 +83,17 @@ enum EntryKind {
 struct Entry {
   kind: EntryKind,
   text: String,
+  at: String,
+}
+
+impl Entry {
+  fn new(kind: EntryKind, text: String) -> Self {
+    Self {
+      kind,
+      text,
+      at: clock(),
+    }
+  }
 }
 
 #[derive(Clone, Copy)]
@@ -114,10 +131,14 @@ struct ChatState {
   roster: bool,
   scroll: u16,
   busy: bool,
+  // set by the first ctrl+c of a run; the second abandons the run
+  cancelled: bool,
   approval: Option<Approval>,
   command_selected: usize,
   splash_style: usize,
   custom_header: Option<HeaderArt>,
+  // the splash is thousands of cell puts that depend only on size and choice; paint it once
+  splash_cache: RefCell<Option<(usize, usize, Vec<Line<'static>>)>>,
 }
 
 impl Default for ChatState {
@@ -130,10 +151,12 @@ impl Default for ChatState {
       roster: true,
       scroll: 0,
       busy: false,
+      cancelled: false,
       approval: None,
       command_selected: 0,
-      splash_style: select_splash_style(),
+      splash_style: 0,
       custom_header: None,
+      splash_cache: RefCell::new(None),
     }
   }
 }
@@ -143,6 +166,24 @@ impl ChatState {
     let (style, custom) = selected_header(preference, catalog);
     self.splash_style = style;
     self.custom_header = custom;
+    self.splash_cache.replace(None);
+  }
+
+  fn splash(&self, width: usize, height: usize) -> Vec<Line<'static>> {
+    let mut cache = self.splash_cache.borrow_mut();
+    if let Some((cached_width, cached_height, lines)) = &*cache
+      && (*cached_width, *cached_height) == (width, height)
+    {
+      return lines.clone();
+    }
+    let lines = splash(
+      self.splash_style,
+      self.custom_header.as_ref(),
+      width,
+      height,
+    );
+    *cache = Some((width, height, lines.clone()));
+    lines
   }
 
   fn active_view(&self) -> &AgentView {
@@ -233,19 +274,16 @@ async fn run_chat_inner(
   let events_tx = tx.clone();
   let events = EventSink::new(move |event| drop(events_tx.send(UiEvent::Agent(event))));
   let approval_tx = tx;
-  let approver: agentx::agent::Approver = Arc::new(move |call, risk| {
-    let (reply, answer) = sync_mpsc::sync_channel(0);
-    if approval_tx
-      .send(UiEvent::Approval {
+  let approver: Approver = Arc::new(move |call, risk| {
+    let (reply, answer) = oneshot::channel();
+    let sent = approval_tx
+      .send(UiEvent::Approval(Approval {
         call: call.clone(),
         risk,
         reply,
-      })
-      .is_err()
-    {
-      return false;
-    }
-    answer.recv().unwrap_or(false)
+      }))
+      .is_ok();
+    Box::pin(async move { sent && answer.await.unwrap_or(false) })
   });
   let (built_agent, mut options) =
     make_agent_with(&workspace, config, events.clone(), approver.clone()).await?;
@@ -304,7 +342,7 @@ async fn run_chat_inner(
       .await?
       .into_iter()
       .filter(|saved| saved.workspace == workspace)
-      .map(|saved| format!("{}  {} messages", saved.id, saved.nodes.len()))
+      .map(|saved| format!("{}  {} messages", saved.id, saved.nodes))
       .collect(),
     headers: header_catalog,
   };
@@ -329,10 +367,10 @@ async fn run_chat_inner(
 
   if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {
     let expanded = expand_prompt(&prompt, &prompts).await?;
-    state.primary.entries.push(Entry {
-      kind: EntryKind::User,
-      text: expanded.clone(),
-    });
+    state
+      .primary
+      .entries
+      .push(Entry::new(EntryKind::User, expanded.clone()));
     let local_agent = agent.take().unwrap();
     let mut local_session = session.take().unwrap();
     let (run_controller, mut inbox) = run_control();
@@ -347,53 +385,75 @@ async fn run_chat_inner(
     }));
   }
 
+  let mut input = EventStream::new();
   loop {
     while let Ok(message) = rx.try_recv() {
       apply_event(&mut state, message);
     }
-    if task.as_ref().is_some_and(|task| task.is_finished()) {
-      let (returned_agent, returned_session, result) = task.take().unwrap().await?;
-      agent = Some(returned_agent);
-      current_id = returned_session.id;
-      state.primary.usage = returned_session.usage.clone();
-      store.save(&returned_session).await?;
-      session = Some(returned_session);
-      controller = None;
-      state.busy = false;
-      state.primary.assistant = None;
-      if let Err(error) = result {
-        state.primary.entries.push(Entry {
-          kind: EntryKind::Error,
-          text: format!("{error:#}"),
-        });
-      }
-    }
-
     terminal.draw(|frame| render(frame, &state, config, current_id, &workspace, &commands))?;
-    if !event::poll(Duration::from_millis(40))? {
-      continue;
-    }
-    let InputEvent::Key(key) = event::read()? else {
-      continue;
+    let wake = tokio::select! {
+      message = rx.recv() => Wake::Agent(message),
+      joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
+      event = input.next() => Wake::Input(event),
     };
-    if key.kind == KeyEventKind::Release {
-      continue;
-    }
+    let key = match wake {
+      Wake::Agent(Some(message)) => {
+        apply_event(&mut state, message);
+        continue;
+      }
+      Wake::Agent(None) => continue,
+      Wake::Finished(joined) => {
+        task = None;
+        // events emitted just before the run returned are still queued; show them first
+        while let Ok(message) = rx.try_recv() {
+          apply_event(&mut state, message);
+        }
+        let (returned_agent, returned_session, result) = (*joined)?;
+        agent = Some(returned_agent);
+        current_id = returned_session.id;
+        state.primary.usage = returned_session.usage.clone();
+        store.save(&returned_session).await?;
+        session = Some(returned_session);
+        controller = None;
+        state.busy = false;
+        state.cancelled = false;
+        state.primary.assistant = None;
+        state.primary.tools.clear();
+        if let Err(error) = result {
+          state
+            .primary
+            .entries
+            .push(Entry::new(EntryKind::Error, format!("{error:#}")));
+        }
+        continue;
+      }
+      Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => key,
+      Wake::Input(Some(Ok(InputEvent::Paste(text)))) => {
+        if state.active.is_none() && state.approval.is_none() {
+          state.input.push_str(&text.replace(['\r', '\n'], " "));
+          state.command_selected = 0;
+        }
+        continue;
+      }
+      Wake::Input(Some(Ok(_))) => continue,
+      Wake::Input(Some(Err(error))) => return Err(error).context("read terminal input"),
+      Wake::Input(None) => anyhow::bail!("terminal input closed"),
+    };
     if let Some(approval) = state.approval.take() {
       match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
           let _ = approval.reply.send(true);
-          state.primary.entries.push(Entry {
-            kind: EntryKind::System,
-            text: format!("allowed {} ({:?})", approval.call.name, approval.risk),
-          });
+          state.primary.entries.push(Entry::new(
+            EntryKind::System,
+            format!("allowed {} ({:?})", approval.call.name, approval.risk),
+          ));
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
           let _ = approval.reply.send(false);
-          state.primary.entries.push(Entry {
-            kind: EntryKind::System,
-            text: format!("denied {} ({:?})", approval.call.name, approval.risk),
-          });
+          state.primary.entries.push(Entry::new(
+            EntryKind::System,
+            format!("denied {} ({:?})", approval.call.name, approval.risk),
+          ));
         }
         _ => state.approval = Some(approval),
       }
@@ -408,25 +468,39 @@ async fn run_chat_inner(
         KeyCode::Char('+') | KeyCode::Char('=') => state.cycle_agent(true),
         KeyCode::Char('-') => state.cycle_agent(false),
         KeyCode::Char('l') => {
-          state.roster = !state.roster;
-          config.ui.roster_visible = state.roster;
-          if let Err(error) = config.save().await {
-            state.primary.entries.push(Entry {
-              kind: EntryKind::Error,
-              text: format!("could not remember roster setting: {error:#}"),
+          let visible = !state.roster;
+          set_roster(&mut state, config, visible).await;
+        }
+        KeyCode::Char('c') => match &controller {
+          Some(controller) if !state.cancelled => {
+            controller.cancel();
+            state.cancelled = true;
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              "cancelling; press ctrl+c again to abandon the run".into(),
+            ));
+          }
+          // the provider is ignoring cancel: abandon the run and fall back to the last save
+          Some(_) => {
+            if let Some(task) = task.take() {
+              task.abort();
+            }
+            let session = match store.load(current_id).await {
+              Ok(session) => session,
+              Err(_) => Session::new(workspace.clone()),
+            };
+            return Ok(ChatOutcome {
+              session,
+              configure: false,
             });
           }
-        }
-        KeyCode::Char('c') => {
-          if let Some(controller) = &controller {
-            controller.cancel();
-          } else {
+          None => {
             return Ok(ChatOutcome {
               session: session.context("session unavailable")?,
               configure: false,
             });
           }
-        }
+        },
         _ => {}
       }
       continue;
@@ -485,26 +559,26 @@ async fn run_chat_inner(
             if let Some(controller) = &controller {
               controller.cancel();
             }
-            state.primary.entries.push(Entry {
-              kind: EntryKind::System,
-              text: "cancellation requested".into(),
-            });
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              "cancellation requested".into(),
+            ));
             continue;
           }
           if input.trim_start().starts_with('/') {
-            state.primary.entries.push(Entry {
-              kind: EntryKind::Error,
-              text: "only /cancel is available while a run is active".into(),
-            });
+            state.primary.entries.push(Entry::new(
+              EntryKind::Error,
+              "only /cancel is available while a run is active".into(),
+            ));
             continue;
           }
           if let Some(controller) = &controller
             && controller.steer(input.clone())
           {
-            state.primary.entries.push(Entry {
-              kind: EntryKind::System,
-              text: format!("steering queued: {input}"),
-            });
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              format!("steering queued: {input}"),
+            ));
           }
           continue;
         }
@@ -518,10 +592,10 @@ async fn run_chat_inner(
         ) {
           Ok(result) => result,
           Err(error) => {
-            state.primary.entries.push(Entry {
-              kind: EntryKind::Error,
-              text: format!("{error:#}"),
-            });
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::Error, format!("{error:#}")));
             continue;
           }
         };
@@ -539,14 +613,7 @@ async fn run_chat_inner(
             });
           }
           CommandResult::ShowAgents => {
-            state.roster = true;
-            config.ui.roster_visible = true;
-            if let Err(error) = config.save().await {
-              state.primary.entries.push(Entry {
-                kind: EntryKind::Error,
-                text: format!("could not remember roster setting: {error:#}"),
-              });
-            }
+            set_roster(&mut state, config, true).await;
             continue;
           }
           CommandResult::SetPermissions(mode) => {
@@ -556,10 +623,10 @@ async fn run_chat_inner(
               make_agent_with(&workspace, config, events.clone(), approver.clone()).await?;
             agent = Some(new_agent);
             options = new_options;
-            state.primary.entries.push(Entry {
-              kind: EntryKind::System,
-              text: format!("permissions set to {}", permission_name(mode)),
-            });
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              format!("permissions set to {}", permission_name(mode)),
+            ));
             continue;
           }
           CommandResult::SetHeader(preference) => {
@@ -567,10 +634,10 @@ async fn run_chat_inner(
             state.select_header(&preference, &command_data.headers);
             config.save().await?;
             if !state.primary.entries.is_empty() {
-              state.primary.entries.push(Entry {
-                kind: EntryKind::System,
-                text: format!("header set to {preference}; it will appear on an empty transcript"),
-              });
+              state.primary.entries.push(Entry::new(
+                EntryKind::System,
+                format!("header set to {preference}; it will appear on an empty transcript"),
+              ));
             }
             continue;
           }
@@ -580,18 +647,18 @@ async fn run_chat_inner(
           }
           CommandResult::Prompt { prompt, image } => {
             let expanded = expand_prompt(&prompt, &prompts).await?;
-            state.primary.entries.push(Entry {
-              kind: EntryKind::User,
-              text: expanded.clone(),
-            });
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::User, expanded.clone()));
             let images = match image {
               Some(path) => match Image::from_path(&path).await {
                 Ok(image) => vec![image],
                 Err(error) => {
-                  state.primary.entries.push(Entry {
-                    kind: EntryKind::Error,
-                    text: format!("{error:#}"),
-                  });
+                  state
+                    .primary
+                    .entries
+                    .push(Entry::new(EntryKind::Error, format!("{error:#}")));
                   continue;
                 }
               },
@@ -629,6 +696,24 @@ async fn run_chat_inner(
   }
 }
 
+async fn join(task: Option<&mut RunTask>) -> Result<RunOutput> {
+  match task {
+    Some(task) => task.await.context("agent task failed"),
+    None => std::future::pending().await,
+  }
+}
+
+async fn set_roster(state: &mut ChatState, config: &mut Config, visible: bool) {
+  state.roster = visible;
+  config.ui.roster_visible = visible;
+  if let Err(error) = config.save().await {
+    state.primary.entries.push(Entry::new(
+      EntryKind::Error,
+      format!("could not remember roster setting: {error:#}"),
+    ));
+  }
+}
+
 enum CommandResult {
   Quit,
   Configure,
@@ -656,10 +741,10 @@ fn command(
     "/config" | "/model" | "/provider" => Ok(CommandResult::Configure),
     "/agents" => Ok(CommandResult::ShowAgents),
     "/header" => {
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!("header: {}", config.ui.header),
-      });
+      state.primary.entries.push(Entry::new(
+        EntryKind::System,
+        format!("header: {}", config.ui.header),
+      ));
       Ok(CommandResult::Handled)
     }
     "/headers" => {
@@ -686,17 +771,17 @@ fn command(
       list_command(state, "headers", &values)
     }
     "/permissions" => {
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!("permissions: {}", permission_name(config.permissions)),
-      });
+      state.primary.entries.push(Entry::new(
+        EntryKind::System,
+        format!("permissions: {}", permission_name(config.permissions)),
+      ));
       Ok(CommandResult::Handled)
     }
     "/cancel" => {
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: "no run is active".into(),
-      });
+      state
+        .primary
+        .entries
+        .push(Entry::new(EntryKind::System, "no run is active".into()));
       Ok(CommandResult::Handled)
     }
     "/help" => {
@@ -705,12 +790,13 @@ fn command(
         .map(|command| format!("{:<28} {}", command.usage, command.description))
         .collect::<Vec<_>>()
         .join("\n");
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!(
-          "{listing}\n\nctrl+1…9 select agent  ctrl++/- cycle  ctrl+l roster  ctrl+c cancel  page up/down scroll"
+      state.primary.entries.push(Entry::new(
+        EntryKind::System,
+        format!(
+          "{listing}\n\nctrl+1…9 select agent  ctrl+= / ctrl+- cycle  ctrl+l roster  \
+           ctrl+c cancel  page up/down scroll"
         ),
-      });
+      ));
       Ok(CommandResult::Handled)
     }
     "/new" | "/clear" => {
@@ -729,32 +815,35 @@ fn command(
         .values()
         .filter(|view| matches!(view.state, AgentState::Running))
         .count();
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!(
-          "session {}\nprovider {}\nmodel {}\npermissions {:?}\nagents {running}/{} running\nusage {} input · {} output",
-          session.id,
-          config.provider.as_deref().unwrap_or("default"),
-          config.model,
-          config.permissions,
-          state.agents.len(),
-          state.active_view().usage.input_tokens,
-          state.active_view().usage.output_tokens,
-        ),
-      });
+      let usage = &state.active_view().usage;
+      let text = format!(
+        "session {}\nprovider {}\nmodel {}\npermissions {}\nagents {running}/{} running\n\
+         usage {} input · {} output",
+        session.id,
+        config.provider.as_deref().unwrap_or("default"),
+        config.model,
+        permission_name(config.permissions),
+        state.agents.len(),
+        usage.input_tokens,
+        usage.output_tokens,
+      );
+      state
+        .primary
+        .entries
+        .push(Entry::new(EntryKind::System, text));
       Ok(CommandResult::Handled)
     }
     "/usage" => {
       let usage = &state.active_view().usage;
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!(
+      state.primary.entries.push(Entry::new(
+        EntryKind::System,
+        format!(
           "{} input · {} output · {} total tokens",
           usage.input_tokens,
           usage.output_tokens,
           usage.input_tokens.saturating_add(usage.output_tokens),
         ),
-      });
+      ));
       Ok(CommandResult::Handled)
     }
     "/skills" => list_command(state, "skills", &data.skills),
@@ -771,15 +860,15 @@ fn command(
     }
     "/history" => {
       for node in &session.nodes {
-        state.primary.entries.push(Entry {
-          kind: EntryKind::System,
-          text: format!(
+        state.primary.entries.push(Entry::new(
+          EntryKind::System,
+          format!(
             "{}  {:?}  {}",
             node.id,
             node.message.role,
             node.message.content.as_deref().unwrap_or("[tool call]")
           ),
-        });
+        ));
       }
       Ok(CommandResult::Handled)
     }
@@ -819,10 +908,10 @@ fn command(
         .parse::<Uuid>()
         .context("checkout node must be a UUID")?;
       session.checkout(Some(id))?;
-      state.primary.entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!("cursor {id}"),
-      });
+      state
+        .primary
+        .entries
+        .push(Entry::new(EntryKind::System, format!("cursor {id}")));
       Ok(CommandResult::Handled)
     }
     _ if input.starts_with("/image ") => {
@@ -857,14 +946,14 @@ fn command(
 }
 
 fn list_command(state: &mut ChatState, title: &str, values: &[String]) -> Result<CommandResult> {
-  state.primary.entries.push(Entry {
-    kind: EntryKind::System,
-    text: if values.is_empty() {
+  state.primary.entries.push(Entry::new(
+    EntryKind::System,
+    if values.is_empty() {
       format!("no {title} found")
     } else {
       format!("{title}\n{}", values.join("\n"))
     },
-  });
+  ));
   Ok(CommandResult::Handled)
 }
 
@@ -893,9 +982,7 @@ fn accept_command(state: &mut ChatState, commands: &[SlashCommand]) {
 
 fn apply_event(state: &mut ChatState, message: UiEvent) {
   match message {
-    UiEvent::Approval { call, risk, reply } => {
-      state.approval = Some(Approval { call, risk, reply });
-    }
+    UiEvent::Approval(approval) => state.approval = Some(approval),
     UiEvent::Agent(event) => apply_agent_event(state, None, event),
   }
 }
@@ -908,10 +995,9 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     Event::TextDelta { text } => {
       let view = state.view_mut(session_id);
       let index = view.assistant.unwrap_or_else(|| {
-        view.entries.push(Entry {
-          kind: EntryKind::Assistant,
-          text: String::new(),
-        });
+        view
+          .entries
+          .push(Entry::new(EntryKind::Assistant, String::new()));
         let index = view.entries.len() - 1;
         view.assistant = Some(index);
         index
@@ -921,22 +1007,22 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     Event::ToolStart { call } => {
       let view = state.view_mut(session_id);
       view.tools.insert(call.id.clone(), call.name.clone());
-      view.entries.push(Entry {
-        kind: EntryKind::Tool,
-        text: format!("running {}", call.name),
-      });
+      view.entries.push(Entry::new(
+        EntryKind::Tool,
+        format!("running {}", call.name),
+      ));
     }
     Event::ToolEnd { id, error, .. } => {
       let view = state.view_mut(session_id);
       if let Some(name) = view.tools.remove(&id) {
-        view.entries.push(Entry {
-          kind: if error {
+        view.entries.push(Entry::new(
+          if error {
             EntryKind::Error
           } else {
             EntryKind::Tool
           },
-          text: format!("{} {}", name, if error { "failed" } else { "complete" }),
-        });
+          format!("{} {}", name, if error { "failed" } else { "complete" }),
+        ));
       }
     }
     Event::SubagentStart { session_id, .. } => {
@@ -961,23 +1047,23 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     Event::Compaction {
       archived_messages, ..
     } => {
-      state.view_mut(session_id).entries.push(Entry {
-        kind: EntryKind::System,
-        text: format!("compacted {archived_messages} messages"),
-      });
+      state.view_mut(session_id).entries.push(Entry::new(
+        EntryKind::System,
+        format!("compacted {archived_messages} messages"),
+      ));
     }
-    Event::Steering { message } => state.view_mut(session_id).entries.push(Entry {
-      kind: EntryKind::System,
-      text: format!("steering applied: {message}"),
-    }),
-    Event::Cancelled => state.view_mut(session_id).entries.push(Entry {
-      kind: EntryKind::System,
-      text: "run cancelled".into(),
-    }),
-    Event::Error { message } => state.view_mut(session_id).entries.push(Entry {
-      kind: EntryKind::Error,
-      text: message,
-    }),
+    Event::Steering { message } => state.view_mut(session_id).entries.push(Entry::new(
+      EntryKind::System,
+      format!("steering applied: {message}"),
+    )),
+    Event::Cancelled => state
+      .view_mut(session_id)
+      .entries
+      .push(Entry::new(EntryKind::System, "run cancelled".into())),
+    Event::Error { message } => state
+      .view_mut(session_id)
+      .entries
+      .push(Entry::new(EntryKind::Error, message)),
     Event::TurnEnd { usage } => {
       let view = state.view_mut(session_id);
       view.usage.input_tokens += usage.input_tokens;
@@ -1000,7 +1086,7 @@ fn session_entries(session: &Session) -> Vec<Entry> {
         agentx::protocol::Role::System => EntryKind::System,
         agentx::protocol::Role::Tool => EntryKind::Tool,
       };
-      Some(Entry { kind, text })
+      Some(Entry::new(kind, text))
     })
     .collect()
 }
@@ -1034,7 +1120,7 @@ fn render(
   render_status(frame, status, state, config);
   render_input(frame, input, state);
   if state.active.is_none() {
-    render_command_palette(frame, transcript, input, state, commands);
+    render_command_palette(frame, transcript, status, state, commands);
   }
   if let Some(approval) = &state.approval {
     render_approval(frame, approval);
@@ -1044,7 +1130,7 @@ fn render(
 fn render_command_palette(
   frame: &mut Frame,
   transcript: Rect,
-  input: Rect,
+  above: Rect,
   state: &ChatState,
   commands: &[SlashCommand],
 ) {
@@ -1058,7 +1144,7 @@ fn render_command_palette(
   }
   let area = Rect::new(
     transcript.x,
-    input.y.saturating_sub(height),
+    above.y.saturating_sub(height),
     transcript.width,
     height,
   );
@@ -1071,11 +1157,6 @@ fn render_command_palette(
     .skip(start)
     .take(visible)
     .map(|(index, command)| {
-      let source = if command.source == "prompt" {
-        "prompt"
-      } else {
-        command.source.as_str()
-      };
       ListItem::new(Line::from(vec![
         Span::styled(
           format!(" {:<24}", command.usage),
@@ -1089,7 +1170,7 @@ fn render_command_palette(
           command.description.clone(),
           Style::default().fg(if index == selected { Color::White } else { INK }),
         ),
-        Span::styled(format!("  {source}"), Style::default().fg(MUTED)),
+        Span::styled(format!("  {}", command.source), Style::default().fg(MUTED)),
       ]))
       .style(if index == selected {
         Style::default().bg(BLUE).add_modifier(Modifier::BOLD)
@@ -1147,12 +1228,7 @@ fn render_title(
 fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
   let entries = &state.active_view().entries;
   let lines = if entries.is_empty() {
-    splash(
-      state.splash_style,
-      state.custom_header.as_ref(),
-      area.width.saturating_sub(1) as usize,
-      area.height as usize,
-    )
+    state.splash(area.width.saturating_sub(1) as usize, area.height as usize)
   } else {
     entries.iter().flat_map(entry_lines).collect()
   };
@@ -1190,7 +1266,7 @@ fn splash(
         .map(|line| line.alignment(Alignment::Center))
         .collect()
     })
-    .unwrap_or_else(|| pixel_masthead(width, style));
+    .unwrap_or_else(|| masthead::render(width, style));
   append_splash_footer(&mut lines);
   lines
 }
@@ -1204,619 +1280,31 @@ fn append_splash_footer(lines: &mut Vec<Line<'static>>) {
     )
     .alignment(Alignment::Center),
     Line::styled(
-      "/help commands · ctrl+1…9 select · ctrl++/- cycle · ctrl+l roster",
+      "/help commands · ctrl+1…9 select · ctrl+= / ctrl+- cycle · ctrl+l roster",
       Style::default().fg(MUTED),
     )
     .alignment(Alignment::Center),
   ]);
 }
 
-#[derive(Clone, Copy)]
-struct PixelTheme {
-  face_top: Color,
-  face_bottom: Color,
-  highlight: Color,
-  outline: Color,
-  outline_dark: Color,
-  shadow: Color,
-  shadow_deep: Color,
-}
-
-fn pixel_masthead(width: usize, variant: usize) -> Vec<Line<'static>> {
-  const LETTERS: [[&str; 7]; 6] = [
-    [
-      "01110", "10001", "10001", "11111", "10001", "10001", "10001",
-    ],
-    [
-      "01110", "10001", "10000", "10111", "10001", "10001", "01110",
-    ],
-    [
-      "11111", "10000", "10000", "11110", "10000", "10000", "11111",
-    ],
-    [
-      "10001", "11001", "11001", "10101", "10011", "10011", "10001",
-    ],
-    [
-      "11111", "00100", "00100", "00100", "00100", "00100", "00100",
-    ],
-    [
-      "10001", "10001", "01010", "00100", "01010", "10001", "10001",
-    ],
-  ];
-  const THEMES: [PixelTheme; 10] = [
-    PixelTheme {
-      face_top: Color::Rgb(226, 190, 48),
-      face_bottom: Color::Rgb(211, 126, 29),
-      highlight: Color::Rgb(255, 232, 111),
-      outline: Color::Rgb(62, 188, 221),
-      outline_dark: Color::Rgb(24, 44, 52),
-      shadow: Color::Rgb(54, 57, 61),
-      shadow_deep: Color::Rgb(27, 29, 32),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(224, 230, 229),
-      face_bottom: Color::Rgb(105, 116, 122),
-      highlight: Color::Rgb(255, 255, 247),
-      outline: Color::Rgb(79, 224, 214),
-      outline_dark: Color::Rgb(29, 42, 48),
-      shadow: Color::Rgb(67, 72, 78),
-      shadow_deep: Color::Rgb(25, 28, 34),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(239, 196, 49),
-      face_bottom: Color::Rgb(222, 118, 31),
-      highlight: Color::Rgb(255, 238, 132),
-      outline: Color::Rgb(73, 209, 224),
-      outline_dark: Color::Rgb(34, 31, 48),
-      shadow: Color::Rgb(91, 62, 105),
-      shadow_deep: Color::Rgb(31, 27, 40),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(249, 92, 38),
-      face_bottom: Color::Rgb(160, 24, 28),
-      highlight: Color::Rgb(255, 211, 61),
-      outline: Color::Rgb(255, 142, 28),
-      outline_dark: Color::Rgb(65, 17, 25),
-      shadow: Color::Rgb(91, 25, 38),
-      shadow_deep: Color::Rgb(31, 13, 22),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(137, 237, 52),
-      face_bottom: Color::Rgb(39, 143, 69),
-      highlight: Color::Rgb(222, 255, 96),
-      outline: Color::Rgb(188, 55, 217),
-      outline_dark: Color::Rgb(39, 21, 52),
-      shadow: Color::Rgb(67, 34, 83),
-      shadow_deep: Color::Rgb(20, 17, 30),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(208, 251, 255),
-      face_bottom: Color::Rgb(78, 169, 224),
-      highlight: Color::Rgb(255, 255, 255),
-      outline: Color::Rgb(45, 116, 222),
-      outline_dark: Color::Rgb(22, 38, 72),
-      shadow: Color::Rgb(38, 73, 127),
-      shadow_deep: Color::Rgb(16, 25, 48),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(255, 86, 209),
-      face_bottom: Color::Rgb(137, 55, 198),
-      highlight: Color::Rgb(255, 191, 239),
-      outline: Color::Rgb(54, 231, 225),
-      outline_dark: Color::Rgb(38, 20, 68),
-      shadow: Color::Rgb(51, 49, 122),
-      shadow_deep: Color::Rgb(20, 18, 44),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(246, 199, 53),
-      face_bottom: Color::Rgb(176, 111, 22),
-      highlight: Color::Rgb(255, 238, 145),
-      outline: Color::Rgb(116, 123, 127),
-      outline_dark: Color::Rgb(34, 37, 39),
-      shadow: Color::Rgb(62, 66, 68),
-      shadow_deep: Color::Rgb(21, 23, 24),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(66, 221, 190),
-      face_bottom: Color::Rgb(26, 111, 156),
-      highlight: Color::Rgb(166, 255, 228),
-      outline: Color::Rgb(62, 94, 222),
-      outline_dark: Color::Rgb(17, 31, 65),
-      shadow: Color::Rgb(30, 56, 105),
-      shadow_deep: Color::Rgb(12, 21, 43),
-    },
-    PixelTheme {
-      face_top: Color::Rgb(211, 207, 197),
-      face_bottom: Color::Rgb(102, 99, 96),
-      highlight: Color::Rgb(255, 250, 232),
-      outline: Color::Rgb(196, 46, 54),
-      outline_dark: Color::Rgb(41, 28, 30),
-      shadow: Color::Rgb(62, 58, 58),
-      shadow_deep: Color::Rgb(19, 18, 19),
-    },
-  ];
-
-  fn put(canvas: &mut [Vec<Option<Color>>], x: isize, y: isize, color: Color) {
-    if x >= 0
-      && y >= 0
-      && let Some(row) = canvas.get_mut(y as usize)
-      && let Some(pixel) = row.get_mut(x as usize)
-    {
-      *pixel = Some(color);
-    }
-  }
-
-  fn face_color(
-    theme: PixelTheme,
-    variant: usize,
-    letter: usize,
-    x: usize,
-    y: usize,
-    height: usize,
-  ) -> Color {
-    if (x * 17 + y * 29 + letter * 11).is_multiple_of(19) {
-      return theme.highlight;
-    }
-    match variant {
-      1 if letter == 3 || (x + y + letter).is_multiple_of(17) => {
-        return Color::Rgb(67, 213, 230);
-      }
-      1 if (x * 3 + y + letter).is_multiple_of(23) => {
-        return Color::Rgb(119, 239, 83);
-      }
-      4 if (x + y * 2 + letter).is_multiple_of(13) => {
-        return Color::Rgb(208, 66, 221);
-      }
-      5 if (x * 2 + y + letter).is_multiple_of(11) => {
-        return Color::Rgb(116, 237, 255);
-      }
-      6 if letter.is_multiple_of(2) && (x + y).is_multiple_of(7) => {
-        return Color::Rgb(61, 223, 228);
-      }
-      7 if (x + y + letter).is_multiple_of(9) => {
-        return Color::Rgb(75, 78, 78);
-      }
-      8 if (x * 3 + y + letter).is_multiple_of(11) => {
-        return Color::Rgb(58, 102, 226);
-      }
-      9 if (x + y * 3 + letter).is_multiple_of(17) => {
-        return Color::Rgb(205, 47, 57);
-      }
-      _ => {}
-    }
-    if y < height / 2 {
-      theme.face_top
-    } else {
-      theme.face_bottom
-    }
-  }
-
-  let variant = variant % 10;
-  let theme = THEMES[variant];
-  let scale = if width >= 78 { 2 } else { 1 };
-  let letter_width = 5 * scale;
-  let gap = 1;
-  let face_width = LETTERS.len() * letter_width + (LETTERS.len() - 1) * gap;
-  let face_height = 7 * scale;
-  let depth = if scale == 2 { 3 } else { 2 };
-  let margin = depth + 2;
-  let top = if scale == 2 { 6 } else { 4 };
-  let canvas_width = face_width + margin * 2;
-  let canvas_height = top + face_height + depth + if scale == 2 { 5 } else { 3 };
-  let mut canvas = vec![vec![None; canvas_width]; canvas_height];
-  let mut face = Vec::new();
-
-  for (letter, pattern) in LETTERS.iter().enumerate() {
-    let letter_x = margin + letter * (letter_width + gap);
-    let letter_y = match variant {
-      2 | 8 => [1, 0, 2, 0, 1, 0][letter] * scale / 2,
-      4 => [0, 1, 2, 1, 0, 1][letter] * scale / 2,
-      9 => [1, 0, 1, 0, 1, 0][letter] * scale / 2,
-      _ => 0,
-    };
-    for (pattern_y, row) in pattern.iter().enumerate() {
-      for (pattern_x, bit) in row.bytes().enumerate() {
-        if bit != b'1' {
-          continue;
-        }
-        for dy in 0..scale {
-          for dx in 0..scale {
-            let slant = match variant {
-              1 | 6 => (6 - pattern_y) * scale / 4,
-              3 => pattern_y * scale / 6,
-              _ => 0,
-            };
-            face.push((
-              (letter_x + pattern_x * scale + dx + slant) as isize,
-              (top + letter_y + pattern_y * scale + dy) as isize,
-              letter,
-            ));
-          }
-        }
-      }
-    }
-  }
-
-  for &(x, y, _) in &face {
-    for step in 0..=depth as isize {
-      for oy in -1..=1 {
-        for ox in -1..=1 {
-          let direction = if matches!(variant, 3 | 6 | 9) { -1 } else { 1 };
-          put(
-            &mut canvas,
-            x + step * direction + ox,
-            y + step + oy,
-            theme.outline,
-          );
-        }
-      }
-    }
-  }
-
-  for &(x, y, _) in &face {
-    for step in 1..=depth as isize {
-      let direction = if matches!(variant, 3 | 6 | 9) { -1 } else { 1 };
-      put(
-        &mut canvas,
-        x + step * direction,
-        y + step,
-        if step == depth as isize {
-          theme.shadow_deep
-        } else {
-          theme.shadow
-        },
-      );
-    }
-  }
-
-  for &(x, y, _) in &face {
-    for oy in -1..=1 {
-      for ox in -1..=1 {
-        put(&mut canvas, x + ox, y + oy, theme.outline_dark);
-      }
-    }
-  }
-
-  for &(x, y, letter) in &face {
-    let color = face_color(
-      theme,
-      variant,
-      letter,
-      x as usize,
-      y.saturating_sub(top as isize) as usize,
-      face_height,
-    );
-    put(&mut canvas, x, y, color);
-  }
-
-  if matches!(variant, 0 | 2 | 4 | 5 | 6 | 8) {
-    let drip_columns = [1, 8, 15, 24, 31];
-    for (index, column) in drip_columns.into_iter().enumerate() {
-      let x = margin + column * scale;
-      let start = top + face_height + depth;
-      let length = 1 + (index * 2 + variant) % if scale == 2 { 5 } else { 3 };
-      for dy in 0..length {
-        put(
-          &mut canvas,
-          x as isize,
-          (start + dy) as isize,
-          if dy + 1 == length {
-            theme.highlight
-          } else {
-            theme.outline
-          },
-        );
-        if scale == 2 && dy < 2 {
-          put(
-            &mut canvas,
-            x as isize + 1,
-            (start + dy) as isize,
-            theme.shadow,
-          );
-        }
-      }
-    }
-  }
-
-  match variant {
-    0 => paint_flame(&mut canvas, canvas_width / 2, theme.outline_dark),
-    1 => paint_shards(&mut canvas, canvas_width, theme),
-    2 => paint_sparks(&mut canvas, canvas_width, theme),
-    3 => paint_inferno(&mut canvas, canvas_width, theme),
-    4 => paint_toxic(&mut canvas, canvas_width, theme),
-    5 => paint_ice(&mut canvas, canvas_width, theme),
-    6 => paint_orbit(&mut canvas, canvas_width, theme),
-    7 => paint_industrial(&mut canvas, canvas_width, theme),
-    8 => paint_abyss(&mut canvas, canvas_width, theme),
-    _ => paint_skull(&mut canvas, canvas_width, theme),
-  }
-
-  let left_padding = width.saturating_sub(canvas_width) / 2;
-  let mut lines = vec![Line::raw("")];
-  for rows in canvas.chunks(2) {
-    let top_row = &rows[0];
-    let bottom_row = rows.get(1);
-    let mut spans = vec![Span::raw(" ".repeat(left_padding))];
-    for x in 0..canvas_width {
-      let upper = top_row[x];
-      let lower = bottom_row.and_then(|row| row[x]);
-      spans.push(match (upper, lower) {
-        (Some(fg), Some(bg)) => Span::styled("▀", Style::default().fg(fg).bg(bg)),
-        (Some(fg), None) => Span::styled("▀", Style::default().fg(fg)),
-        (None, Some(fg)) => Span::styled("▄", Style::default().fg(fg)),
-        (None, None) => Span::raw(" "),
-      });
-    }
-    lines.push(Line::from(spans));
-  }
-  lines
-}
-
-fn paint_flame(canvas: &mut [Vec<Option<Color>>], center: usize, edge: Color) {
-  const FLAME: [&str; 5] = ["..r....", ".rr..r.", ".rorrr.", "..ryr..", "...r..."];
-  let left = center.saturating_sub(FLAME[0].len() / 2);
-  for (y, row) in FLAME.iter().enumerate() {
-    for (x, pixel) in row.chars().enumerate() {
-      if pixel == '.' {
-        continue;
-      }
-      for oy in -1..=1 {
-        for ox in -1..=1 {
-          let px = (left + x) as isize + ox;
-          let py = y as isize + oy;
-          if px >= 0
-            && py >= 0
-            && let Some(line) = canvas.get_mut(py as usize)
-            && let Some(cell) = line.get_mut(px as usize)
-          {
-            *cell = Some(edge);
-          }
-        }
-      }
-    }
-  }
-  for (y, row) in FLAME.iter().enumerate() {
-    for (x, pixel) in row.chars().enumerate() {
-      let color = match pixel {
-        'r' => Some(Color::Rgb(210, 76, 72)),
-        'o' => Some(Color::Rgb(244, 120, 31)),
-        'y' => Some(Color::Rgb(255, 213, 73)),
-        _ => None,
-      };
-      if let Some(color) = color
-        && let Some(line) = canvas.get_mut(y)
-        && let Some(cell) = line.get_mut(left + x)
-      {
-        *cell = Some(color);
-      }
-    }
-  }
-}
-
-fn paint_shards(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  let shards = [
-    (width / 5, 1, 3),
-    (width / 3, 0, 4),
-    (width * 2 / 3, 1, 3),
-    (width * 4 / 5, 0, 4),
-  ];
-  for (x, y, length) in shards {
-    for step in 0..length {
-      if let Some(row) = canvas.get_mut(y + step)
-        && let Some(cell) = row.get_mut(x + step / 2)
-      {
-        *cell = Some(if step == 0 {
-          theme.highlight
-        } else {
-          theme.outline
-        });
-      }
-    }
-  }
-}
-
-fn paint_sparks(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  let sparks = [
-    (width / 7, 2),
-    (width / 4, 0),
-    (width / 2, 2),
-    (width * 3 / 4, 1),
-    (width * 6 / 7, 3),
-  ];
-  for (index, (x, y)) in sparks.into_iter().enumerate() {
-    if let Some(row) = canvas.get_mut(y)
-      && let Some(cell) = row.get_mut(x)
-    {
-      *cell = Some(if index.is_multiple_of(2) {
-        theme.highlight
-      } else {
-        theme.outline
-      });
-    }
-  }
-}
-
-fn scene_put(canvas: &mut [Vec<Option<Color>>], x: usize, y: usize, color: Color) {
-  if let Some(row) = canvas.get_mut(y)
-    && let Some(cell) = row.get_mut(x)
-  {
-    *cell = Some(color);
-  }
-}
-
-fn paint_inferno(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  for x in 1..width.saturating_sub(1) {
-    let height = 1 + (x * 7 % 5);
-    if x % 3 == 0 {
-      for y in 0..height {
-        scene_put(
-          canvas,
-          x,
-          5_usize.saturating_sub(y),
-          if y + 1 == height {
-            theme.highlight
-          } else {
-            theme.face_top
-          },
-        );
-      }
-    }
-  }
-}
-
-fn paint_toxic(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  let bubbles = [
-    (width / 8, 2, 2),
-    (width / 3, 0, 1),
-    (width * 2 / 3, 1, 2),
-    (width * 7 / 8, 0, 1),
-  ];
-  for (cx, cy, radius) in bubbles {
-    for y in 0..=radius * 2 {
-      for x in 0..=radius * 2 {
-        let edge = x == 0 || y == 0 || x == radius * 2 || y == radius * 2;
-        if edge {
-          scene_put(canvas, cx + x - radius, cy + y, theme.outline);
-        }
-      }
-    }
-    scene_put(canvas, cx, cy + radius, theme.highlight);
-  }
-}
-
-fn paint_ice(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  for (index, x) in [
-    width / 9,
-    width / 4,
-    width / 2,
-    width * 3 / 4,
-    width * 8 / 9,
-  ]
-  .into_iter()
-  .enumerate()
-  {
-    let length = 2 + index % 4;
-    for step in 0..length {
-      scene_put(
-        canvas,
-        x + step / 2,
-        step,
-        if step == 0 {
-          theme.highlight
-        } else {
-          theme.outline
-        },
-      );
-      if x > step / 2 {
-        scene_put(canvas, x - step / 2, step, theme.face_bottom);
-      }
-    }
-  }
-}
-
-fn paint_orbit(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  let center = width / 2;
-  for offset in 0..center.saturating_sub(3) {
-    if offset % 3 == 0 {
-      let y = (offset * 5 / center.max(1)).min(4);
-      scene_put(canvas, center + offset, y, theme.outline);
-      scene_put(canvas, center - offset, 4 - y, theme.face_top);
-    }
-  }
-  for y in 0..4 {
-    scene_put(canvas, center, y, theme.highlight);
-    if center + 1 < width {
-      scene_put(canvas, center + 1, y, theme.face_bottom);
-    }
-  }
-}
-
-fn paint_industrial(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  for x in 1..width.saturating_sub(1) {
-    if x % 4 < 2 {
-      scene_put(canvas, x, 1, theme.face_top);
-      scene_put(canvas, x, 2, theme.outline_dark);
-    }
-  }
-  for x in (4..width.saturating_sub(4)).step_by(9) {
-    scene_put(canvas, x, 4, theme.highlight);
-    scene_put(canvas, x + 1, 4, theme.shadow);
-  }
-}
-
-fn paint_abyss(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  let center = width / 2;
-  for x in center.saturating_sub(7)..=(center + 7).min(width.saturating_sub(1)) {
-    let distance = x.abs_diff(center);
-    let y = distance / 3;
-    scene_put(canvas, x, y, theme.outline);
-    scene_put(canvas, x, 5_usize.saturating_sub(y), theme.face_bottom);
-  }
-  scene_put(canvas, center, 2, theme.highlight);
-  scene_put(canvas, center, 3, theme.shadow_deep);
-  for x in [2, width / 6, width * 5 / 6, width.saturating_sub(3)] {
-    for y in 1..5 {
-      scene_put(canvas, x + y % 2, y, theme.outline);
-    }
-  }
-}
-
-fn paint_skull(canvas: &mut [Vec<Option<Color>>], width: usize, theme: PixelTheme) {
-  const SKULL: [&str; 6] = [
-    ".xxxxx.", "xx...xx", "x.x.x.x", "xx...xx", ".xxxxx.", "..x.x..",
-  ];
-  let left = width.saturating_sub(SKULL[0].len()) / 2;
-  for (y, row) in SKULL.iter().enumerate() {
-    for (x, pixel) in row.chars().enumerate() {
-      if pixel == 'x' {
-        scene_put(
-          canvas,
-          left + x,
-          y,
-          if y == 2 && (x == 2 || x == 4) {
-            theme.outline
-          } else {
-            theme.face_top
-          },
-        );
-      }
-    }
-  }
-}
-
-fn select_splash_style() -> usize {
-  let seed = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_nanos()
-    ^ u128::from(std::process::id());
-  (seed % 10) as usize
-}
-
 fn selected_header(preference: &str, catalog: &HeaderCatalog) -> (usize, Option<HeaderArt>) {
-  let style = select_splash_style();
+  let style = masthead::select_index(masthead::VARIANTS);
   match preference {
     "builtin" => (style, None),
     "random" if !catalog.headers.is_empty() => {
-      let choice = select_header_index(10 + catalog.headers.len());
-      if choice < 10 {
+      let choice = masthead::select_index(masthead::VARIANTS + catalog.headers.len());
+      if choice < masthead::VARIANTS {
         (choice, None)
       } else {
-        (style, Some(catalog.headers[choice - 10].clone()))
+        (
+          style,
+          Some(catalog.headers[choice - masthead::VARIANTS].clone()),
+        )
       }
     }
     "random" => (style, None),
     name => (style, catalog.get(name).cloned()),
   }
-}
-
-fn select_header_index(count: usize) -> usize {
-  let seed = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_nanos()
-    ^ u128::from(std::process::id());
-  (seed % count.max(1) as u128) as usize
 }
 
 fn entry_lines(entry: &Entry) -> Vec<Line<'static>> {
@@ -1834,7 +1322,7 @@ fn entry_lines(entry: &Entry) -> Vec<Line<'static>> {
     .map(|(index, text)| {
       if index == 0 {
         Line::from(vec![
-          Span::styled(format!(" {} ", clock()), Style::default().fg(MUTED)),
+          Span::styled(format!(" {} ", entry.at), Style::default().fg(MUTED)),
           Span::styled(
             format!("<{nick}> "),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -1927,11 +1415,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       .saturating_add(view.usage.output_tokens),
   );
   let provider = config.provider.as_deref().unwrap_or("default");
-  let permissions = match config.permissions {
-    PermissionMode::Ask => "ask",
-    PermissionMode::Auto => "auto",
-    PermissionMode::ReadOnly => "read-only",
-  };
+  let permissions = permission_name(config.permissions);
   let activity = view
     .tools
     .values()
@@ -1950,15 +1434,16 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
         "ready".into()
       }
     });
+  let model = &config.model;
   let text = if area.width >= 108 {
     format!(
-      " {provider}/{} │ {permissions} │ tokens in {input} out {output} total {total} │ agents {running}/{total_agents} │ {activity} │ ^L roster ",
-      config.model,
+      " {provider}/{model} │ {permissions} │ tokens in {input} out {output} total {total} │ \
+       agents {running}/{total_agents} │ {activity} │ ^L roster "
     )
   } else if area.width >= 72 {
     format!(
-      " {provider}/{} │ {permissions} │ tok {input}↓ {output}↑ Σ{total} │ ag {running}/{total_agents} │ {activity} ",
-      config.model,
+      " {provider}/{model} │ {permissions} │ tok {input}↓ {output}↑ Σ{total} │ \
+       ag {running}/{total_agents} │ {activity} "
     )
   } else {
     format!(" {} │ Σ{total} tok │ {activity} ", config.model)
@@ -2007,26 +1492,39 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     return;
   }
   let prefix = if state.busy { "↳ " } else { "> " };
+  // long input keeps its tail in view, where the cursor is
+  let capacity = area.width.saturating_sub(3) as usize;
+  let skipped = state.input.chars().count().saturating_sub(capacity);
+  let shown: String = state.input.chars().skip(skipped).collect();
+  let width = shown.chars().count();
   frame.render_widget(
     Paragraph::new(Line::from(vec![
       Span::styled(
         prefix,
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
       ),
-      Span::styled(state.input.clone(), Style::default().fg(INK)),
+      Span::styled(shown, Style::default().fg(INK)),
     ])),
     area,
   );
   let x = area
     .x
     .saturating_add(2)
-    .saturating_add(state.input.chars().count().min(u16::MAX as usize) as u16)
+    .saturating_add(width.min(u16::MAX as usize) as u16)
     .min(area.right().saturating_sub(1));
   frame.set_cursor_position((x, area.y));
 }
 
+// the arguments are the decision, so they are shown, clipped to what fits
 fn render_approval(frame: &mut Frame, approval: &Approval) {
-  let area = centered(frame.area(), frame.area().width.min(68), 7);
+  let area = centered(frame.area(), frame.area().width.min(76), 11);
+  let arguments: String = approval
+    .call
+    .arguments
+    .to_string()
+    .chars()
+    .take(240)
+    .collect();
   frame.render_widget(Clear, area);
   frame.render_widget(
     Paragraph::new(vec![
@@ -2042,27 +1540,20 @@ fn render_approval(frame: &mut Frame, approval: &Approval) {
         ),
         Span::styled(format!("  {:?}", approval.risk), Style::default().fg(MUTED)),
       ]),
+      Line::styled(arguments, Style::default().fg(INK)),
+      Line::raw(""),
       Line::styled("y allow   n deny", Style::default().fg(ACCENT)),
     ])
+    .wrap(Wrap { trim: false })
     .block(
       Block::default()
         .title(" approval ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(YELLOW))
-        .padding(ratatui::widgets::Padding::horizontal(2)),
+        .padding(Padding::horizontal(2)),
     ),
     area,
   );
-}
-
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-  let [area] = Layout::horizontal([Constraint::Length(width)])
-    .flex(ratatui::layout::Flex::Center)
-    .areas(area);
-  let [area] = Layout::vertical([Constraint::Length(height)])
-    .flex(ratatui::layout::Flex::Center)
-    .areas(area);
-  area
 }
 
 fn clock() -> String {

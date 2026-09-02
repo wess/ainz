@@ -10,18 +10,18 @@ brew install wess/packages/agentx
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/wess/agentx/v0.1.0/install.sh | sh
+  https://raw.githubusercontent.com/wess/agentx/main/install.sh | sh
 ```
 
 The installer supports Intel and Apple Silicon macOS and x86_64 and arm64 Linux. It downloads the
-matching release archive, verifies the published SHA-256 file, and installs `agentx` into
+latest release archive, verifies the published SHA-256 file, and installs `agentx` into
 `~/.local/bin`. Set `AGENTX_INSTALL_DIR` to choose another destination or `AGENTX_VERSION` to pin a
-release.
+release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep) on `PATH`.
 
 ## Cargo
 
 ```sh
-cargo install --git https://github.com/wess/agentx --tag v0.1.0 --locked
+cargo install --git https://github.com/wess/agentx --tag v0.1.1 --locked
 ```
 
 ## Uninstall

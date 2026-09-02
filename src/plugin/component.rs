@@ -2,28 +2,24 @@ use std::{
   collections::BTreeSet,
   path::{Path, PathBuf},
   process::Stdio,
-  sync::Arc,
+  sync::{Arc, LazyLock},
   time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde_json::{Value, json};
-use tokio::{
-  fs,
-  io::{AsyncRead, AsyncReadExt},
-  process::Command,
-  time::timeout,
-};
+use serde_json::Value;
+use tokio::{fs, io::AsyncReadExt, process::Command, time::timeout};
 use wasmtime::{
   Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
   component::{Component, HasData, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use super::{Capability, PluginManifest, PluginTool};
+use super::{Capability, PluginManifest, PluginTool, capture, catalog::read_artifact};
 use crate::{
+  process::GroupGuard,
   protocol::ToolSpec,
   tool::{Risk, Tool, ToolContext, truncate},
   workspace,
@@ -41,16 +37,35 @@ wasmtime::component::bindgen!({
   },
 });
 
+const EPOCH_TICK: Duration = Duration::from_millis(50);
+
+// one engine for every component; its epoch ticker is what lets a spinning guest be timed out
+static ENGINE: LazyLock<Result<Engine, String>> = LazyLock::new(|| {
+  let mut config = Config::new();
+  config.consume_fuel(true);
+  config.epoch_interruption(true);
+  let engine = Engine::new(&config).map_err(|error| error.to_string())?;
+  let ticker = engine.clone();
+  std::thread::spawn(move || {
+    loop {
+      std::thread::sleep(EPOCH_TICK);
+      ticker.increment_epoch();
+    }
+  });
+  Ok(engine)
+});
+
 pub(super) struct ComponentRuntime {
   engine: Engine,
-  component: Component,
+  pre: PluginPre<HostState>,
+  client: reqwest::Client,
   timeout: Duration,
   memory_bytes: usize,
   fuel: u64,
 }
 
 impl ComponentRuntime {
-  pub(super) fn new(manifest: &PluginManifest, root: &Path) -> Result<Self> {
+  pub(super) async fn new(manifest: &PluginManifest, root: &Path, digest: &str) -> Result<Self> {
     let path = manifest
       .runtime
       .path
@@ -61,14 +76,29 @@ impl ComponentRuntime {
     } else {
       path.clone()
     };
-    let mut config = Config::new();
-    config.consume_fuel(true);
-    let engine = Engine::new(&config)?;
-    let component = Component::from_file(&engine, &path)
-      .map_err(|error| anyhow::anyhow!("compile component {}: {error}", path.display()))?;
+    // compiled from the very bytes that were hashed, so the approval covers what runs
+    let bytes = read_artifact(&path).await?;
+    if super::catalog::digest(&bytes) != digest {
+      bail!("{} changed since the plugin was approved", path.display());
+    }
+    let engine = ENGINE
+      .as_ref()
+      .map(Engine::clone)
+      .map_err(|error| anyhow!("create wasm engine: {error}"))?;
+    let component = Component::new(&engine, &bytes)
+      .map_err(anyhow::Error::from)
+      .with_context(|| format!("compile component {}", path.display()))?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    Plugin::add_to_linker::<HostState, HostBindings>(&mut linker, |state| state)?;
+    let pre = PluginPre::new(linker.instantiate_pre(&component)?)?;
     Ok(Self {
       engine,
-      component,
+      pre,
+      client: reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .context("build HTTP client")?,
       timeout: Duration::from_millis(manifest.runtime.timeout_ms),
       memory_bytes: manifest.runtime.memory_bytes,
       fuel: manifest.runtime.fuel,
@@ -88,21 +118,22 @@ impl ComponentRuntime {
       capabilities,
       self.timeout,
       context.max_output_bytes,
+      self.client.clone(),
     );
     let mut store = Store::new(&self.engine, state);
     store.limiter(|state| &mut state.limits);
     store.set_fuel(self.fuel)?;
-    let mut linker = Linker::new(&self.engine);
-    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-    Plugin::add_to_linker::<HostState, HostBindings>(&mut linker, |state| state)?;
-    let bindings = Plugin::instantiate_async(&mut store, &self.component, &linker).await?;
+    // every epoch tick the guest yields, which is when the wall-clock timeout can fire
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_async_yield_and_update(1);
+    let bindings = self.pre.instantiate_async(&mut store).await?;
     let result = timeout(
       self.timeout,
       bindings.call_call(&mut store, tool, arguments),
     )
     .await
     .context("component timed out")??;
-    result.map_err(|error| anyhow::anyhow!("component error: {error}"))
+    result.map_err(|error| anyhow!("component error: {error}"))
   }
 }
 
@@ -150,6 +181,7 @@ struct HostState {
   capabilities: BTreeSet<Capability>,
   timeout: Duration,
   max_output_bytes: usize,
+  client: reqwest::Client,
 }
 
 impl HostState {
@@ -159,6 +191,7 @@ impl HostState {
     capabilities: &[Capability],
     timeout: Duration,
     max_output_bytes: usize,
+    client: reqwest::Client,
   ) -> Self {
     Self {
       wasi: WasiCtxBuilder::new().build(),
@@ -174,6 +207,7 @@ impl HostState {
       capabilities: capabilities.iter().copied().collect(),
       timeout,
       max_output_bytes,
+      client,
     }
   }
 
@@ -212,16 +246,19 @@ impl HostState {
     Ok(())
   }
 
+  // NB: process_exec is full user authority: the shell inherits the host environment
   async fn host_run(&mut self, command: &str) -> Result<String> {
     self.require(Capability::ProcessExec)?;
     let mut child = Command::new("sh")
-      .args(["-lc", command])
+      .args(["-c", command])
       .current_dir(&self.workspace)
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .kill_on_drop(true)
+      .process_group(0)
       .spawn()?;
+    let guard = GroupGuard::new(child.id());
     let stdout = child.stdout.take().context("command stdout unavailable")?;
     let stderr = child.stderr.take().context("command stderr unavailable")?;
     let run = async {
@@ -238,9 +275,11 @@ impl HostState {
       output.push_str(&format!("\n[exit {}]", status.code().unwrap_or(-1)));
       Result::<String>::Ok(output)
     };
-    timeout(self.timeout, run)
+    let output = timeout(self.timeout, run)
       .await
-      .context("command timed out")?
+      .context("command timed out")??;
+    guard.disarm();
+    Ok(output)
   }
 
   async fn host_fetch(&mut self, url: &str) -> Result<String> {
@@ -249,7 +288,8 @@ impl HostState {
     if !matches!(url.scheme(), "http" | "https") {
       bail!("only HTTP and HTTPS URLs are supported");
     }
-    let response = reqwest::Client::new()
+    let response = self
+      .client
       .get(url)
       .timeout(self.timeout)
       .send()
@@ -266,27 +306,6 @@ impl HostState {
     }
     String::from_utf8(bytes).context("response was not UTF-8")
   }
-}
-
-struct Capture {
-  bytes: Vec<u8>,
-  truncated: bool,
-}
-
-async fn capture(mut reader: impl AsyncRead + Unpin, limit: usize) -> std::io::Result<Capture> {
-  let mut bytes = Vec::with_capacity(limit.min(8192));
-  let mut buffer = [0_u8; 8192];
-  let mut truncated = false;
-  loop {
-    let read = reader.read(&mut buffer).await?;
-    if read == 0 {
-      break;
-    }
-    let remaining = limit.saturating_sub(bytes.len());
-    bytes.extend_from_slice(&buffer[..read.min(remaining)]);
-    truncated |= read > remaining;
-  }
-  Ok(Capture { bytes, truncated })
 }
 
 impl WasiView for HostState {
@@ -321,22 +340,11 @@ impl ComponentTool {
 #[async_trait]
 impl Tool for ComponentTool {
   fn spec(&self) -> ToolSpec {
-    ToolSpec {
-      name: format!("{}_{}", self.plugin, self.definition.name),
-      description: self.definition.description.clone(),
-      parameters: serde_json::to_value(&self.definition.parameters)
-        .unwrap_or_else(|_| json!({"type": "object"})),
-    }
+    self.definition.spec(&self.plugin)
   }
 
   fn risk(&self, _arguments: &Value) -> Risk {
-    self
-      .definition
-      .capabilities
-      .iter()
-      .map(|capability| capability.risk())
-      .max()
-      .unwrap_or(Risk::Read)
+    self.definition.risk()
   }
 
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {
@@ -349,12 +357,6 @@ impl Tool for ComponentTool {
         &self.definition.capabilities,
       )
       .await?;
-    if output.len() > context.max_output_bytes {
-      return Ok(truncate(output, context.max_output_bytes));
-    }
-    if output.is_empty() {
-      bail!("component returned an empty response");
-    }
-    Ok(output)
+    Ok(truncate(output, context.max_output_bytes))
   }
 }

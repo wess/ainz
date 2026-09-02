@@ -1,221 +1,175 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, StatusCode, header};
-use serde_json::{Value, json};
+use futures_util::StreamExt;
+use reqwest::{
+  Client, Response, StatusCode,
+  header::{self, HeaderName, HeaderValue},
+  redirect::Policy,
+};
+use serde_json::Value;
 
-use super::{PROTOCOL_VERSION, RpcResponse, ToolPage, call_output};
-use crate::mcp::{McpServerConfig, RemoteTool};
+use super::{PROTOCOL_VERSION, RpcResponse};
+use crate::{mcp::McpServerConfig, sse::SseDecoder};
 
-pub(in crate::mcp) struct HttpClient {
+const MAX_BODY: usize = 8 * 1024 * 1024;
+const MAX_ERROR_BODY: usize = 2 * 1024;
+
+pub(super) struct HttpTransport {
   client: Client,
   url: String,
-  headers: BTreeMap<String, String>,
-  session_id: Option<String>,
-  initialized: bool,
-  next_id: u64,
-  timeout: Duration,
-  instructions: Option<String>,
+  headers: Vec<(HeaderName, HeaderValue)>,
+  session_id: Option<HeaderValue>,
+  pub initialized: bool,
 }
 
-impl HttpClient {
-  pub async fn start(name: &str, config: &McpServerConfig) -> Result<Self> {
+impl HttpTransport {
+  pub fn new(config: &McpServerConfig) -> Result<Self> {
     let url = config
       .url
       .clone()
       .context("streamable_http server url is required")?;
     reqwest::Url::parse(&url).context("invalid streamable HTTP server URL")?;
-    let mut headers = BTreeMap::new();
-    for (header, value) in &config.headers {
-      header::HeaderName::from_bytes(header.as_bytes())
-        .with_context(|| format!("invalid HTTP header name {header}"))?;
-      header::HeaderValue::from_str(value)
-        .with_context(|| format!("invalid value for HTTP header {header}"))?;
-      headers.insert(header.clone(), value.clone());
+    let mut headers = Vec::new();
+    for (name, value) in &config.headers {
+      headers.push(header_pair(name, value).with_context(|| format!("HTTP header {name}"))?);
     }
-    for (header, variable) in &config.header_env {
+    for (name, variable) in &config.header_env {
       let value = std::env::var(variable)
         .with_context(|| format!("environment variable {variable} is required"))?;
-      header::HeaderName::from_bytes(header.as_bytes())
-        .with_context(|| format!("invalid HTTP header name {header}"))?;
-      header::HeaderValue::from_str(&value)
-        .with_context(|| format!("invalid value from {variable}"))?;
-      headers.insert(header.clone(), value);
+      headers.push(header_pair(name, &value).with_context(|| format!("HTTP header {name}"))?);
     }
-    let mut client = Self {
-      client: Client::new(),
+    // NB: redirects are refused so configured credentials never replay to another origin
+    let client = Client::builder()
+      .redirect(Policy::none())
+      .connect_timeout(Duration::from_secs(15))
+      .build()
+      .context("build HTTP client")?;
+    Ok(Self {
+      client,
       url,
       headers,
       session_id: None,
       initialized: false,
-      next_id: 1,
-      timeout: Duration::from_millis(config.timeout_ms),
-      instructions: None,
-    };
-    let result = client
-      .request(
-        "initialize",
-        json!({
-          "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-          "clientInfo": {"name": "agentx", "version": env!("CARGO_PKG_VERSION")}
-        }),
-      )
-      .await?;
-    let version = result
-      .get("protocolVersion")
-      .and_then(Value::as_str)
-      .unwrap_or_default();
-    if version != PROTOCOL_VERSION {
-      bail!("server {name} negotiated unsupported version {version}");
-    }
-    client.instructions = result
-      .get("instructions")
-      .and_then(Value::as_str)
-      .map(str::to_owned);
-    client.initialized = true;
-    client
-      .notify("notifications/initialized", json!({}))
-      .await?;
-    Ok(client)
+    })
   }
 
-  pub fn instructions(&self) -> Option<&str> {
-    self.instructions.as_deref()
-  }
-
-  pub async fn list_tools(&mut self) -> Result<Vec<RemoteTool>> {
-    let mut tools = Vec::new();
-    let mut cursor = None;
-    loop {
-      let result = self
-        .request(
-          "tools/list",
-          cursor
-            .as_ref()
-            .map_or(json!({}), |cursor| json!({"cursor": cursor})),
-        )
-        .await?;
-      let page: ToolPage = serde_json::from_value(result)?;
-      tools.extend(page.tools);
-      cursor = page.next_cursor;
-      if cursor.is_none() {
-        break;
-      }
-    }
-    Ok(tools)
-  }
-
-  pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<String> {
-    call_output(
-      self
-        .request("tools/call", json!({"name": name, "arguments": arguments}))
-        .await?,
-    )
-  }
-
-  async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-    let id = self.next_id;
-    self.next_id += 1;
-    let value = self
-      .post(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-      .await?
-      .context("server returned no response")?;
-    response_result(value, id)
-  }
-
-  async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-    self
-      .post(json!({"jsonrpc": "2.0", "method": method, "params": params}))
-      .await?;
-    Ok(())
-  }
-
-  async fn post(&mut self, value: Value) -> Result<Option<Value>> {
+  pub async fn exchange(
+    &mut self,
+    message: &Value,
+    id: Option<u64>,
+  ) -> Result<Option<RpcResponse>> {
     let mut request = self
       .client
       .post(&self.url)
-      .timeout(self.timeout)
       .header(header::ACCEPT, "application/json, text/event-stream")
       .header(header::CONTENT_TYPE, "application/json");
     if self.initialized {
       request = request.header("MCP-Protocol-Version", PROTOCOL_VERSION);
     }
     if let Some(session_id) = &self.session_id {
-      request = request.header("MCP-Session-Id", session_id);
+      request = request.header("MCP-Session-Id", session_id.clone());
     }
     for (name, value) in &self.headers {
-      request = request.header(name, value);
+      request = request.header(name.clone(), value.clone());
     }
-    let response = request.json(&value).send().await?;
-    if let Some(session_id) = response
-      .headers()
-      .get("MCP-Session-Id")
-      .and_then(|value| value.to_str().ok())
-    {
-      self.session_id = Some(session_id.into());
-    }
-    if response.status() == StatusCode::ACCEPTED {
-      return Ok(None);
+    let response = request
+      .json(message)
+      .send()
+      .await
+      .context("send server request")?;
+    if let Some(session_id) = response.headers().get("MCP-Session-Id") {
+      self.session_id = Some(session_id.clone());
     }
     let status = response.status();
-    if !status.is_success() {
-      bail!("HTTP server returned {status}: {}", response.text().await?)
+    if status == StatusCode::ACCEPTED {
+      return Ok(None);
     }
+    if !status.is_success() {
+      let body = read_body(response, MAX_ERROR_BODY)
+        .await
+        .unwrap_or_default();
+      bail!("HTTP server returned {status}: {}", body.trim());
+    }
+    let Some(id) = id else {
+      return Ok(None);
+    };
     let streaming = response
       .headers()
       .get(header::CONTENT_TYPE)
       .and_then(|value| value.to_str().ok())
       .is_some_and(|value| value.contains("text/event-stream"));
     if streaming {
-      parse_sse(&response.text().await?).map(Some)
-    } else {
-      Ok(Some(response.json().await?))
+      return read_stream(response, id).await.map(Some);
     }
+    let body = read_body(response, MAX_BODY).await?;
+    let value: Value = serde_json::from_str(&body).context("invalid server response")?;
+    find_response(value, id)?
+      .with_context(|| format!("server response did not answer request {id}"))
+      .map(Some)
   }
 }
 
-fn response_result(value: Value, id: u64) -> Result<Value> {
-  let mut values = Vec::new();
-  flatten(value, &mut values);
-  for value in values {
-    let response: RpcResponse = serde_json::from_value(value)?;
-    if response.id == Some(json!(id)) {
-      if let Some(error) = response.error {
-        bail!("server error {}: {}", error.code, error.message)
+fn header_pair(name: &str, value: &str) -> Result<(HeaderName, HeaderValue)> {
+  Ok((
+    HeaderName::from_bytes(name.as_bytes()).context("invalid header name")?,
+    HeaderValue::from_str(value).context("invalid header value")?,
+  ))
+}
+
+async fn read_body(response: Response, limit: usize) -> Result<String> {
+  let mut stream = response.bytes_stream();
+  let mut body = Vec::new();
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.context("read server response")?;
+    if body.len() + chunk.len() > limit {
+      bail!("server response exceeds {limit} bytes");
+    }
+    body.extend_from_slice(&chunk);
+  }
+  Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+// returns as soon as the answer arrives; a server may keep the stream open for progress
+async fn read_stream(response: Response, id: u64) -> Result<RpcResponse> {
+  let mut stream = response.bytes_stream();
+  let mut decoder = SseDecoder::default();
+  let mut total = 0;
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.context("read server stream")?;
+    total += chunk.len();
+    if total > MAX_BODY {
+      bail!("server stream exceeds {MAX_BODY} bytes");
+    }
+    for data in decoder.push(&chunk) {
+      if let Some(response) = parse_event(&data, id)? {
+        return Ok(response);
       }
-      return response.result.context("server response had no result");
     }
   }
-  bail!("server response did not contain request id {id}")
+  for data in decoder.finish() {
+    if let Some(response) = parse_event(&data, id)? {
+      return Ok(response);
+    }
+  }
+  bail!("server stream ended without answering request {id}")
 }
 
-fn flatten(value: Value, values: &mut Vec<Value>) {
-  match value {
-    Value::Array(items) => {
-      for item in items {
-        flatten(item, values);
-      }
-    }
-    value => values.push(value),
-  }
+fn parse_event(data: &str, id: u64) -> Result<Option<RpcResponse>> {
+  let value: Value = serde_json::from_str(data).context("invalid server event")?;
+  find_response(value, id)
 }
 
-fn parse_sse(body: &str) -> Result<Value> {
-  let mut messages = Vec::new();
-  for event in body.split("\n\n") {
-    let data = event
-      .lines()
-      .filter_map(|line| line.strip_prefix("data:"))
-      .map(str::trim)
-      .collect::<Vec<_>>()
-      .join("\n");
-    if !data.is_empty() {
-      messages.push(serde_json::from_str(&data).context("invalid server event")?);
+fn find_response(value: Value, id: u64) -> Result<Option<RpcResponse>> {
+  let items = match value {
+    Value::Array(items) => items,
+    value => vec![value],
+  };
+  for item in items {
+    let response: RpcResponse = serde_json::from_value(item).context("invalid server message")?;
+    if response.answers(id) {
+      return Ok(Some(response));
     }
   }
-  match messages.len() {
-    0 => bail!("server event stream contained no data"),
-    1 => Ok(messages.pop().unwrap()),
-    _ => Ok(Value::Array(messages)),
-  }
+  Ok(None)
 }

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use anyhow::{Result, bail};
 
@@ -7,13 +7,19 @@ use crate::{
   context::{estimate_tokens, transcript},
   control::{RunInbox, RunSignal},
   event::{Event, EventSink},
-  protocol::{Image, Message, Role, ToolCall, ToolSpec, Usage},
+  protocol::{Image, Message, Role, ToolCall, Usage},
   provider::ChatProvider,
   session::Session,
   tool::{Risk, ToolContext, ToolSet},
 };
 
-pub type Approver = Arc<dyn Fn(&ToolCall, Risk) -> bool + Send + Sync>;
+pub type Approval = Pin<Box<dyn Future<Output = bool> + Send>>;
+pub type Approver = Arc<dyn Fn(&ToolCall, Risk) -> Approval + Send + Sync>;
+
+// for surfaces with nobody to ask: json output, rpc, tests
+pub fn deny_all() -> Approver {
+  Arc::new(|_, _| Box::pin(async { false }))
+}
 
 #[derive(Clone)]
 pub struct RunOptions {
@@ -116,11 +122,14 @@ impl<P: ChatProvider> Agent<P> {
     let specs = self.tools.specs();
     let mut steering = Vec::new();
     for _ in 0..options.max_steps {
-      self
-        .compact_if_needed(session, &options, &specs, &mut total)
-        .await?;
-      let context_messages = session.context_messages()?;
-      let estimate = estimate_tokens(&options.instructions, &context_messages, &specs);
+      let mut context_messages = session.context_messages()?;
+      let mut estimate = estimate_tokens(&options.instructions, &context_messages, &specs);
+      if estimate >= options.compact_at_tokens
+        && self.compact(session, &options, &mut total).await?
+      {
+        context_messages = session.context_messages()?;
+        estimate = estimate_tokens(&options.instructions, &context_messages, &specs);
+      }
       if estimate > options.context_tokens {
         bail!(
           "estimated context is {estimate} tokens, above the {} token limit",
@@ -233,26 +242,26 @@ impl<P: ChatProvider> Agent<P> {
     false
   }
 
-  async fn compact_if_needed(
+  // returns whether anything was archived; nothing happens when too little is old enough
+  async fn compact(
     &self,
     session: &mut Session,
     options: &RunOptions,
-    specs: &[ToolSpec],
     total: &mut Usage,
-  ) -> Result<()> {
-    let messages = session.context_messages()?;
-    if estimate_tokens(&options.instructions, &messages, specs) < options.compact_at_tokens {
-      return Ok(());
-    }
+  ) -> Result<bool> {
     let Some((cursor, input, archived_messages)) =
       session.compaction_input(options.preserve_messages)?
     else {
-      return Ok(());
+      return Ok(false);
     };
     let request = vec![
       Message::text(
         Role::System,
-        "Summarize the session transcript for another agent continuing the work. Preserve decisions, constraints, file paths, commands and results, unresolved errors, and the next concrete action. Omit conversational filler.",
+        concat!(
+          "Summarize the session transcript for another agent continuing the work. ",
+          "Preserve decisions, constraints, file paths, commands and results, unresolved ",
+          "errors, and the next concrete action. Omit conversational filler."
+        ),
       ),
       Message::text(Role::User, transcript(&input)),
     ];
@@ -271,7 +280,7 @@ impl<P: ChatProvider> Agent<P> {
       archived_messages,
       summary,
     });
-    Ok(())
+    Ok(true)
   }
 
   async fn run_tool(
@@ -287,7 +296,7 @@ impl<P: ChatProvider> Agent<P> {
     let allowed = match options.permissions {
       PermissionMode::Auto => true,
       PermissionMode::ReadOnly => risk == Risk::Read,
-      PermissionMode::Ask => risk == Risk::Read || (self.approver)(call, risk),
+      PermissionMode::Ask => risk == Risk::Read || (self.approver)(call, risk).await,
     };
     if !allowed {
       return (
