@@ -120,3 +120,19 @@ async fn memory_off_refuses_to_write() {
       .is_err()
   );
 }
+
+#[tokio::test]
+async fn forgetting_needs_the_whole_id() {
+  let temp = tempfile::tempdir().unwrap();
+  let store = LocalMemory::with_root(temp.path().join("memory"), &PathBuf::from("/work"));
+  store
+    .remember("the deploy user is ci", None, "project", &[])
+    .await
+    .unwrap();
+  let id = store.recall("deploy", 5).await.unwrap()[0].id.clone();
+
+  assert!(store.forget(&id[id.len() - 6..]).await.is_err());
+  assert_eq!(store.recall("deploy", 5).await.unwrap().len(), 1);
+  assert!(store.forget(&id).await.is_ok());
+  assert!(store.recall("deploy", 5).await.unwrap().is_empty());
+}

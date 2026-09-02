@@ -228,10 +228,13 @@ impl LocalMemory {
       };
       while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
+        // the file is `<created>-<id>`, and only the whole id counts: a partial one that
+        // happens to end another id would delete the wrong memory
         if path
           .file_stem()
           .and_then(|stem| stem.to_str())
-          .is_some_and(|stem| stem.ends_with(id))
+          .and_then(|stem| stem.rsplit_once('-'))
+          .is_some_and(|(_, stored)| stored == id)
         {
           fs::remove_file(&path)
             .await
