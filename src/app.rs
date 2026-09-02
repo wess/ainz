@@ -88,7 +88,10 @@ pub(crate) async fn make_agent_with(
       profile.output,
     )),
   };
-  let catalog = PluginCatalog::discover(workspace).await?;
+  let mut catalog = PluginCatalog::discover(workspace).await?;
+  if config.yeet {
+    catalog.trust_all();
+  }
   let mut tools = ToolSet::default();
   tools.extend(builtins())?;
   tools.insert(JobStore::default_store()?.tool())?;
@@ -492,7 +495,7 @@ fn print_header(config: &Config) {
     config.provider.as_deref().unwrap_or("default"),
     config.model,
     if config.yeet {
-      " · yeet: every tool call runs without asking"
+      " · yeet: no approval prompts, and unapproved plugins load"
     } else {
       ""
     }

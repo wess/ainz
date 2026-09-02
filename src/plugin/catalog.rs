@@ -197,6 +197,14 @@ impl PluginCatalog {
     }
     Ok(())
   }
+
+  // --yeet trusts whatever is already on disk without pinning it: no grant is written, so
+  // approval is back to what it was the moment the flag is gone
+  pub fn trust_all(&mut self) {
+    for plugin in &mut self.plugins {
+      plugin.approved = true;
+    }
+  }
 }
 
 impl PluginGrants {

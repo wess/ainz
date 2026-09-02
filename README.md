@@ -131,11 +131,11 @@ ainz doctor
 JSON mode never opens an approval prompt; pass `--permissions auto` explicitly when a
 noninteractive request may write files or execute commands.
 
-`--yeet` is the blunt version: every tool call runs without asking, for that invocation only.
-`/yeet` does the same inside a session. It is not written to the config file, and the status
-line says `yeet` while it is on. Plugin approval is unaffected — an unapproved plugin still
-does not load, because that trust is pinned to content and granted deliberately with
-`ainz plugins approve`.
+`--yeet` is the blunt version: every tool call runs without asking, and every plugin on disk
+loads whether or not it was approved. `/yeet` does the same inside a session. Nothing is
+written — not the config file, not the plugin grants — so both end with the process, and the
+status line says `yeet` while it is on. It runs code you have not vetted, which is what the
+name is for.
 
 In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts
 that show the tool's arguments, tool activity, and a subagent roster. Type `/` to open the

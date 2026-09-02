@@ -154,3 +154,8 @@ executable file, not rely on shell path lookup, and artifacts must be regular fi
 
 `ainz plugins revoke <name>` removes the grant. Grants are keyed by plugin name, so
 approving a same-named plugin in another workspace replaces the earlier pin.
+
+`--yeet`, and `/yeet` inside a session, suspends all of this: every discovered plugin loads as
+though it were approved. No grant is written and no fingerprint is recorded, so the pins are
+exactly as they were once the flag is gone — but for that session the host is running code
+nothing has vetted.

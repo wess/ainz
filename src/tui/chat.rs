@@ -689,7 +689,9 @@ async fn run_chat_inner(
             options = new_options;
             state.primary.entries.push(Entry::new(
               EntryKind::System,
-              "yeet: every tool call runs without asking for the rest of this session".into(),
+              "yeet: for the rest of this session every tool call runs without asking, \
+               and unapproved plugins load"
+                .into(),
             ));
             continue;
           }

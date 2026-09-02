@@ -493,3 +493,46 @@ async fn a_program_swapped_after_approval_is_refused_at_run_time() {
       .contains("changed since the plugin was approved")
   );
 }
+
+#[tokio::test]
+async fn yeet_loads_unapproved_plugins_without_granting_them() {
+  let temp = tempfile::tempdir().unwrap();
+  let root = temp.path().join(".ainz/plugins/echo");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("plugin.toml"), MANIFEST)
+    .await
+    .unwrap();
+  let runner = root.join("run.sh");
+  tokio::fs::write(
+    &runner,
+    "#!/bin/sh\nread request\nprintf '{\"result\":{\"ok\":true}}\\n'\n",
+  )
+  .await
+  .unwrap();
+  std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let grants = temp.path().join("grants.json");
+
+  let mut catalog = PluginCatalog::discover_with_grants(temp.path(), &grants)
+    .await
+    .unwrap();
+  assert!(catalog.approved_tools().await.unwrap().is_empty());
+
+  catalog.trust_all();
+  assert!(
+    catalog
+      .approved_tools()
+      .await
+      .unwrap()
+      .iter()
+      .any(|tool| tool.spec().name == "echo_say")
+  );
+  // the pin is untouched, so the next run without the flag is back to pending
+  assert!(!grants.exists());
+  assert!(
+    !PluginCatalog::discover_with_grants(temp.path(), &grants)
+      .await
+      .unwrap()
+      .plugins[0]
+      .approved
+  );
+}
