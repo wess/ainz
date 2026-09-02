@@ -252,7 +252,7 @@ pub async fn search_sessions(workspace: &Path, query: &str, json: bool) -> Resul
     println!("no earlier session mentioned that");
   } else {
     for found in matches {
-      println!("{}  {} nodes matched", found.id, found.score);
+      println!("{}  {} of the terms", found.id, found.score);
       for excerpt in found.excerpts {
         println!("    {excerpt}");
       }

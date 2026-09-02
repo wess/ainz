@@ -635,32 +635,36 @@ async fn run_chat_inner(
             });
           }
           CommandResult::Recall(query) => {
-            let store = crate::app::memory_store(&workspace, config).await?;
-            let entry = match store.recall(&query, 8).await {
-              Ok(records) if records.is_empty() => {
-                Entry::new(EntryKind::System, "no memories matched".into())
-              }
-              Ok(records) => Entry::new(
-                EntryKind::System,
-                records
-                  .iter()
-                  .map(|record| format!("{}  {}", record.id, record.summary(96)))
-                  .collect::<Vec<_>>()
-                  .join("\n"),
-              ),
-              Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+            let entry = match memory_for(&workspace, config).await {
+              Err(entry) => entry,
+              Ok(store) => match store.recall(&query, 8).await {
+                Ok(records) if records.is_empty() => {
+                  Entry::new(EntryKind::System, "no memories matched".into())
+                }
+                Ok(records) => Entry::new(
+                  EntryKind::System,
+                  records
+                    .iter()
+                    .map(|record| format!("{}  {}", record.id, record.summary(96)))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                ),
+                Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+              },
             };
             state.primary.entries.push(entry);
             continue;
           }
           CommandResult::Remember(content) => {
-            let store = crate::app::memory_store(&workspace, config).await?;
-            let entry = match store
-              .remember(&content, Some("typed in a session"), "project", &[])
-              .await
-            {
-              Ok(message) => Entry::new(EntryKind::System, message),
-              Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+            let entry = match memory_for(&workspace, config).await {
+              Err(entry) => entry,
+              Ok(store) => match store
+                .remember(&content, Some("typed in a session"), "project", &[])
+                .await
+              {
+                Ok(message) => Entry::new(EntryKind::System, message),
+                Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+              },
             };
             state.primary.entries.push(entry);
             continue;
@@ -753,6 +757,21 @@ async fn join(task: Option<&mut RunTask>) -> Result<RunOutput> {
   match task {
     Some(task) => task.await.context("agent task failed"),
     None => std::future::pending().await,
+  }
+}
+
+// the transcript is the place to say a memory command cannot run, not the process exit code
+async fn memory_for(
+  workspace: &std::path::Path,
+  config: &Config,
+) -> std::result::Result<ainz::MemoryStore, Entry> {
+  match crate::app::memory_store(workspace, config).await {
+    Ok(store) if store.is_off() => Err(Entry::new(
+      EntryKind::System,
+      "memory is off; turn it on in /settings".into(),
+    )),
+    Ok(store) => Ok(store),
+    Err(error) => Err(Entry::new(EntryKind::Error, format!("{error:#}"))),
   }
 }
 
