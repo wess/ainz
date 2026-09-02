@@ -140,7 +140,23 @@ name is for.
 
 In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts
 that show the tool's arguments, tool activity, and a subagent roster. Type `/` to open the
-command palette and fuzzy-search commands and prompt templates. `Ctrl+L` toggles the roster
+command palette and fuzzy-search commands and prompt templates, and `@` to complete a path in
+the workspace.
+
+The prompt is a readline: `Up` and `Down` walk earlier prompts and come back to the line being
+written, `Left`/`Right` and `Alt+←`/`Alt+→` move by character and word, `Ctrl+A`/`Ctrl+E` reach
+its ends, `Ctrl+U`/`Ctrl+K`/`Ctrl+W` cut, and `Shift+Enter` — or a trailing backslash — adds a
+newline. `Esc` twice steps back to the last prompt and puts it in the line to be changed, taking
+the session from there. `/vim` turns on modal editing. The wheel, `Shift+↑`/`Shift+↓` and
+`PageUp`/`PageDown` scroll the transcript; `Ctrl+O` expands what tools returned in full. The
+mouse selects a field or a menu row in the setup screens, and holding `Shift` while dragging
+selects text the way it normally would.
+
+`/inline` draws the prompt at the bottom of the terminal's own scroll instead of taking the
+whole screen, so finished output stays in the scrollback the terminal already keeps — at the
+cost of the roster. It applies at the next launch.
+
+`Ctrl+L` toggles the roster
 and remembers the choice, `Ctrl+1` selects the primary transcript, `Ctrl+2` through `Ctrl+9`
 select subagents, and `Ctrl+=` / `Ctrl+-` cycle through them; those chords need a terminal
 that speaks the kitty keyboard protocol, and `/agent N` works everywhere. `Ctrl+C` cancels an

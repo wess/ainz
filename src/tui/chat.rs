@@ -25,6 +25,7 @@ use ratatui::{
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
+  widgets::Widget,
   widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 use tokio::{
@@ -34,8 +35,8 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-  ACCENT, ACTIVE, BLUE, CYAN, INK, MAGENTA, MUTED, RED, Term, YELLOW, centered, enter_terminal,
-  input::Input, leave_terminal, masthead,
+  ACCENT, ACTIVE, BLUE, CYAN, INK, MAGENTA, MUTED, RED, Term, YELLOW, centered,
+  enter_inline_terminal, enter_terminal, input, input::Input, leave_terminal, masthead,
 };
 use crate::app::{expand_prompt, make_agent_with};
 
@@ -95,6 +96,8 @@ enum EntryKind {
 struct Entry {
   kind: EntryKind,
   text: String,
+  // the whole of what a tool returned, kept for ctrl+o rather than shown by default
+  detail: Option<String>,
   at: String,
 }
 
@@ -103,7 +106,15 @@ impl Entry {
     Self {
       kind,
       text,
+      detail: None,
       at: clock(),
+    }
+  }
+
+  fn with_detail(kind: EntryKind, text: String, detail: String) -> Self {
+    Self {
+      detail: (!detail.trim().is_empty()).then_some(detail),
+      ..Self::new(kind, text)
     }
   }
 }
@@ -155,8 +166,21 @@ struct ChatState {
   custom_header: Option<HeaderArt>,
   // the splash is thousands of cell puts that depend only on size and choice; paint it once
   splash_cache: RefCell<Option<(usize, usize, Vec<Line<'static>>)>>,
-  // how far back the transcript actually reaches, learned while drawing it
+  // how far back the transcript actually reaches, and where the prompt and its menu were
+  // drawn, all learned while drawing them
   reach: Cell<u16>,
+  prompt_area: Cell<Rect>,
+  palette_area: Cell<Rect>,
+  // ctrl+o: show what tools returned in full rather than the first few lines
+  expanded: bool,
+  // esc counts toward a rewind only while it is the key being pressed twice
+  rewinding: bool,
+  // vim's `d`, waiting for what to delete
+  pending_delete: bool,
+  files: Vec<String>,
+  // how much of the transcript has already been handed to the terminal's scrollback
+  flushed: usize,
+  inline: bool,
 }
 
 impl Default for ChatState {
@@ -176,6 +200,14 @@ impl Default for ChatState {
       custom_header: None,
       splash_cache: RefCell::new(None),
       reach: Cell::new(0),
+      prompt_area: Cell::new(Rect::ZERO),
+      palette_area: Cell::new(Rect::ZERO),
+      expanded: false,
+      rewinding: false,
+      pending_delete: false,
+      files: Vec::new(),
+      flushed: 0,
+      inline: false,
     }
   }
 }
@@ -284,7 +316,12 @@ pub(crate) async fn run_chat(
   initial_session: Session,
   initial_prompt: Option<String>,
 ) -> Result<ChatOutcome> {
-  let mut terminal = enter_terminal()?;
+  // inline keeps the terminal's own scrollback; the full screen keeps the roster beside the talk
+  let mut terminal = if config.ui.inline {
+    enter_inline_terminal(INLINE_ROWS)?
+  } else {
+    enter_terminal()?
+  };
   let result = run_chat_inner(
     &mut terminal,
     workspace,
@@ -295,6 +332,34 @@ pub(crate) async fn run_chat(
   .await;
   leave_terminal(&mut terminal)?;
   result
+}
+
+/// Status, prompt, and room for the reply being written, when drawing inline.
+const INLINE_ROWS: u16 = 8;
+
+/// Moves finished transcript into the terminal's scrollback, where its own scroll can reach it.
+fn flush_scrollback(terminal: &mut Term, state: &mut ChatState) -> Result<()> {
+  let width = terminal.size()?.width.max(1);
+  // whatever is still being written stays in the viewport until it is done
+  let live = match state.primary.assistant {
+    Some(index) if state.busy() => index,
+    _ => state.primary.entries.len(),
+  };
+  state.flushed = state.flushed.min(state.primary.entries.len());
+  while state.flushed < live {
+    let lines = entry_lines(&state.primary.entries[state.flushed], state.expanded);
+    let height: u16 = lines
+      .iter()
+      .map(|line| (line.width().max(1) as u16).div_ceil(width))
+      .sum();
+    terminal.insert_before(height.max(1), |buffer| {
+      Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .render(buffer.area, buffer);
+    })?;
+    state.flushed += 1;
+  }
+  Ok(())
 }
 
 async fn run_chat_inner(
@@ -400,8 +465,16 @@ async fn run_chat_inner(
         .collect()
     })
     .unwrap_or_default();
+  let files = {
+    let root = workspace.clone();
+    tokio::task::spawn_blocking(move || workspace_files(&root))
+      .await
+      .unwrap_or_default()
+  };
   let mut state = ChatState {
     input: Input::with_history(history),
+    inline: config.ui.inline,
+    files,
     primary: AgentView {
       entries: session_entries(session.as_ref().unwrap()),
       usage: session.as_ref().unwrap().usage.clone(),
@@ -440,6 +513,9 @@ async fn run_chat_inner(
   loop {
     while let Ok(message) = rx.try_recv() {
       apply_event(&mut state, message);
+    }
+    if state.inline {
+      flush_scrollback(terminal, &mut state)?;
     }
     terminal.draw(|frame| render(frame, &state, config, current_id, &workspace, &commands))?;
     let wake = tokio::select! {
@@ -491,6 +567,20 @@ async fn run_chat_inner(
         match mouse.kind {
           MouseEventKind::ScrollUp => state.scroll_back(3),
           MouseEventKind::ScrollDown => state.scroll_forward(3),
+          // a click lands either in the prompt, where it moves the cursor, or on a suggestion
+          MouseEventKind::Down(_) => {
+            let palette = state.palette_area.get();
+            let prompt = state.prompt_area.get();
+            if contains(palette, mouse.column, mouse.row) {
+              state.command_selected = usize::from(mouse.row - palette.y - 1);
+              accept_command(&mut state, &commands);
+            } else if contains(prompt, mouse.column, mouse.row) {
+              state.input.place(
+                usize::from(mouse.row - prompt.y),
+                usize::from(mouse.column.saturating_sub(prompt.x + 2)),
+              );
+            }
+          }
           _ => {}
         }
         continue;
@@ -542,6 +632,7 @@ async fn run_chat_inner(
           let visible = !state.roster;
           set_roster(&mut state, config, visible).await;
         }
+        KeyCode::Char('o') => state.expanded = !state.expanded,
         KeyCode::Char('c') => match &controller {
           Some(controller) if !state.cancelled => {
             controller.cancel();
@@ -576,7 +667,7 @@ async fn run_chat_inner(
       }
       continue;
     }
-    let suggestion_count = command_matches(&commands, state.input.as_str()).len();
+    let suggestion_count = suggestions(&state, &commands).len();
     if suggestion_count > 0 {
       match key.code {
         KeyCode::Up => {
@@ -600,12 +691,22 @@ async fn run_chat_inner(
           state.command_selected = 0;
           continue;
         }
-        KeyCode::Enter if !command_is_exact(state.input.as_str(), &commands) => {
+        KeyCode::Enter
+          if !command_is_exact(state.input.as_str(), &commands)
+            && !state.input.as_str().ends_with(' ') =>
+        {
           accept_command(&mut state, &commands);
           continue;
         }
         _ => {}
       }
+    }
+    if key.code != KeyCode::Esc {
+      state.rewinding = false;
+    }
+    // vim's normal mode answers first, and only for the keys it claims
+    if config.ui.vim && state.input.mode() == input::Mode::Normal && vim_key(&mut state, key.code) {
+      continue;
     }
     // control keys are answered above; alt is the other word-wise modifier
     let word = key.modifiers.contains(KeyModifiers::ALT);
@@ -648,6 +749,31 @@ async fn run_chat_inner(
       KeyCode::Esc if state.busy() => {
         if let Some(controller) = &controller {
           controller.cancel();
+        }
+      }
+      // esc twice steps back to the last prompt, which lands in the line ready to be changed
+      KeyCode::Esc if state.rewinding => {
+        state.rewinding = false;
+        let entry = match session.as_mut().and_then(rewind) {
+          Some(text) => {
+            state.input.set(text);
+            state.primary.entries = session_entries(session.as_ref().expect("rewound session"));
+            state.primary.assistant = None;
+            // the scrollback already holds what was said; only what comes next is new
+            state.flushed = state.primary.entries.len();
+            Entry::new(
+              EntryKind::System,
+              "rewound; edit the prompt and send it to take the session from there".into(),
+            )
+          }
+          None => Entry::new(EntryKind::System, "no earlier prompt to rewind to".into()),
+        };
+        state.primary.entries.push(entry);
+      }
+      KeyCode::Esc => {
+        state.rewinding = true;
+        if config.ui.vim {
+          state.input.set_mode(input::Mode::Normal);
         }
       }
       // a newline where the terminal can say so, and a trailing backslash where it cannot
@@ -804,6 +930,35 @@ async fn run_chat_inner(
             ));
             continue;
           }
+          CommandResult::SetVim(on) => {
+            config.ui.vim = on;
+            config.save().await?;
+            state.input.set_mode(input::Mode::Insert);
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              format!(
+                "vim keys {}",
+                if on { "on; esc for normal mode" } else { "off" }
+              ),
+            ));
+            continue;
+          }
+          CommandResult::SetInline(on) => {
+            config.ui.inline = on;
+            config.save().await?;
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              format!(
+                "inline {}; it takes effect next launch",
+                if on {
+                  "on: the terminal keeps its own scrollback"
+                } else {
+                  "off: full screen with the roster"
+                }
+              ),
+            ));
+            continue;
+          }
           CommandResult::SetHeader(preference) => {
             config.ui.header = preference.clone();
             state.select_header(&preference, &command_data.headers);
@@ -915,6 +1070,8 @@ enum CommandResult {
   ShowAgents,
   SetPermissions(PermissionMode),
   SetHeader(String),
+  SetVim(bool),
+  SetInline(bool),
   Handled,
   Prompt {
     prompt: String,
@@ -953,6 +1110,8 @@ fn command(
       Ok(CommandResult::Handled)
     }
     "/agents" => Ok(CommandResult::ShowAgents),
+    "/vim" => Ok(CommandResult::SetVim(!config.ui.vim)),
+    "/inline" => Ok(CommandResult::SetInline(!config.ui.inline)),
     "/header" => {
       state.primary.entries.push(Entry::new(
         EntryKind::System,
@@ -1012,6 +1171,8 @@ fn command(
         format!(
           "{listing}\n\n\
            up/down    earlier prompts        shift+enter  newline\n\
+           @name      complete a path        esc esc      rewind a prompt\n\
+           ctrl+o     expand tool output     /vim /inline prompt and drawing\n\
            ctrl+a/e   line start/end         ctrl+w       delete word\n\
            ctrl+u/k   clear before/after     alt+←/→      move a word\n\
            wheel      scroll the transcript  page up/down  scroll a screen\n\
@@ -1025,6 +1186,7 @@ fn command(
     "/new" | "/clear" => {
       *session = Session::new(session.workspace.clone());
       state.primary.entries.clear();
+      state.flushed = 0;
       state.primary.tools.clear();
       state.primary.assistant = None;
       state.primary.usage = Usage::default();
@@ -1205,9 +1367,17 @@ fn command_is_exact(input: &str, commands: &[SlashCommand]) -> bool {
 }
 
 fn accept_command(state: &mut ChatState, commands: &[SlashCommand]) {
-  let matches = command_matches(commands, state.input.as_str());
-  if let Some(command) = matches.get(state.command_selected.min(matches.len().saturating_sub(1))) {
-    state.input.set(command.completion());
+  let matches = suggestions(state, commands);
+  match matches.get(state.command_selected.min(matches.len().saturating_sub(1))) {
+    Some(Suggestion::Command(command)) => state.input.set(command.completion()),
+    Some(Suggestion::Path(path)) => {
+      if let Some((at, fragment)) = file_fragment(state.input.as_str(), state.input.cursor()) {
+        let mut text = state.input.as_str().to_string();
+        text.replace_range(at..at + 1 + fragment.len(), &format!("@{path} "));
+        state.input.set(text);
+      }
+    }
+    None => {}
   }
   state.command_selected = 0;
 }
@@ -1247,13 +1417,14 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     Event::ToolEnd { id, output, error } => {
       let view = state.view_mut(session_id);
       if let Some(name) = view.tools.remove(&id) {
-        view.entries.push(Entry::new(
+        view.entries.push(Entry::with_detail(
           if error {
             EntryKind::Error
           } else {
             EntryKind::Tool
           },
           tool_result(&name, &output, error),
+          output,
         ));
       }
     }
@@ -1309,10 +1480,36 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
   }
 }
 
-fn session_entries(session: &Session) -> Vec<Entry> {
-  session
-    .nodes
+// the conversation as it stands, which after a rewind is not every node ever written
+fn active_path(session: &Session) -> Vec<&ainz::session::SessionNode> {
+  let mut path = Vec::new();
+  let mut current = session.cursor;
+  while let Some(id) = current {
+    let Some(node) = session.nodes.iter().find(|node| node.id == id) else {
+      break;
+    };
+    path.push(node);
+    current = node.parent;
+  }
+  path.reverse();
+  path
+}
+
+/// Steps the session back to before its last prompt, and hands that prompt back to be edited.
+fn rewind(session: &mut Session) -> Option<String> {
+  let path = active_path(session);
+  let node = path
     .iter()
+    .rev()
+    .find(|node| node.message.role == ainz::protocol::Role::User)?;
+  let (text, parent) = (node.message.content.clone()?, node.parent);
+  session.checkout(parent).ok()?;
+  Some(text)
+}
+
+fn session_entries(session: &Session) -> Vec<Entry> {
+  active_path(session)
+    .into_iter()
     .filter_map(|node| {
       let text = node.message.content.clone()?;
       let kind = match node.message.role {
@@ -1336,6 +1533,22 @@ fn render(
 ) {
   // the prompt grows with what is written in it, up to a few lines
   let prompt_rows = (state.input.as_str().matches('\n').count() + 1).clamp(1, 6) as u16;
+  if state.inline {
+    let [body, status, input] = Layout::vertical([
+      Constraint::Min(1),
+      Constraint::Length(1),
+      Constraint::Length(prompt_rows),
+    ])
+    .areas(frame.area());
+    render_transcript(frame, body, state);
+    render_status(frame, status, state, config);
+    render_input(frame, input, state);
+    render_command_palette(frame, body, status, state, commands);
+    if let Some(approval) = &state.approval {
+      render_approval(frame, approval);
+    }
+    return;
+  }
   let [header, body, status, input] = Layout::vertical([
     Constraint::Length(1),
     Constraint::Min(8),
@@ -1371,7 +1584,7 @@ fn render_command_palette(
   state: &ChatState,
   commands: &[SlashCommand],
 ) {
-  let matches = command_matches(commands, state.input.as_str());
+  let matches = suggestions(state, commands);
   if matches.is_empty() {
     return;
   }
@@ -1385,6 +1598,7 @@ fn render_command_palette(
     transcript.width,
     height,
   );
+  state.palette_area.set(area);
   let selected = state.command_selected.min(matches.len() - 1);
   let visible = height.saturating_sub(2) as usize;
   let start = selected.saturating_sub(visible.saturating_sub(1));
@@ -1393,10 +1607,22 @@ fn render_command_palette(
     .enumerate()
     .skip(start)
     .take(visible)
-    .map(|(index, command)| {
+    .map(|(index, suggestion)| {
+      let (usage, description, source) = match suggestion {
+        Suggestion::Command(command) => (
+          command.usage.clone(),
+          command.description.clone(),
+          command.source.clone(),
+        ),
+        Suggestion::Path(path) => (
+          format!("@{}", path.rsplit('/').next().unwrap_or(path)),
+          path.clone(),
+          "file".into(),
+        ),
+      };
       ListItem::new(Line::from(vec![
         Span::styled(
-          format!(" {:<24}", command.usage),
+          format!(" {usage:<24}"),
           Style::default().fg(if index == selected {
             Color::White
           } else {
@@ -1404,10 +1630,10 @@ fn render_command_palette(
           }),
         ),
         Span::styled(
-          command.description.clone(),
+          description,
           Style::default().fg(if index == selected { Color::White } else { INK }),
         ),
-        Span::styled(format!("  {}", command.source), Style::default().fg(MUTED)),
+        Span::styled(format!("  {source}"), Style::default().fg(MUTED)),
       ]))
       .style(if index == selected {
         Style::default().bg(BLUE).add_modifier(Modifier::BOLD)
@@ -1463,11 +1689,21 @@ fn render_title(
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
-  let entries = &state.active_view().entries;
-  let lines = if entries.is_empty() {
-    state.splash(area.width.saturating_sub(1) as usize, area.height as usize)
+  let view = state.active_view();
+  let entries = if state.inline && state.active.is_none() {
+    &view.entries[state.flushed.min(view.entries.len())..]
   } else {
-    entries.iter().flat_map(entry_lines).collect()
+    &view.entries[..]
+  };
+  let lines = if entries.is_empty() && !state.inline {
+    state.splash(area.width.saturating_sub(1) as usize, area.height as usize)
+  } else if entries.is_empty() {
+    Vec::new()
+  } else {
+    entries
+      .iter()
+      .flat_map(|entry| entry_lines(entry, state.expanded))
+      .collect()
   };
   let text_width = area.width.saturating_sub(1).max(1) as usize;
   let rendered_lines: usize = lines
@@ -1545,7 +1781,7 @@ fn selected_header(preference: &str, catalog: &HeaderCatalog) -> (usize, Option<
   }
 }
 
-fn entry_lines(entry: &Entry) -> Vec<Line<'static>> {
+fn entry_lines(entry: &Entry, expanded: bool) -> Vec<Line<'static>> {
   let (nick, color) = match entry.kind {
     EntryKind::User => ("you", CYAN),
     EntryKind::Assistant => ("Ainz", ACTIVE),
@@ -1553,8 +1789,11 @@ fn entry_lines(entry: &Entry) -> Vec<Line<'static>> {
     EntryKind::Tool => ("tool", MAGENTA),
     EntryKind::Error => ("error", RED),
   };
-  entry
-    .text
+  let body = match (&entry.detail, expanded) {
+    (Some(detail), true) => detail.as_str(),
+    _ => entry.text.as_str(),
+  };
+  body
     .lines()
     .enumerate()
     .map(|(index, text)| {
@@ -1717,6 +1956,155 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
 
 // what the call is actually doing, the way the coding agents put it: shell(git status).
 // the key order is what these tools name their subject, whichever harness sent the call
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+  area.width > 0
+    && area.height > 0
+    && (area.x..area.right()).contains(&column)
+    && (area.y..area.bottom()).contains(&row)
+}
+
+/// What the prompt is offering to complete: a slash command, or a file under the workspace.
+enum Suggestion {
+  Command(SlashCommand),
+  Path(String),
+}
+
+// the `@name` being typed, as a byte offset and the text after it, when the cursor is inside one
+fn file_fragment(text: &str, cursor: usize) -> Option<(usize, String)> {
+  let head = &text[..cursor];
+  let at = head.rfind('@')?;
+  if !head[..at]
+    .chars()
+    .next_back()
+    .is_none_or(char::is_whitespace)
+  {
+    return None;
+  }
+  let fragment = &head[at + 1..];
+  fragment
+    .chars()
+    .all(|ch| !ch.is_whitespace())
+    .then(|| (at, fragment.to_string()))
+}
+
+fn suggestions(state: &ChatState, commands: &[SlashCommand]) -> Vec<Suggestion> {
+  if let Some((_, fragment)) = file_fragment(state.input.as_str(), state.input.cursor()) {
+    let needle = fragment.to_ascii_lowercase();
+    let mut matched: Vec<_> = state
+      .files
+      .iter()
+      .filter(|path| path.to_ascii_lowercase().contains(&needle))
+      .collect();
+    // a name that starts the way you typed comes before one that merely contains it
+    matched.sort_by_key(|path| {
+      let lower = path.to_ascii_lowercase();
+      let leading = !lower
+        .rsplit('/')
+        .next()
+        .unwrap_or(lower.as_str())
+        .starts_with(&needle);
+      (leading, path.len())
+    });
+    return matched
+      .into_iter()
+      .take(20)
+      .map(|path| Suggestion::Path(path.clone()))
+      .collect();
+  }
+  command_matches(commands, state.input.as_str())
+    .into_iter()
+    .cloned()
+    .map(Suggestion::Command)
+    .collect()
+}
+
+/// Walks the workspace once, so completing a path never touches the disk mid-keystroke.
+fn workspace_files(root: &std::path::Path) -> Vec<String> {
+  const SKIP: [&str; 6] = [
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "vendor",
+    "__pycache__",
+  ];
+  let mut found = Vec::new();
+  let mut queue = vec![(root.to_path_buf(), 0_usize)];
+  while let Some((directory, depth)) = queue.pop() {
+    if depth > 8 || found.len() >= 5000 {
+      continue;
+    }
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+      continue;
+    };
+    for entry in entries.flatten() {
+      let name = entry.file_name().to_string_lossy().to_string();
+      if name.starts_with('.') || SKIP.contains(&name.as_str()) {
+        continue;
+      }
+      let path = entry.path();
+      if path.is_dir() {
+        queue.push((path, depth + 1));
+      } else if let Ok(relative) = path.strip_prefix(root) {
+        found.push(relative.to_string_lossy().to_string());
+      }
+    }
+  }
+  found.sort();
+  found
+}
+
+/// vim's normal mode, enough of it to edit a prompt. Returns whether the key was claimed.
+fn vim_key(state: &mut ChatState, code: KeyCode) -> bool {
+  // a pending `d` waits for what to delete
+  if state.pending_delete {
+    state.pending_delete = false;
+    match code {
+      KeyCode::Char('d') => state.input.clear(),
+      KeyCode::Char('w') => state.input.delete_word_forward(),
+      KeyCode::Char('b') => state.input.delete_word(),
+      KeyCode::Char('$') => state.input.kill_to_end(),
+      KeyCode::Char('0') => state.input.kill_to_start(),
+      _ => {}
+    }
+    return true;
+  }
+  match code {
+    KeyCode::Char('h') => state.input.left(),
+    KeyCode::Char('l') => state.input.right(),
+    KeyCode::Char('w') | KeyCode::Char('e') => state.input.word_right(),
+    KeyCode::Char('b') => state.input.word_left(),
+    KeyCode::Char('0') | KeyCode::Char('^') => state.input.home(),
+    KeyCode::Char('$') => state.input.end(),
+    KeyCode::Char('i') => state.input.set_mode(input::Mode::Insert),
+    KeyCode::Char('a') => state.input.append(),
+    KeyCode::Char('I') => {
+      state.input.home();
+      state.input.set_mode(input::Mode::Insert);
+    }
+    KeyCode::Char('A') => {
+      state.input.end();
+      state.input.set_mode(input::Mode::Insert);
+    }
+    KeyCode::Char('x') => state.input.delete(),
+    KeyCode::Char('D') => state.input.kill_to_end(),
+    KeyCode::Char('C') => {
+      state.input.kill_to_end();
+      state.input.set_mode(input::Mode::Insert);
+    }
+    KeyCode::Char('d') => state.pending_delete = true,
+    KeyCode::Char('k') => {
+      state.input.previous();
+    }
+    KeyCode::Char('j') => {
+      state.input.next();
+    }
+    // enter still sends, and anything else falls through to the ordinary handling
+    _ => return false,
+  }
+  true
+}
+
 fn tool_label(name: &str, arguments: &serde_json::Value) -> String {
   const SUBJECT: [&str; 12] = [
     "name",
@@ -1832,7 +2220,12 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     );
     return;
   }
-  let prefix = if state.busy() { "↳ " } else { "> " };
+  state.prompt_area.set(area);
+  let prefix = match (state.busy(), state.input.mode()) {
+    (true, _) => "↳ ",
+    (false, input::Mode::Normal) => "▪ ",
+    (false, input::Mode::Insert) => "> ",
+  };
   let capacity = area.width.saturating_sub(3).max(1) as usize;
   let text = state.input.as_str();
   let before = &text[..state.input.cursor()];
@@ -1929,7 +2322,7 @@ fn clock() -> String {
 mod tests {
   use serde_json::json;
 
-  use super::{tool_label, tool_result};
+  use super::{file_fragment, tool_label, tool_result};
 
   #[test]
   fn a_call_is_labelled_by_what_it_acts_on() {
@@ -1953,6 +2346,19 @@ mod tests {
 
     assert!(label.ends_with("deepdeep/notes.md)"), "{label}");
     assert!(label.starts_with("Read(…"), "{label}");
+  }
+
+  #[test]
+  fn an_at_sign_starts_a_path_completion() {
+    // the fragment is what has been typed after the @, wherever the cursor sits
+    assert_eq!(
+      file_fragment("look at @src/ma", 15),
+      Some((8, "src/ma".into()))
+    );
+    // an address is not a path completion, since the @ has no space before it
+    assert_eq!(file_fragment("mail me@wess.io", 15), None);
+    // and neither is a finished word
+    assert_eq!(file_fragment("@src/main.rs now", 16), None);
   }
 
   #[test]

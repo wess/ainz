@@ -99,6 +99,10 @@ impl Default for MemoryConfig {
 pub struct UiConfig {
   pub roster_visible: bool,
   pub header: String,
+  pub vim: bool,
+  /// Draw in the terminal's own scroll instead of taking the whole screen, so finished
+  /// transcript stays in the scrollback the terminal already keeps.
+  pub inline: bool,
 }
 
 impl Default for UiConfig {
@@ -106,6 +110,8 @@ impl Default for UiConfig {
     Self {
       roster_visible: true,
       header: "random".into(),
+      vim: false,
+      inline: false,
     }
   }
 }

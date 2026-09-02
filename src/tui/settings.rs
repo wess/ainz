@@ -1,6 +1,8 @@
 use ainz::{Config, HeaderCatalog, MemoryBackend, PermissionMode, synapse};
 use anyhow::Result;
-use crossterm::event::{self, Event as InputEvent, KeyCode, KeyEventKind};
+use crossterm::event::{
+  self, Event as InputEvent, KeyCode, KeyEventKind, MouseEventKind as InputMouse,
+};
 use ratatui::{
   Frame,
   layout::{Constraint, Layout},
@@ -23,9 +25,11 @@ enum Row {
   Mesh,
   Roster,
   Header,
+  Vim,
+  Inline,
 }
 
-const ROWS: [Row; 10] = [
+const ROWS: [Row; 12] = [
   Row::Provider,
   Row::Permissions,
   Row::Memory,
@@ -36,6 +40,8 @@ const ROWS: [Row; 10] = [
   Row::Mesh,
   Row::Roster,
   Row::Header,
+  Row::Vim,
+  Row::Inline,
 ];
 
 impl Row {
@@ -51,6 +57,8 @@ impl Row {
       Self::Mesh => "Agent mesh",
       Self::Roster => "Agent roster",
       Self::Header => "Header art",
+      Self::Vim => "Vim keys",
+      Self::Inline => "Draw inline",
     }
   }
 
@@ -93,6 +101,8 @@ impl Row {
         }
       }
       Self::Header => config.ui.header.clone(),
+      Self::Vim => on_off(config.ui.vim),
+      Self::Inline => on_off(config.ui.inline),
     }
   }
 
@@ -169,6 +179,19 @@ impl Row {
         "Show the running subagents beside the transcript. Ctrl+L toggles it during a session."
           .into(),
       ),
+      Self::Vim => (
+        "Modal editing in the prompt".into(),
+        "Esc leaves insert mode; hjkl, w, b, 0, $, i, a, x, dd and D work as they do in vim, \
+         and k and j walk earlier prompts."
+          .into(),
+      ),
+      Self::Inline => (
+        "Where the session is drawn".into(),
+        "off takes the whole screen and keeps the roster beside the transcript. on draws the \
+         prompt at the bottom of the terminal's own scroll, so finished output stays in the \
+         scrollback your terminal already keeps. Takes effect at the next launch."
+          .into(),
+      ),
       Self::Header => (
         "Splash artwork".into(),
         format!(
@@ -226,6 +249,8 @@ impl Row {
         }
       }
       Self::Roster => config.ui.roster_visible = !config.ui.roster_visible,
+      Self::Vim => config.ui.vim = !config.ui.vim,
+      Self::Inline => config.ui.inline = !config.ui.inline,
       Self::Header => {
         let mut choices = vec!["random".to_string(), "builtin".to_string()];
         choices.extend(headers.iter().cloned());
@@ -285,12 +310,25 @@ fn run(terminal: &mut Term, config: &mut Config, headers: &[String]) -> Result<(
   loop {
     let installed = synapse::binary(&config.synapse).is_some();
     terminal.draw(|frame| render(frame, config, selected, installed))?;
-    let InputEvent::Key(key) = event::read()? else {
-      continue;
+    let key = match event::read()? {
+      InputEvent::Mouse(mouse) => {
+        match mouse.kind {
+          InputMouse::ScrollUp => selected = selected.saturating_sub(1),
+          InputMouse::ScrollDown => selected = (selected + 1).min(ROWS.len() - 1),
+          InputMouse::Down(_) => {
+            if let Some(index) = mouse.row.checked_sub(4).map(usize::from)
+              && index < ROWS.len()
+            {
+              selected = index;
+            }
+          }
+          _ => {}
+        }
+        continue;
+      }
+      InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,
+      _ => continue,
     };
-    if key.kind == KeyEventKind::Release {
-      continue;
-    }
     match key.code {
       KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
       KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(ROWS.len() - 1),

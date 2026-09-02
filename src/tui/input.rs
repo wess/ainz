@@ -1,6 +1,14 @@
 //! The prompt line: the text being written, where the cursor sits in it, and what has already
 //! been sent, so up and down walk back through earlier prompts the way every other harness does.
 
+/// Where keys go: straight into the line, or to vim's normal-mode verbs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Mode {
+  #[default]
+  Insert,
+  Normal,
+}
+
 #[derive(Default)]
 pub(super) struct Input {
   text: String,
@@ -10,6 +18,7 @@ pub(super) struct Input {
   // where in history the walk currently is, and the draft it started from
   recalled: Option<usize>,
   draft: String,
+  mode: Mode,
 }
 
 impl Input {
@@ -26,6 +35,24 @@ impl Input {
 
   pub fn cursor(&self) -> usize {
     self.cursor
+  }
+
+  pub fn mode(&self) -> Mode {
+    self.mode
+  }
+
+  pub fn set_mode(&mut self, mode: Mode) {
+    self.mode = mode;
+    // normal mode sits on a character, so it cannot sit past the end of the line
+    if mode == Mode::Normal && self.cursor >= self.text.len() {
+      self.cursor = self.previous_char();
+    }
+  }
+
+  /// vim's `a`: one character right, staying on the line.
+  pub fn append(&mut self) {
+    self.cursor = self.next_char();
+    self.mode = Mode::Insert;
   }
 
   /// Replaces the line outright, as command completion does.
@@ -76,6 +103,22 @@ impl Input {
     self.cursor = self.word_end();
   }
 
+  /// Puts the cursor where the pointer was, counting rows and characters as drawn.
+  pub fn place(&mut self, row: usize, column: usize) {
+    let mut offset = 0;
+    for (index, line) in self.text.split('\n').enumerate() {
+      if index == row {
+        offset += line
+          .char_indices()
+          .nth(column)
+          .map_or(line.len(), |(at, _)| at);
+        break;
+      }
+      offset += line.len() + 1;
+    }
+    self.cursor = offset.min(self.text.len());
+  }
+
   pub fn home(&mut self) {
     self.cursor = 0;
   }
@@ -99,8 +142,14 @@ impl Input {
     self.text.truncate(self.cursor);
   }
 
+  pub fn delete_word_forward(&mut self) {
+    let end = self.word_end();
+    self.text.replace_range(self.cursor..end, "");
+  }
+
   /// Takes the line to send, and remembers it for the next walk back.
   pub fn submit(&mut self) -> String {
+    self.mode = Mode::Insert;
     let text = std::mem::take(&mut self.text);
     self.cursor = 0;
     self.recalled = None;
@@ -184,7 +233,7 @@ impl Input {
 
 #[cfg(test)]
 mod tests {
-  use super::Input;
+  use super::{Input, Mode};
 
   fn typed(text: &str) -> Input {
     let mut input = Input::default();
@@ -241,6 +290,18 @@ mod tests {
     input.backspace();
     assert_eq!(input.as_str(), "caf ");
     assert_eq!(input.cursor(), 3);
+  }
+
+  #[test]
+  fn normal_mode_sits_on_the_last_character_rather_than_past_it() {
+    let mut input = typed("go");
+
+    input.set_mode(Mode::Normal);
+    assert_eq!(input.cursor(), 1);
+
+    input.append();
+    assert_eq!(input.mode(), Mode::Insert);
+    assert_eq!(input.cursor(), 2);
   }
 
   #[test]

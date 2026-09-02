@@ -1,6 +1,9 @@
 use std::{
   io::{self, Stdout},
-  sync::Once,
+  sync::{
+    Once,
+    atomic::{AtomicBool, Ordering},
+  },
 };
 
 use ainz::{Config, HttpProvider, ProcessOutput, ProviderConfig};
@@ -9,13 +12,13 @@ use crossterm::{
   event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event as InputEvent, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
   },
   execute,
   terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-  Frame, Terminal,
+  Frame, Terminal, TerminalOptions, Viewport,
   backend::CrosstermBackend,
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
@@ -124,6 +127,147 @@ impl Choice {
       Self::Http | Self::Process => None,
     }
   }
+}
+
+/// A list to pick from, ending in a row that falls back to typing the value by hand.
+fn choose_value(
+  terminal: &mut Term,
+  title: &str,
+  subtitle: &str,
+  label: &'static str,
+  items: Vec<String>,
+  typed: &str,
+) -> Result<Option<String>> {
+  if items.is_empty() {
+    return Ok(
+      edit_fields(terminal, title, vec![Field::new(label, typed)])?.map(|values| values[0].clone()),
+    );
+  }
+  let mut rows = items.clone();
+  rows.push("Type another…".into());
+  let mut selected = 0;
+  let mut list = Rect::default();
+  loop {
+    terminal.draw(|frame| {
+      let [header, body, footer] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(6),
+        Constraint::Length(1),
+      ])
+      .areas(frame.area());
+      render_header(frame, header, title, subtitle);
+      let area = centered(body, body.width.min(82), body.height);
+      list = area;
+      let mut state = ListState::default().with_selected(Some(selected));
+      frame.render_stateful_widget(
+        List::new(rows.iter().map(|row| ListItem::new(row.clone())))
+          .block(
+            Block::default()
+              .title(format!(" {label} "))
+              .borders(Borders::ALL)
+              .border_style(Style::default().fg(MUTED))
+              .padding(ratatui::widgets::Padding::horizontal(1)),
+          )
+          .highlight_style(
+            Style::default()
+              .fg(Color::Black)
+              .bg(ACCENT)
+              .add_modifier(Modifier::BOLD),
+          ),
+        area,
+        &mut state,
+      );
+      render_footer(frame, footer, "↑↓ choose   enter select   esc back");
+    })?;
+    match event::read()? {
+      InputEvent::Mouse(mouse) => match mouse.kind {
+        MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
+        MouseEventKind::ScrollDown => selected = (selected + 1).min(rows.len() - 1),
+        // the row under the pointer, past the box's own border line
+        MouseEventKind::Down(_) => {
+          if let Some(index) = mouse.row.checked_sub(list.y + 1).map(usize::from)
+            && index < rows.len()
+          {
+            selected = index;
+          }
+        }
+        _ => {}
+      },
+      InputEvent::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+        KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(rows.len() - 1),
+        KeyCode::Enter if selected == rows.len() - 1 => {
+          return Ok(
+            edit_fields(terminal, title, vec![Field::new(label, typed)])?
+              .map(|values| values[0].clone()),
+          );
+        }
+        KeyCode::Enter => return Ok(Some(rows[selected].clone())),
+        KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+        _ => {}
+      },
+      _ => {}
+    }
+  }
+}
+
+/// Environment variables that look like credentials, so a key never has to be typed from memory.
+fn credential_variables() -> Vec<String> {
+  let mut found: Vec<String> = std::env::vars()
+    .filter(|(name, value)| {
+      !value.trim().is_empty()
+        && (name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_KEY"))
+    })
+    .map(|(name, _)| name)
+    .collect();
+  found.sort();
+  found.dedup();
+  found
+}
+
+/// The coding agents installed on this machine, for the process provider to drive.
+fn agent_commands() -> Vec<String> {
+  const KNOWN: [&str; 14] = [
+    "claude",
+    "codex",
+    "gemini",
+    "opencode",
+    "aider",
+    "pi",
+    "hermes",
+    "droid",
+    "amp",
+    "grok",
+    "cursor-agent",
+    "copilot",
+    "goose",
+    "crush",
+  ];
+  let path = std::env::var_os("PATH").unwrap_or_default();
+  let directories: Vec<_> = std::env::split_paths(&path).collect();
+  KNOWN
+    .iter()
+    .filter(|command| {
+      directories
+        .iter()
+        .any(|directory| directory.join(command).is_file())
+    })
+    .map(|command| (*command).to_string())
+    .collect()
+}
+
+/// Endpoints a local model server usually listens on.
+fn local_endpoints() -> Vec<String> {
+  [
+    "http://127.0.0.1:11434/v1",
+    "http://127.0.0.1:4000/v1",
+    "http://127.0.0.1:1234/v1",
+    "http://127.0.0.1:8000/v1",
+    "http://127.0.0.1:8080/v1",
+  ]
+  .iter()
+  .map(|endpoint| (*endpoint).to_string())
+  .collect()
 }
 
 pub async fn configure(config: &mut Config) -> Result<()> {
@@ -235,12 +379,25 @@ fn choose_synapse(terminal: &mut Term) -> Result<bool> {
       );
       render_footer(frame, footer, "↑↓ choose   enter confirm   esc keep local");
     })?;
-    let InputEvent::Key(key) = event::read()? else {
-      continue;
+    let key = match event::read()? {
+      InputEvent::Mouse(mouse) => {
+        match mouse.kind {
+          MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
+          MouseEventKind::ScrollDown => selected = (selected + 1).min(choices.len() - 1),
+          MouseEventKind::Down(_) => {
+            if let Some(index) = mouse.row.checked_sub(FIELDS_TOP).map(usize::from)
+              && index < choices.len()
+            {
+              selected = index;
+            }
+          }
+          _ => {}
+        }
+        continue;
+      }
+      InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,
+      _ => continue,
     };
-    if key.kind == KeyEventKind::Release {
-      continue;
-    }
     match key.code {
       KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
       KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(choices.len() - 1),
@@ -252,8 +409,37 @@ fn choose_synapse(terminal: &mut Term) -> Result<bool> {
 }
 
 static PANIC_HOOK: Once = Once::new();
+// what has to be undone on the way out, which differs when the app never left the main screen
+static INLINE: AtomicBool = AtomicBool::new(false);
 
-pub(super) fn enter_terminal() -> Result<Term> {
+/// The prompt drawn at the bottom of the terminal's own scroll, leaving finished output in the
+/// scrollback the terminal already keeps.
+pub(super) fn enter_inline_terminal(rows: u16) -> Result<Term> {
+  install_panic_hook();
+  enable_raw_mode()?;
+  INLINE.store(true, Ordering::Relaxed);
+  let mut stdout = io::stdout();
+  // no mouse capture here: the terminal's own scroll and selection are the point of inline
+  if let Err(error) = execute!(stdout, EnableBracketedPaste) {
+    restore_terminal();
+    return Err(error.into());
+  }
+  push_keyboard_enhancement(&mut stdout);
+  match Terminal::with_options(
+    CrosstermBackend::new(stdout),
+    TerminalOptions {
+      viewport: Viewport::Inline(rows),
+    },
+  ) {
+    Ok(terminal) => Ok(terminal),
+    Err(error) => {
+      restore_terminal();
+      Err(error.into())
+    }
+  }
+}
+
+fn install_panic_hook() {
   // a panic must not leave the shell in raw mode on the alternate screen
   PANIC_HOOK.call_once(|| {
     let previous = std::panic::take_hook();
@@ -262,7 +448,25 @@ pub(super) fn enter_terminal() -> Result<Term> {
       previous(info);
     }));
   });
+}
+
+// ctrl+digit and ctrl+= only exist as distinct keys under the kitty keyboard protocol
+fn push_keyboard_enhancement(stdout: &mut Stdout) {
+  if matches!(
+    crossterm::terminal::supports_keyboard_enhancement(),
+    Ok(true)
+  ) {
+    drop(execute!(
+      stdout,
+      PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    ));
+  }
+}
+
+pub(super) fn enter_terminal() -> Result<Term> {
+  install_panic_hook();
   enable_raw_mode()?;
+  INLINE.store(false, Ordering::Relaxed);
   let mut stdout = io::stdout();
   if let Err(error) = execute!(
     stdout,
@@ -273,16 +477,7 @@ pub(super) fn enter_terminal() -> Result<Term> {
     restore_terminal();
     return Err(error.into());
   }
-  // ctrl+digit and ctrl+= only exist as distinct keys under the kitty keyboard protocol
-  if matches!(
-    crossterm::terminal::supports_keyboard_enhancement(),
-    Ok(true)
-  ) {
-    drop(execute!(
-      stdout,
-      PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    ));
-  }
+  push_keyboard_enhancement(&mut stdout);
   match Terminal::new(CrosstermBackend::new(stdout)) {
     Ok(terminal) => Ok(terminal),
     Err(error) => {
@@ -301,12 +496,10 @@ pub(super) fn leave_terminal(terminal: &mut Term) -> Result<()> {
 fn restore_terminal() {
   let mut stdout = io::stdout();
   drop(execute!(stdout, PopKeyboardEnhancementFlags));
-  drop(execute!(
-    stdout,
-    DisableMouseCapture,
-    DisableBracketedPaste,
-    LeaveAlternateScreen
-  ));
+  drop(execute!(stdout, DisableMouseCapture, DisableBracketedPaste));
+  if !INLINE.load(Ordering::Relaxed) {
+    drop(execute!(stdout, LeaveAlternateScreen));
+  }
   drop(disable_raw_mode());
 }
 
@@ -344,27 +537,37 @@ async fn configure_inner(
       ("ollama".into(), profile, None)
     }
     Choice::Preset(ProviderPreset::LiteLlm) => {
-      let Some(values) = edit_fields(
+      let Some(endpoint) = choose_value(
         terminal,
         "LiteLLM proxy",
-        vec![
-          Field::new("Name", "litellm"),
-          Field::new("Endpoint", "http://127.0.0.1:4000/v1"),
-          Field::new("API key environment variable", "LITELLM_API_KEY"),
-        ],
+        "Where the proxy is listening",
+        "Endpoint",
+        local_endpoints(),
+        "http://127.0.0.1:4000/v1",
       )?
       else {
         return Ok(None);
       };
-      let mut profile = ProviderConfig::http(&values[1], &values[2]);
+      let Some(variable) = choose_value(
+        terminal,
+        "LiteLLM proxy",
+        "The environment variable holding the key; the key itself is never stored",
+        "API key environment variable",
+        credential_variables(),
+        "LITELLM_API_KEY",
+      )?
+      else {
+        return Ok(None);
+      };
+      let mut profile = ProviderConfig::http(&endpoint, &variable);
       terminal.draw(|frame| render_loading(frame, "Asking the proxy which models it serves…"))?;
-      let key = std::env::var(&values[2]).ok().filter(|key| !key.is_empty());
-      if let Ok(provider) = HttpProvider::new(values[1].clone(), String::new(), key)
+      let key = std::env::var(&variable).ok().filter(|key| !key.is_empty());
+      if let Ok(provider) = HttpProvider::new(endpoint, String::new(), key)
         && let Ok(models) = provider.models().await
       {
         profile.models = models;
       }
-      (values[0].clone(), profile, None)
+      ("litellm".into(), profile, None)
     }
     Choice::Preset(ProviderPreset::Codex) => {
       ("codex".into(), preset_profile(ProviderPreset::Codex), None)
@@ -379,29 +582,65 @@ async fn configure_inner(
       (name, profile, None)
     }
     Choice::Http => {
-      let Some(values) = edit_fields(
+      let Some(endpoint) = choose_value(
         terminal,
         "Custom HTTP provider",
-        vec![
-          Field::new("Name", "http"),
-          Field::new("Endpoint", "http://127.0.0.1:11434/v1"),
-          Field::new("API key environment variable", ""),
-          Field::new("Model", ""),
-        ],
+        "A chat-completions endpoint",
+        "Endpoint",
+        local_endpoints(),
+        "http://127.0.0.1:11434/v1",
       )?
       else {
         return Ok(None);
       };
-      let profile = ProviderConfig::http(&values[1], &values[2]);
-      (values[0].clone(), profile, Some(values[3].clone()))
+      let mut variables = credential_variables();
+      variables.insert(0, "None".into());
+      let Some(variable) = choose_value(
+        terminal,
+        "Custom HTTP provider",
+        "The environment variable holding the key; the key itself is never stored",
+        "API key environment variable",
+        variables,
+        "",
+      )?
+      else {
+        return Ok(None);
+      };
+      let Some(values) = edit_fields(
+        terminal,
+        "Custom HTTP provider",
+        vec![Field::new("Name", "http"), Field::new("Model", "")],
+      )?
+      else {
+        return Ok(None);
+      };
+      let profile = ProviderConfig::http(
+        &endpoint,
+        match variable.as_str() {
+          "None" => "",
+          variable => variable,
+        },
+      );
+      (values[0].clone(), profile, Some(values[1].clone()))
     }
     Choice::Process => {
+      let Some(command) = choose_value(
+        terminal,
+        "Custom process provider",
+        "The coding agents found on this machine",
+        "Command",
+        agent_commands(),
+        "",
+      )?
+      else {
+        return Ok(None);
+      };
       let Some(values) = edit_fields(
         terminal,
         "Custom process provider",
         vec![
           Field::new("Name", "process"),
-          Field::new("Command", ""),
+          Field::new("Command", &command),
           Field::new("Arguments", ""),
           Field::new("Model", ""),
           Field::new("Output: text, json, or stream?", "text"),
@@ -482,12 +721,25 @@ fn select_model(
   };
   loop {
     terminal.draw(|frame| render_model(frame, name, &models, selected))?;
-    let InputEvent::Key(key) = event::read()? else {
-      continue;
+    let key = match event::read()? {
+      InputEvent::Mouse(mouse) => {
+        match mouse.kind {
+          MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
+          MouseEventKind::ScrollDown => selected = (selected + 1).min(models.len() - 1),
+          MouseEventKind::Down(_) => {
+            if let Some(index) = mouse.row.checked_sub(FIELDS_TOP).map(usize::from)
+              && index < models.len()
+            {
+              selected = index;
+            }
+          }
+          _ => {}
+        }
+        continue;
+      }
+      InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,
+      _ => continue,
     };
-    if key.kind == KeyEventKind::Release {
-      continue;
-    }
     match key.code {
       KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
       KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(models.len() - 1),
@@ -503,6 +755,9 @@ fn select_model(
     }
   }
 }
+
+/// Where the first row of a boxed list or field sits: the header, then the box's top border.
+const FIELDS_TOP: u16 = 4;
 
 /// A bracketed paste arrives whole, newlines and all, and every input here is one line.
 pub(super) fn flatten_paste(text: &str) -> String {
@@ -537,6 +792,19 @@ fn edit_fields(
     let key = match event::read()? {
       InputEvent::Paste(text) => {
         fields[selected].value.push_str(flatten_paste(&text).trim());
+        continue;
+      }
+      // each field is three rows tall with a row of space under it, so a click divides by four
+      InputEvent::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)) => {
+        if let Some(index) = mouse
+          .row
+          .checked_sub(FIELDS_TOP)
+          .map(|row| row / 4)
+          .map(usize::from)
+          && index < fields.len()
+        {
+          selected = index;
+        }
         continue;
       }
       InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,

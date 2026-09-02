@@ -147,6 +147,18 @@ pub fn builtins() -> Vec<SlashCommand> {
       "Open settings: memory, Synapse, permissions, and more",
       "config",
     ),
+    (
+      "inline",
+      "/inline",
+      "Toggle drawing in the terminal's own scroll instead of full screen",
+      "config",
+    ),
+    (
+      "vim",
+      "/vim",
+      "Toggle vim keys in the prompt: esc for normal mode",
+      "config",
+    ),
     ("skills", "/skills", "List discovered skills", "extension"),
     (
       "status",

@@ -2,7 +2,9 @@ use std::path::Path;
 
 use ainz::{Candidate, Config, import as importer};
 use anyhow::Result;
-use crossterm::event::{self, Event as InputEvent, KeyCode, KeyEventKind};
+use crossterm::event::{
+  self, Event as InputEvent, KeyCode, KeyEventKind, MouseEventKind as InputMouse,
+};
 use ratatui::{
   Frame,
   layout::{Constraint, Layout},
@@ -62,12 +64,25 @@ fn select(
   let mut selected = 0;
   loop {
     terminal.draw(|frame| render(frame, found, chosen, selected))?;
-    let InputEvent::Key(key) = event::read()? else {
-      continue;
+    let key = match event::read()? {
+      InputEvent::Mouse(mouse) => {
+        match mouse.kind {
+          InputMouse::ScrollUp => selected = selected.saturating_sub(1),
+          InputMouse::ScrollDown => selected = (selected + 1).min(found.len() - 1),
+          InputMouse::Down(_) => {
+            if let Some(index) = mouse.row.checked_sub(4).map(usize::from)
+              && index < found.len()
+            {
+              selected = index;
+            }
+          }
+          _ => {}
+        }
+        continue;
+      }
+      InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,
+      _ => continue,
     };
-    if key.kind == KeyEventKind::Release {
-      continue;
-    }
     match key.code {
       KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
       KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(found.len() - 1),
