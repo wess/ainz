@@ -21,7 +21,7 @@ release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep
 ## Cargo
 
 ```sh
-cargo install --git https://github.com/wess/ainz --tag v0.3.0 --locked
+cargo install --git https://github.com/wess/ainz --tag v0.3.1 --locked
 ```
 
 ## Upgrading from AgentX
