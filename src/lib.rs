@@ -6,6 +6,7 @@ pub mod control;
 pub mod event;
 mod frontmatter;
 pub mod header;
+pub mod import;
 pub mod instruction;
 pub mod job;
 pub mod learn;
@@ -32,6 +33,7 @@ pub use config::{
 pub use control::{RunController, RunInbox, run_control};
 pub use event::{Event, EventSink};
 pub use header::{HeaderArt, HeaderCatalog};
+pub use import::{Candidate, ImportKind};
 pub use job::JobStore;
 pub use learn::{LocalSkills, Teacher};
 pub use mcp::{McpHub, McpProfile, McpServerConfig, McpTransport};

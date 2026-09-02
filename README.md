@@ -131,6 +131,12 @@ ainz doctor
 JSON mode never opens an approval prompt; pass `--permissions auto` explicitly when a
 noninteractive request may write files or execute commands.
 
+`--yeet` is the blunt version: every tool call runs without asking, for that invocation only.
+`/yeet` does the same inside a session. It is not written to the config file, and the status
+line says `yeet` while it is on. Plugin approval is unaffected — an unapproved plugin still
+does not load, because that trust is pinned to content and granted deliberately with
+`ainz plugins approve`.
+
 In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts
 that show the tool's arguments, tool activity, and a subagent roster. Type `/` to open the
 command palette and fuzzy-search commands and prompt templates. `Ctrl+L` toggles the roster
@@ -208,6 +214,24 @@ shown in the palette.
 
 Nearer definitions win, so a project can override a shared skill or command by name. `ainz
 skills`, `ainz prompts`, and `ainz doctor` show what was found.
+
+## Import
+
+Skills, commands, and instruction files are read where they already live, so most of a machine
+needs no import step. Tool servers are the exception: MCP configuration is per-tool, and Ainz
+starts servers only from its own profile.
+
+```sh
+ainz import              # what Claude Code, Codex, Cursor, and the rest have
+ainz import --all        # copy everything not already available
+ainz import github       # or just this one
+```
+
+`/import` opens the same list in a session as a checklist. Anything Ainz already reads is
+marked already available and left unticked, so importing twice changes nothing. An entry that
+carries a token or password inline is marked too, because importing copies the secret into the
+Ainz profile. Skills and prompts come along the same way, from the Synapse library, Codex, and
+pi. See [`docs/import.md`](docs/import.md).
 
 ## External tools
 

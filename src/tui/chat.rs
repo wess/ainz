@@ -45,6 +45,7 @@ pub(crate) enum ChatNext {
   Quit,
   Configure,
   Settings,
+  Import,
 }
 
 pub(crate) struct ChatOutcome {
@@ -634,6 +635,12 @@ async fn run_chat_inner(
               next: ChatNext::Settings,
             });
           }
+          CommandResult::Import => {
+            return Ok(ChatOutcome {
+              session: session.take().unwrap(),
+              next: ChatNext::Import,
+            });
+          }
           CommandResult::Recall(query) => {
             let entry = match memory_for(&workspace, config).await {
               Err(entry) => entry,
@@ -671,6 +678,19 @@ async fn run_chat_inner(
           }
           CommandResult::ShowAgents => {
             set_roster(&mut state, config, true).await;
+            continue;
+          }
+          CommandResult::Yeet => {
+            config.permissions = PermissionMode::Auto;
+            config.yeet = true;
+            let (new_agent, new_options) =
+              make_agent_with(&workspace, config, events.clone(), approver.clone()).await?;
+            agent = Some(new_agent);
+            options = new_options;
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              "yeet: every tool call runs without asking for the rest of this session".into(),
+            ));
             continue;
           }
           CommandResult::SetPermissions(mode) => {
@@ -790,6 +810,8 @@ enum CommandResult {
   Quit,
   Configure,
   Settings,
+  Import,
+  Yeet,
   Recall(String),
   Remember(String),
   ShowAgents,
@@ -815,6 +837,7 @@ fn command(
     "/exit" | "/quit" => Ok(CommandResult::Quit),
     "/config" | "/model" | "/provider" => Ok(CommandResult::Configure),
     "/settings" => Ok(CommandResult::Settings),
+    "/import" | "/mcp import" => Ok(CommandResult::Import),
     "/memory" => Ok(CommandResult::Recall(String::new())),
     "/synapse" => {
       let installed = ainz::synapse::binary(&config.synapse)
@@ -865,7 +888,11 @@ fn command(
     "/permissions" => {
       state.primary.entries.push(Entry::new(
         EntryKind::System,
-        format!("permissions: {}", permission_name(config.permissions)),
+        format!(
+          "permissions: {}{}",
+          permission_name(config.permissions),
+          if config.yeet { " (yeet)" } else { "" }
+        ),
       ));
       Ok(CommandResult::Handled)
     }
@@ -986,6 +1013,7 @@ fn command(
       state.select_slot(slot - 1);
       Ok(CommandResult::Handled)
     }
+    "/yeet" => Ok(CommandResult::Yeet),
     _ if input.starts_with("/permissions ") => {
       let mode = match input[13..].trim() {
         "ask" => PermissionMode::Ask,
@@ -1520,7 +1548,11 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       .saturating_add(view.usage.output_tokens),
   );
   let provider = config.provider.as_deref().unwrap_or("default");
-  let permissions = permission_name(config.permissions);
+  let permissions = if config.yeet {
+    "yeet"
+  } else {
+    permission_name(config.permissions)
+  };
   let activity = view
     .tools
     .values()

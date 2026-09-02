@@ -33,6 +33,9 @@ struct Cli {
   initial_prompt: Option<String>,
   #[arg(long, global = true, value_enum)]
   permissions: Option<PermissionArg>,
+  /// Run wide open: every tool call is allowed without asking
+  #[arg(long, global = true)]
+  yeet: bool,
   #[command(subcommand)]
   command: Option<Command>,
 }
@@ -90,6 +93,15 @@ enum Command {
   Memory {
     #[command(subcommand)]
     command: MemoryCommand,
+  },
+  Import {
+    names: Vec<String>,
+    #[arg(long)]
+    kind: Option<String>,
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    json: bool,
   },
   Synapse {
     #[command(subcommand)]
@@ -160,6 +172,10 @@ async fn run() -> Result<()> {
   if let Some(permissions) = cli.permissions {
     config.permissions = permissions.into();
   }
+  if cli.yeet {
+    config.permissions = PermissionMode::Auto;
+    config.yeet = true;
+  }
 
   match cli.command {
     Some(Command::Sessions { search, json }) => match search {
@@ -170,6 +186,12 @@ async fn run() -> Result<()> {
       command::skills(&workspace, &config, command, json).await
     }
     Some(Command::Memory { command }) => command::memory(&workspace, &mut config, command).await,
+    Some(Command::Import {
+      names,
+      kind,
+      all,
+      json,
+    }) => command::import(&workspace, &config, &names, kind.as_deref(), all, json).await,
     Some(Command::Synapse { command }) => command::synapse(&mut config, command).await,
     Some(Command::Prompts { name, args, json }) => {
       command::prompts(&workspace, name.as_deref(), &args, json).await

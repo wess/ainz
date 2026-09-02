@@ -189,6 +189,10 @@ pub struct Config {
   pub synapse: SynapseConfig,
   #[serde(skip)]
   pub mcp_config: Option<PathBuf>,
+  // set for one session by --yeet or /yeet; never written to the file, because running wide
+  // open is a decision about this run rather than a preference
+  #[serde(skip)]
+  pub yeet: bool,
 }
 
 impl Default for Config {
@@ -209,6 +213,7 @@ impl Default for Config {
       memory: MemoryConfig::default(),
       synapse: SynapseConfig::default(),
       mcp_config: None,
+      yeet: false,
     }
   }
 }

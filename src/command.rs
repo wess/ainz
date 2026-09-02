@@ -5,9 +5,9 @@ use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
 use ainz::{
-  Config, HttpProvider, LocalSkills, McpProfile, McpServerConfig, McpTransport, MemoryBackend,
-  PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind, Session, SessionStore,
-  SkillCatalog, synapse,
+  Config, HttpProvider, ImportKind, LocalSkills, McpProfile, McpServerConfig, McpTransport,
+  MemoryBackend, PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind,
+  Session, SessionStore, SkillCatalog, import as importer, synapse,
 };
 
 #[derive(Subcommand)]
@@ -370,6 +370,84 @@ pub async fn memory(workspace: &Path, config: &mut Config, command: MemoryComman
     }
     MemoryCommand::Forget { id } => println!("{}", store.forget(&id).await?),
     MemoryCommand::Backend { .. } | MemoryCommand::Teach { .. } => {}
+  }
+  Ok(())
+}
+
+/// Lists what other tools on this machine already have, and copies over what is chosen.
+pub async fn import(
+  workspace: &Path,
+  config: &Config,
+  names: &[String],
+  kind: Option<&str>,
+  all: bool,
+  json: bool,
+) -> Result<()> {
+  let memory = crate::app::memory_store(workspace, config).await?;
+  let kind = kind.map(ImportKind::parse).transpose()?;
+  let found: Vec<_> = importer::discover(workspace, &memory)
+    .await?
+    .into_iter()
+    .filter(|candidate| kind.is_none_or(|kind| candidate.kind == kind))
+    .collect();
+
+  if !all && names.is_empty() {
+    if json {
+      let rows: Vec<_> = found
+        .iter()
+        .map(|candidate| {
+          serde_json::json!({
+            "kind": candidate.kind.label(), "name": candidate.name,
+            "origin": candidate.origin, "detail": candidate.detail,
+            "credentials": candidate.secrets, "present": candidate.present,
+          })
+        })
+        .collect();
+      println!("{}", serde_json::to_string_pretty(&rows)?);
+      return Ok(());
+    }
+    if found.is_empty() {
+      println!("nothing to import; Ainz already reads what these tools have");
+      return Ok(());
+    }
+    for candidate in &found {
+      println!(
+        "{:<10} {:<24} {}{}{}",
+        candidate.kind.label(),
+        candidate.name,
+        candidate.origin,
+        if candidate.present {
+          "  already available"
+        } else {
+          ""
+        },
+        if candidate.secrets {
+          "  carries credentials"
+        } else {
+          ""
+        }
+      );
+    }
+    println!("\nimport with `ainz import NAME…` or `ainz import --all`");
+    return Ok(());
+  }
+
+  let chosen: Vec<_> = found
+    .into_iter()
+    .filter(|candidate| {
+      if names.is_empty() {
+        !candidate.present
+      } else {
+        names.iter().any(|name| name == &candidate.name)
+      }
+    })
+    .collect();
+  if chosen.is_empty() {
+    println!("nothing matched");
+    return Ok(());
+  }
+  for line in importer::import(&chosen, &memory).await? {
+    println!("{line}");
   }
   Ok(())
 }
@@ -893,6 +971,15 @@ pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {
     } else {
       &config.model
     }
+  );
+  println!(
+    "permissions {}{}",
+    match config.permissions {
+      ainz::PermissionMode::Ask => "ask",
+      ainz::PermissionMode::Auto => "auto",
+      ainz::PermissionMode::ReadOnly => "read-only",
+    },
+    if config.yeet { " · yeet" } else { "" }
   );
   println!("sessions   {}", SessionStore::default_path()?.display());
   let catalog = PluginCatalog::discover(workspace).await?;

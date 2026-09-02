@@ -79,6 +79,12 @@ pub fn builtins() -> Vec<SlashCommand> {
       "session",
     ),
     (
+      "import",
+      "/import",
+      "Import tool servers, skills, and prompts from your other tools",
+      "extension",
+    ),
+    (
       "image",
       "/image <PATH> <PROMPT>",
       "Attach an image to a prompt",
@@ -152,6 +158,12 @@ pub fn builtins() -> Vec<SlashCommand> {
       "synapse",
       "/synapse",
       "Show the Synapse integration state",
+      "config",
+    ),
+    (
+      "yeet",
+      "/yeet",
+      "Run wide open: allow every tool call without asking",
       "config",
     ),
     (

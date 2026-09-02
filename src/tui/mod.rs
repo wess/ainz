@@ -26,10 +26,12 @@ use ratatui::{
 use crate::command::{ProviderPreset, preset_profile};
 
 mod chat;
+mod import;
 mod masthead;
 mod settings;
 
 pub(crate) use chat::{ChatNext, run_chat};
+pub(crate) use import::import;
 pub(crate) use settings::settings;
 
 pub(super) type Term = Terminal<CrosstermBackend<Stdout>>;

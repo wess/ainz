@@ -357,6 +357,9 @@ pub async fn interactive(
           crate::tui::configure(&mut config).await?;
           config.validate()?;
         }
+        crate::tui::ChatNext::Import => {
+          crate::tui::import(&workspace, &config).await?;
+        }
         crate::tui::ChatNext::Settings => {
           let headers = ainz::HeaderCatalog::discover(&workspace).await?;
           if crate::tui::settings(&mut config, &headers).await? {
@@ -485,9 +488,14 @@ async fn offer_synapse(config: &mut Config) -> Result<()> {
 
 fn print_header(config: &Config) {
   println!(
-    "Ainz · {} · {}",
+    "Ainz · {} · {}{}",
     config.provider.as_deref().unwrap_or("default"),
-    config.model
+    config.model,
+    if config.yeet {
+      " · yeet: every tool call runs without asking"
+    } else {
+      ""
+    }
   );
 }
 

@@ -392,3 +392,99 @@ async fn stored_memory_reaches_the_system_prompt() {
   assert!(request.contains("\"name\":\"memory\""), "{request}");
   assert!(request.contains("\"name\":\"sessions\""), "{request}");
 }
+
+#[tokio::test]
+async fn import_offers_what_other_tools_have_and_copies_it_once() {
+  let home = tempfile::tempdir().unwrap();
+  let workspace = tempfile::tempdir().unwrap();
+  let config = config_root(home.path()).join("ainz/config.toml");
+  let profile = config_root(home.path()).join("ainz/mcp.toml");
+  tokio::fs::create_dir_all(config.parent().unwrap())
+    .await
+    .unwrap();
+  tokio::fs::write(
+    home.path().join(".claude.json"),
+    format!(
+      r#"{{"mcpServers": {{"files": {{"command": "server", "args": ["--stdio"]}},
+          "remote": {{"type": "http", "url": "https://example/mcp", "headers": {{"Authorization": "Bearer x"}}}}}},
+        "projects": {{"{}": {{"mcpServers": {{"here": {{"command": "local"}}}}}}}}}}"#,
+      workspace.path().display()
+    ),
+  )
+  .await
+  .unwrap();
+  tokio::fs::create_dir_all(home.path().join(".codex"))
+    .await
+    .unwrap();
+  tokio::fs::write(
+    home.path().join(".codex/config.toml"),
+    "[mcp_servers.codexy]\ncommand = \"run\"\nargs = [\"mcp\"]\n",
+  )
+  .await
+  .unwrap();
+
+  let listing = ainz(&home, &config, &profile, &workspace, &["import", "--json"]).await;
+  let rows: serde_json::Value = serde_json::from_str(&listing).unwrap();
+  let names: Vec<&str> = rows
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|row| row["name"].as_str().unwrap())
+    .collect();
+  assert_eq!(names, ["codexy", "files", "here", "remote"]);
+  // an inline Authorization header is a copied secret, and the screen says so before it moves
+  let remote = &rows.as_array().unwrap()[3];
+  assert_eq!(remote["credentials"], true);
+  assert_eq!(rows.as_array().unwrap()[1]["credentials"], false);
+  assert!(
+    rows
+      .as_array()
+      .unwrap()
+      .iter()
+      .all(|row| row["present"] == false)
+  );
+
+  let imported = ainz(&home, &config, &profile, &workspace, &["import", "--all"]).await;
+  assert_eq!(imported.lines().count(), 4, "{imported}");
+
+  let written = tokio::fs::read_to_string(&profile).await.unwrap();
+  assert!(written.contains("[servers.files]"), "{written}");
+  assert!(written.contains("[servers.here]"), "{written}");
+  assert!(written.contains("command = \"run\""), "{written}");
+  // nothing imported is required, so a server that will not start cannot block a session
+  assert!(!written.contains("required = true"), "{written}");
+
+  let again = ainz(&home, &config, &profile, &workspace, &["import", "--json"]).await;
+  let rows: serde_json::Value = serde_json::from_str(&again).unwrap();
+  assert!(
+    rows
+      .as_array()
+      .unwrap()
+      .iter()
+      .all(|row| row["present"] == true)
+  );
+}
+
+async fn ainz(
+  home: &tempfile::TempDir,
+  config: &std::path::Path,
+  profile: &std::path::Path,
+  workspace: &tempfile::TempDir,
+  args: &[&str],
+) -> String {
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("HOME", home.path())
+    .env("AINZ_CONFIG", config)
+    .env("AINZ_MCP_PROFILE", profile)
+    .args(["--workspace", workspace.path().to_str().unwrap()])
+    .args(args)
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  String::from_utf8(output.stdout).unwrap()
+}

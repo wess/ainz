@@ -8,6 +8,9 @@ approved portable plugin may ship an `mcp.json` (see [plugins](plugins.md)).
 Synapse is the exception to the profile rule: turning the integration on registers its server for
 the session without writing anything, and turning it off removes it. See [Synapse](synapse.md).
 
+A server another tool on this machine already has can be copied in rather than retyped:
+`ainz import` lists them, `/import` picks from them in a session. See [import](import.md).
+
 ## Profile
 
 Register a stdio server through the CLI:

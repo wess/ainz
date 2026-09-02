@@ -17,10 +17,12 @@ ainz providers use claude sonnet</code></pre><p>Process providers use your exist
 <section class="step"><div class="stepnum">05</div><div><h2>Resume and branch</h2><pre><code>ainz sessions
 ainz resume
 ainz resume SESSION_ID --at NODE_ID "try the smaller fix"</code></pre><p>Sessions are tree-structured. Resuming at an earlier node creates another path without erasing what came after it.</p></div></section>
-<section class="step"><div class="stepnum">06</div><div><h2>Let it remember</h2><pre><code>ainz memory add the staging database is named orbit
+<section class="step"><div class="stepnum">06</div><div><h2>Bring what you already have</h2><pre><code>ainz import
+ainz import --all</code></pre><p>Skills, commands, and <code>AGENTS.md</code> are read where they already live. Tool servers are not, because every tool keeps its MCP configuration in its own file — so import lists what Claude Code, Codex, Cursor, and the rest have and copies over the ones you pick. <code>/import</code> is the same list as a checklist inside a session.</p></div></section>
+<section class="step"><div class="stepnum">07</div><div><h2>Let it remember</h2><pre><code>ainz memory add the staging database is named orbit
 ainz memory list</code></pre><p>Memory is on and local by default. What is stored for a workspace is recalled into the system prompt when a session opens, the session can write more with its <code>memory</code> tool, and it is asked to save anything durable before a long transcript is compacted. <code>/settings</code> changes any of it.</p></div></section>
-<section class="step"><div class="stepnum">07</div><div><h2>Connect Synapse</h2><pre><code>ainz synapse enable
+<section class="step"><div class="stepnum">08</div><div><h2>Connect Synapse</h2><pre><code>ainz synapse enable
 ainz memory backend synapse
 ainz synapse mesh on</code></pre><p><a href="https://wess.io/synapse/">Synapse</a> is optional and keeps memory, one skill library, and an agent mesh shared with your other tools; turning it on also loads your <code>SOUL.md</code> guidance and gives each subagent its own seat on the mesh. Registering the server by hand still works, and Ainz accepts an ephemeral MCP launch profile with <code>--mcp-config</code>, so Synapse can start it with a mesh-specific tool configuration.</p><pre><code>ainz mcp add synapse --required -- /absolute/path/to/synapse mcp</code></pre></div></section>
 <div class="actions"><a class="button" href="../docs/">Open the manual</a><a class="button secondary" href="https://github.com/wess/ainz/issues">Report a problem</a></div>
-</div></main><div class="statusline"><span>tutorial</span><span>7 steps</span><span>ready</span></div><footer><span>Ainz 0.3.1</span><span><a href="../docs/#install">alternate installs</a></span></footer></div></body></html>
+</div></main><div class="statusline"><span>tutorial</span><span>8 steps</span><span>ready</span></div><footer><span>Ainz 0.4.0</span><span><a href="../docs/#install">alternate installs</a></span></footer></div></body></html>
