@@ -1,0 +1,573 @@
+use std::{
+  io::{IsTerminal, Write},
+  path::PathBuf,
+  sync::Arc,
+};
+
+use anyhow::{Context, Result};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+use agentx::{
+  Agent, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile, PermissionMode,
+  PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig, ProviderKind,
+  RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
+  SubagentResult, instruction,
+  protocol::{Image, ToolCall},
+  run_control, subagent_tool,
+  tool::{Risk, ToolSet, builtins},
+};
+
+use crate::command::{ProviderPreset, preset_profile};
+
+async fn make_agent(
+  workspace: &std::path::Path,
+  config: &Config,
+  json: bool,
+) -> Result<(Agent<RuntimeProvider>, RunOptions)> {
+  let events = output_events(json);
+  let approver: agentx::agent::Approver = if json {
+    Arc::new(|_: &ToolCall, _: Risk| false)
+  } else {
+    Arc::new(approve)
+  };
+  make_agent_with(workspace, config, events, approver).await
+}
+
+pub(crate) async fn make_agent_with(
+  workspace: &std::path::Path,
+  config: &Config,
+  events: EventSink,
+  approver: agentx::agent::Approver,
+) -> Result<(Agent<RuntimeProvider>, RunOptions)> {
+  let profile = config.active_provider()?;
+  let provider = match profile.kind {
+    ProviderKind::Http => RuntimeProvider::Http(HttpProvider::new(
+      profile
+        .endpoint
+        .clone()
+        .context("HTTP provider requires an endpoint")?,
+      config.model.clone(),
+      config.api_key_for(&profile)?,
+    )?),
+    ProviderKind::Process => RuntimeProvider::Process(ProcessProvider::new(
+      profile
+        .command
+        .context("process provider requires a command")?,
+      profile.args,
+      config.model.clone(),
+      workspace.to_path_buf(),
+      config.permissions,
+      profile.output,
+    )),
+  };
+  let catalog = PluginCatalog::discover(workspace).await?;
+  let mut tools = ToolSet::default();
+  tools.extend(builtins())?;
+  tools.insert(JobStore::default_store()?.tool())?;
+  tools.insert(
+    SkillCatalog::discover_with_roots(workspace, &catalog.approved_skill_roots())
+      .await?
+      .tool(),
+  )?;
+  let mcp = Arc::new(McpHub::new(
+    catalog
+      .merge_mcp(McpProfile::load_with(config.mcp_config.as_deref()).await?)
+      .await?,
+  ));
+  if !mcp.is_empty() {
+    mcp.ready().await?;
+  }
+  tools.extend(catalog.approved_tools()?)?;
+  let mut instructions = instruction::load(workspace).await?;
+  for external in mcp.instructions().await? {
+    instructions.push_str("\n\nInstructions from an MCP server:\n");
+    instructions.push_str(external.trim());
+  }
+  if !mcp.is_empty() {
+    tools.insert(mcp.tool())?;
+  }
+  let options = RunOptions {
+    instructions,
+    permissions: config.permissions,
+    max_steps: config.max_steps,
+    max_output_bytes: config.max_output_bytes,
+    context_tokens: config.context_tokens,
+    compact_at_tokens: config.compact_at_tokens,
+    preserve_messages: config.preserve_messages,
+  };
+  let child_provider = provider.clone();
+  let child_tools = tools.clone();
+  let child_workspace = workspace.to_path_buf();
+  let child_options = options.clone();
+  let child_approver = approver.clone();
+  let child_events = events.clone();
+  let child_store = SessionStore::default_store()?;
+  let subagents: SubagentHandler = Arc::new(move |parent_id, prompt| {
+    let provider = child_provider.clone();
+    let tools = child_tools.clone();
+    let workspace = child_workspace.clone();
+    let options = child_options.clone();
+    let approver = child_approver.clone();
+    let events = child_events.clone();
+    let store = child_store.clone();
+    Box::pin(async move {
+      let mut session = Session::child(workspace.clone(), parent_id);
+      events.emit(Event::SubagentStart {
+        session_id: session.id.to_string(),
+        parent_id: parent_id.to_string(),
+      });
+      let session_id = session.id.to_string();
+      let forwarded = events.clone();
+      let child_events = EventSink::new(move |event| {
+        forwarded.emit(Event::SubagentEvent {
+          session_id: session_id.clone(),
+          event: Box::new(event),
+        });
+      });
+      let agent = Agent::new(provider, tools, workspace, child_events, approver);
+      let result = agent.run(&mut session, prompt, options).await;
+      store.save(&session).await?;
+      events.emit(Event::SubagentEnd {
+        session_id: session.id.to_string(),
+        error: result.is_err(),
+      });
+      Ok(SubagentResult {
+        session_id: session.id,
+        output: result?,
+        usage: session.usage,
+      })
+    })
+  });
+  tools.insert(subagent_tool(subagents))?;
+  Ok((
+    Agent::new(provider, tools, workspace.to_path_buf(), events, approver),
+    options,
+  ))
+}
+
+pub async fn run_once(
+  workspace: PathBuf,
+  config: Config,
+  mut session: Session,
+  prompt: String,
+  image_paths: Vec<PathBuf>,
+  json: bool,
+  save: bool,
+) -> Result<()> {
+  let (agent, options) = make_agent(&workspace, &config, json).await?;
+  output_events(json).emit(Event::SessionStart {
+    session_id: session.id.to_string(),
+  });
+  let images = load_images(&image_paths).await?;
+  let result = if images.is_empty() {
+    agent.run(&mut session, prompt, options).await.map(|_| ())
+  } else {
+    agent
+      .run_with_images(&mut session, prompt, images, options)
+      .await
+      .map(|_| ())
+  };
+  if save {
+    SessionStore::default_store()?.save(&session).await?;
+  }
+  result?;
+  if !json {
+    println!();
+  }
+  Ok(())
+}
+
+pub async fn interactive(
+  workspace: PathBuf,
+  mut config: Config,
+  mut session: Session,
+  mut initial_prompt: Option<String>,
+) -> Result<()> {
+  let store = SessionStore::default_store()?;
+  let prompts = PromptCatalog::discover(&workspace).await?;
+  let mut lines = BufReader::new(tokio::io::stdin()).lines();
+  if config.model.trim().is_empty() || config.active_provider().is_err() {
+    configure(&mut config, &mut lines).await?;
+  }
+  config.validate()?;
+  if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    loop {
+      let outcome = crate::tui::run_chat(
+        workspace.clone(),
+        &mut config,
+        session,
+        initial_prompt.take(),
+      )
+      .await?;
+      session = outcome.session;
+      store.save(&session).await?;
+      if outcome.configure {
+        crate::tui::configure(&mut config).await?;
+        config.validate()?;
+        continue;
+      }
+      return Ok(());
+    }
+  }
+  let (mut agent, mut options) = make_agent(&workspace, &config, false).await?;
+  print_header(&config);
+  println!("/config changes provider and model · /image PATH PROMPT attaches an image");
+  println!(
+    "session {} · /exit quits · /history lists nodes · /checkout NODE branches",
+    session.id
+  );
+  if config.permissions != PermissionMode::Ask {
+    println!("type during a run to steer · /cancel interrupts the active run");
+  }
+  loop {
+    let line = match initial_prompt.take() {
+      Some(prompt) => prompt,
+      None => {
+        print!("\n> ");
+        std::io::stdout().flush()?;
+        let Some(line) = lines.next_line().await? else {
+          break;
+        };
+        line
+      }
+    };
+    let prompt = line.trim();
+    if prompt.is_empty() {
+      continue;
+    }
+    if matches!(prompt, "/exit" | "/quit") {
+      break;
+    }
+    if prompt == "/new" {
+      session = Session::new(workspace.clone());
+      println!("session {}", session.id);
+      continue;
+    }
+    if prompt == "/history" {
+      print_history(&session);
+      continue;
+    }
+    if prompt == "/config" {
+      configure(&mut config, &mut lines).await?;
+      config.validate()?;
+      (agent, options) = make_agent(&workspace, &config, false).await?;
+      print_header(&config);
+      continue;
+    }
+    if let Some(value) = prompt.strip_prefix("/checkout ") {
+      let cursor = value
+        .trim()
+        .parse()
+        .context("checkout node must be a UUID")?;
+      session.checkout(Some(cursor))?;
+      store.save(&session).await?;
+      println!("cursor {cursor}");
+      continue;
+    }
+    let mut images = Vec::new();
+    let prompt = if let Some(value) = prompt.strip_prefix("/image ") {
+      let (path, prompt) = value
+        .split_once(char::is_whitespace)
+        .context("usage: /image PATH PROMPT")?;
+      images.push(Image::from_path(&PathBuf::from(path)).await?);
+      prompt.trim()
+    } else {
+      prompt
+    };
+    let expanded = expand_prompt(prompt, &prompts).await?;
+    let result = if config.permissions == PermissionMode::Ask {
+      if images.is_empty() {
+        agent.run(&mut session, expanded, options.clone()).await
+      } else {
+        agent
+          .run_with_images(&mut session, expanded, images, options.clone())
+          .await
+      }
+    } else {
+      controlled_interactive(&agent, &mut session, expanded, images, &options, &mut lines).await
+    };
+    if let Err(error) = result {
+      eprintln!("\nerror: {error:#}");
+    }
+    store.save(&session).await?;
+  }
+  Ok(())
+}
+
+fn print_header(config: &Config) {
+  println!(
+    "AgentX · {} · {}",
+    config.provider.as_deref().unwrap_or("default"),
+    config.model
+  );
+}
+
+async fn configure(
+  config: &mut Config,
+  lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) -> Result<()> {
+  if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    return crate::tui::configure(config).await;
+  }
+  println!("\nAgentX setup");
+  println!("  1  Ollama");
+  println!("  2  Codex CLI (headless)");
+  println!("  3  Claude Code (headless)");
+  println!("  4  Custom HTTP endpoint");
+  println!("  5  Custom process");
+  if !config.providers.is_empty() {
+    println!("  6  Existing provider");
+  }
+  let choice = read_value(lines, "provider", None).await?;
+  let (name, mut profile) = match choice.as_str() {
+    "1" | "ollama" => ("ollama".to_string(), preset_profile(ProviderPreset::Ollama)),
+    "2" | "codex" => ("codex".to_string(), preset_profile(ProviderPreset::Codex)),
+    "3" | "claude" | "claude-code" => {
+      let mut profile = preset_profile(ProviderPreset::ClaudeCode);
+      profile.models = vec!["sonnet".into(), "opus".into()];
+      ("claude".to_string(), profile)
+    }
+    "4" | "http" => {
+      let name = read_value(lines, "name", Some("http")).await?;
+      let endpoint = read_value(lines, "endpoint", Some("http://127.0.0.1:11434/v1")).await?;
+      let api_key_env = read_value(lines, "API key environment variable", Some("")).await?;
+      (name, ProviderConfig::http(endpoint, api_key_env))
+    }
+    "5" | "process" => {
+      let name = read_value(lines, "name", Some("process")).await?;
+      let command = read_value(lines, "command", None).await?;
+      let args = read_value(lines, "arguments", Some("")).await?;
+      let json = read_value(lines, "JSON result field? [y/N]", Some("n")).await?;
+      (
+        name,
+        ProviderConfig::process(
+          command,
+          args.split_whitespace().map(str::to_string).collect(),
+          if matches!(json.as_str(), "y" | "yes") {
+            ProcessOutput::JsonResult
+          } else {
+            ProcessOutput::Text
+          },
+        ),
+      )
+    }
+    "6" if !config.providers.is_empty() => choose_existing(config, lines).await?,
+    _ => anyhow::bail!("unknown provider selection {choice}"),
+  };
+
+  if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
+    anyhow::bail!("provider name must be non-empty and contain no whitespace");
+  }
+  if choice == "1" || choice == "ollama" {
+    let provider = HttpProvider::new(
+      profile
+        .endpoint
+        .clone()
+        .context("HTTP provider requires an endpoint")?,
+      String::new(),
+      None,
+    )?;
+    match provider.models().await {
+      Ok(models) => profile.models = models,
+      Err(error) => eprintln!("could not discover local models: {error:#}"),
+    }
+  }
+
+  let model = choose_model(config, &name, &profile, lines).await?;
+  if !profile.models.contains(&model) {
+    profile.models.push(model.clone());
+    profile.models.sort();
+  }
+  profile.validate(&name)?;
+  config.providers.insert(name.clone(), profile);
+  config.provider = Some(name.clone());
+  config.model = model.clone();
+  config.save().await?;
+  println!("configured {name} · {model}");
+  Ok(())
+}
+
+async fn choose_existing(
+  config: &Config,
+  lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) -> Result<(String, ProviderConfig)> {
+  let providers: Vec<_> = config.providers.iter().collect();
+  for (index, (name, provider)) in providers.iter().enumerate() {
+    println!("  {}  {} ({:?})", index + 1, name, provider.kind);
+  }
+  let value = read_value(lines, "existing provider", None).await?;
+  let index = value
+    .parse::<usize>()
+    .ok()
+    .filter(|index| *index > 0 && *index <= providers.len())
+    .context("provider selection must be a listed number")?;
+  let (name, provider) = providers[index - 1];
+  Ok((name.clone(), provider.clone()))
+}
+
+async fn choose_model(
+  config: &Config,
+  name: &str,
+  provider: &ProviderConfig,
+  lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) -> Result<String> {
+  if provider.models.is_empty() {
+    return read_value(lines, "model", None).await;
+  }
+  println!("models");
+  for (index, model) in provider.models.iter().enumerate() {
+    println!("  {}  {}", index + 1, model);
+  }
+  let default =
+    if config.provider.as_deref() == Some(name) && provider.models.contains(&config.model) {
+      config.model.as_str()
+    } else {
+      provider.models[0].as_str()
+    };
+  let value = read_value(lines, "model", Some(default)).await?;
+  Ok(
+    value
+      .parse::<usize>()
+      .ok()
+      .filter(|index| *index > 0 && *index <= provider.models.len())
+      .map_or(value, |index| provider.models[index - 1].clone()),
+  )
+}
+
+async fn read_value(
+  lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+  label: &str,
+  default: Option<&str>,
+) -> Result<String> {
+  match default {
+    Some(default) if !default.is_empty() => print!("{label} [{default}]: "),
+    _ => print!("{label}: "),
+  }
+  std::io::stdout().flush()?;
+  let value = lines.next_line().await?.context("setup cancelled")?;
+  let value = value.trim();
+  if value.is_empty() {
+    return default
+      .map(str::to_string)
+      .context(format!("{label} is required"));
+  }
+  Ok(value.to_string())
+}
+
+async fn controlled_interactive(
+  agent: &Agent<RuntimeProvider>,
+  session: &mut Session,
+  prompt: String,
+  images: Vec<Image>,
+  options: &RunOptions,
+  lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) -> Result<String> {
+  let (controller, mut inbox) = run_control();
+  let execution = async {
+    if images.is_empty() {
+      agent
+        .run_controlled(session, prompt, options.clone(), &mut inbox)
+        .await
+    } else {
+      agent
+        .run_controlled_with_images(session, prompt, images, options.clone(), &mut inbox)
+        .await
+    }
+  };
+  tokio::pin!(execution);
+  let mut input_open = true;
+  loop {
+    tokio::select! {
+      result = &mut execution => break result,
+      line = lines.next_line(), if input_open => {
+        match line? {
+          Some(line) if line.trim() == "/cancel" => {
+            controller.cancel();
+            eprintln!("\n↳ cancellation requested");
+          }
+          Some(line) if !line.trim().is_empty() => {
+            controller.steer(line);
+            eprintln!("\n↳ steering queued");
+          }
+          Some(_) => {}
+          None => {
+            input_open = false;
+            controller.cancel();
+          }
+        }
+      }
+    }
+  }
+}
+
+fn print_history(session: &Session) {
+  for node in &session.nodes {
+    println!(
+      "{}  {:?}  {}{}",
+      node.id,
+      node.message.role,
+      node
+        .message
+        .content
+        .as_deref()
+        .unwrap_or("[tool call]")
+        .chars()
+        .take(72)
+        .collect::<String>(),
+      if session.cursor == Some(node.id) {
+        "  ← cursor"
+      } else {
+        ""
+      }
+    );
+  }
+}
+
+pub(crate) async fn expand_prompt(prompt: &str, prompts: &PromptCatalog) -> Result<String> {
+  if let Some(command) = prompt.strip_prefix('/') {
+    let parts: Vec<_> = command.split_whitespace().map(str::to_string).collect();
+    if let Some((name, args)) = parts.split_first()
+      && prompts.prompts.iter().any(|prompt| prompt.name == *name)
+    {
+      return prompts.expand(name, args).await;
+    }
+  }
+  Ok(prompt.to_string())
+}
+
+async fn load_images(paths: &[PathBuf]) -> Result<Vec<Image>> {
+  let mut images = Vec::with_capacity(paths.len());
+  for path in paths {
+    images.push(Image::from_path(path).await?);
+  }
+  Ok(images)
+}
+
+fn output_events(json: bool) -> EventSink {
+  EventSink::new(move |event| {
+    if json {
+      println!("{}", serde_json::to_string(&event).unwrap_or_default());
+      return;
+    }
+    match event {
+      Event::TextDelta { text } => {
+        print!("{text}");
+        drop(std::io::stdout().flush());
+      }
+      Event::ToolStart { call } => eprintln!("\n→ {}", call.name),
+      Event::ToolEnd {
+        output,
+        error: true,
+        ..
+      } => eprintln!("  {output}"),
+      _ => {}
+    }
+  })
+}
+
+fn approve(call: &ToolCall, risk: Risk) -> bool {
+  eprint!("\nallow {} ({risk:?})? [y/N] ", call.name);
+  drop(std::io::stderr().flush());
+  let mut answer = String::new();
+  std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
+}

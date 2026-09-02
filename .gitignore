@@ -1,0 +1,21 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Native artifacts pulled/built for the embed layer
+/vendor
+*.a
+*.o
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+*.pdb
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode/*
+!.vscode/settings.json

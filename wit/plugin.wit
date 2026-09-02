@@ -1,0 +1,13 @@
+package agentx:plugin@0.1.0;
+
+interface host {
+  read-file: func(path: string) -> result<string, string>;
+  write-file: func(path: string, content: string) -> result<_, string>;
+  run: func(command: string) -> result<string, string>;
+  fetch: func(url: string) -> result<string, string>;
+}
+
+world plugin {
+  import host;
+  export call: func(tool: string, arguments: string) -> result<string, string>;
+}

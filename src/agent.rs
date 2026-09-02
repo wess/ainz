@@ -1,0 +1,313 @@
+use std::{path::PathBuf, sync::Arc};
+
+use anyhow::{Result, bail};
+
+use crate::{
+  config::PermissionMode,
+  context::{estimate_tokens, transcript},
+  control::{RunInbox, RunSignal},
+  event::{Event, EventSink},
+  protocol::{Image, Message, Role, ToolCall, ToolSpec, Usage},
+  provider::ChatProvider,
+  session::Session,
+  tool::{Risk, ToolContext, ToolSet},
+};
+
+pub type Approver = Arc<dyn Fn(&ToolCall, Risk) -> bool + Send + Sync>;
+
+#[derive(Clone)]
+pub struct RunOptions {
+  pub instructions: String,
+  pub permissions: PermissionMode,
+  pub max_steps: usize,
+  pub max_output_bytes: usize,
+  pub context_tokens: usize,
+  pub compact_at_tokens: usize,
+  pub preserve_messages: usize,
+}
+
+pub struct Agent<P> {
+  provider: P,
+  tools: ToolSet,
+  workspace: PathBuf,
+  events: EventSink,
+  approver: Approver,
+}
+
+impl<P: ChatProvider> Agent<P> {
+  pub fn new(
+    provider: P,
+    tools: ToolSet,
+    workspace: PathBuf,
+    events: EventSink,
+    approver: Approver,
+  ) -> Self {
+    Self {
+      provider,
+      tools,
+      workspace,
+      events,
+      approver,
+    }
+  }
+
+  pub async fn run(
+    &self,
+    session: &mut Session,
+    prompt: String,
+    options: RunOptions,
+  ) -> Result<String> {
+    self
+      .run_message(session, Message::text(Role::User, prompt), options, None)
+      .await
+  }
+
+  pub async fn run_with_images(
+    &self,
+    session: &mut Session,
+    prompt: String,
+    images: Vec<Image>,
+    options: RunOptions,
+  ) -> Result<String> {
+    self
+      .run_message(session, Message::user(prompt, images), options, None)
+      .await
+  }
+
+  pub async fn run_controlled(
+    &self,
+    session: &mut Session,
+    prompt: String,
+    options: RunOptions,
+    inbox: &mut RunInbox,
+  ) -> Result<String> {
+    self
+      .run_message(
+        session,
+        Message::text(Role::User, prompt),
+        options,
+        Some(inbox),
+      )
+      .await
+  }
+
+  pub async fn run_controlled_with_images(
+    &self,
+    session: &mut Session,
+    prompt: String,
+    images: Vec<Image>,
+    options: RunOptions,
+    inbox: &mut RunInbox,
+  ) -> Result<String> {
+    self
+      .run_message(session, Message::user(prompt, images), options, Some(inbox))
+      .await
+  }
+
+  async fn run_message(
+    &self,
+    session: &mut Session,
+    prompt: Message,
+    options: RunOptions,
+    mut inbox: Option<&mut RunInbox>,
+  ) -> Result<String> {
+    session.append(prompt);
+    let mut total = Usage::default();
+    let specs = self.tools.specs();
+    let mut steering = Vec::new();
+    for _ in 0..options.max_steps {
+      self
+        .compact_if_needed(session, &options, &specs, &mut total)
+        .await?;
+      let context_messages = session.context_messages()?;
+      let estimate = estimate_tokens(&options.instructions, &context_messages, &specs);
+      if estimate > options.context_tokens {
+        bail!(
+          "estimated context is {estimate} tokens, above the {} token limit",
+          options.context_tokens
+        );
+      }
+      let mut messages = vec![Message::text(Role::System, &options.instructions)];
+      messages.extend(context_messages);
+      let completion = self.provider.complete(&messages, &specs, &self.events);
+      tokio::pin!(completion);
+      let reply = loop {
+        if let Some(receiver) = inbox.as_deref_mut()
+          && receiver.is_open()
+        {
+          tokio::select! {
+            result = &mut completion => break result?,
+            signal = receiver.receive() => {
+              if self.handle_signal(signal, &mut steering) {
+                record_usage(session, &total);
+                self.events.emit(Event::Cancelled);
+                bail!("run cancelled");
+              }
+            }
+          }
+        } else {
+          break completion.await?;
+        }
+      };
+      total.input_tokens += reply.usage.input_tokens;
+      total.output_tokens += reply.usage.output_tokens;
+      let final_text = reply.message.content.clone().unwrap_or_default();
+      let calls = reply.message.tool_calls.clone();
+      session.append(reply.message);
+      if self.drain_signals(&mut inbox, &mut steering) {
+        record_usage(session, &total);
+        self.events.emit(Event::Cancelled);
+        bail!("run cancelled");
+      }
+      if calls.is_empty() && steering.is_empty() {
+        record_usage(session, &total);
+        self.events.emit(Event::TurnEnd { usage: total });
+        return Ok(final_text);
+      }
+
+      for call in calls {
+        self.events.emit(Event::ToolStart { call: call.clone() });
+        let execution = self.run_tool(&call, &options, session.id);
+        tokio::pin!(execution);
+        let (output, error) = loop {
+          if let Some(receiver) = inbox.as_deref_mut()
+            && receiver.is_open()
+          {
+            tokio::select! {
+              result = &mut execution => break result,
+              signal = receiver.receive() => {
+                if self.handle_signal(signal, &mut steering) {
+                  record_usage(session, &total);
+                  self.events.emit(Event::Cancelled);
+                  bail!("run cancelled");
+                }
+              }
+            }
+          } else {
+            break execution.await;
+          }
+        };
+        self.events.emit(Event::ToolEnd {
+          id: call.id.clone(),
+          output: output.clone(),
+          error,
+        });
+        session.append(Message::tool(call.id.clone(), output));
+      }
+      if self.drain_signals(&mut inbox, &mut steering) {
+        record_usage(session, &total);
+        self.events.emit(Event::Cancelled);
+        bail!("run cancelled");
+      }
+      for message in steering.drain(..) {
+        self.events.emit(Event::Steering {
+          message: message.clone(),
+        });
+        session.append(Message::text(Role::User, message));
+      }
+    }
+    record_usage(session, &total);
+    bail!("agent exceeded the {} step limit", options.max_steps)
+  }
+
+  fn handle_signal(&self, signal: Option<RunSignal>, steering: &mut Vec<String>) -> bool {
+    match signal {
+      Some(RunSignal::Steer(message)) if !message.trim().is_empty() => {
+        steering.push(message);
+        false
+      }
+      Some(RunSignal::Cancel) => true,
+      _ => false,
+    }
+  }
+
+  fn drain_signals(&self, inbox: &mut Option<&mut RunInbox>, steering: &mut Vec<String>) -> bool {
+    let Some(receiver) = inbox.as_deref_mut() else {
+      return false;
+    };
+    while let Some(signal) = receiver.try_receive() {
+      if self.handle_signal(Some(signal), steering) {
+        return true;
+      }
+    }
+    false
+  }
+
+  async fn compact_if_needed(
+    &self,
+    session: &mut Session,
+    options: &RunOptions,
+    specs: &[ToolSpec],
+    total: &mut Usage,
+  ) -> Result<()> {
+    let messages = session.context_messages()?;
+    if estimate_tokens(&options.instructions, &messages, specs) < options.compact_at_tokens {
+      return Ok(());
+    }
+    let Some((cursor, input, archived_messages)) =
+      session.compaction_input(options.preserve_messages)?
+    else {
+      return Ok(());
+    };
+    let request = vec![
+      Message::text(
+        Role::System,
+        "Summarize the session transcript for another agent continuing the work. Preserve decisions, constraints, file paths, commands and results, unresolved errors, and the next concrete action. Omit conversational filler.",
+      ),
+      Message::text(Role::User, transcript(&input)),
+    ];
+    let reply = self
+      .provider
+      .complete(&request, &[], &EventSink::default())
+      .await?;
+    total.input_tokens += reply.usage.input_tokens;
+    total.output_tokens += reply.usage.output_tokens;
+    let summary = reply.message.content.unwrap_or_default();
+    if summary.trim().is_empty() {
+      bail!("context compaction returned an empty summary");
+    }
+    session.record_summary(cursor, summary.clone())?;
+    self.events.emit(Event::Compaction {
+      archived_messages,
+      summary,
+    });
+    Ok(())
+  }
+
+  async fn run_tool(
+    &self,
+    call: &ToolCall,
+    options: &RunOptions,
+    session_id: uuid::Uuid,
+  ) -> (String, bool) {
+    let Some(tool) = self.tools.get(&call.name) else {
+      return (format!("unknown tool: {}", call.name), true);
+    };
+    let risk = tool.risk(&call.arguments);
+    let allowed = match options.permissions {
+      PermissionMode::Auto => true,
+      PermissionMode::ReadOnly => risk == Risk::Read,
+      PermissionMode::Ask => risk == Risk::Read || (self.approver)(call, risk),
+    };
+    if !allowed {
+      return (
+        format!("permission denied for {} ({risk:?})", call.name),
+        true,
+      );
+    }
+    let context = ToolContext {
+      workspace: self.workspace.clone(),
+      session_id,
+      max_output_bytes: options.max_output_bytes,
+    };
+    match tool.execute(&context, call.arguments.clone()).await {
+      Ok(output) => (output, false),
+      Err(error) => (format!("{error:#}"), true),
+    }
+  }
+}
+
+fn record_usage(session: &mut Session, usage: &Usage) {
+  session.usage.input_tokens += usage.input_tokens;
+  session.usage.output_tokens += usage.output_tokens;
+}
