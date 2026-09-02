@@ -24,7 +24,27 @@ The current foundation includes:
 - scoped component and process plugins with static tool schemas and capabilities
 - content-pinned plugin approval covering manifests and runtime artifacts
 
-## Build
+## Install
+
+With Homebrew on macOS or Linux:
+
+```sh
+brew install wess/packages/agentx
+```
+
+With the checksum-verifying installer on macOS or Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/wess/agentx/v0.1.0/install.sh | sh
+```
+
+Release downloads support Intel and Apple Silicon macOS and x86_64 and arm64 Linux. See
+[`docs/install.md`](docs/install.md) for pinned versions, custom install directories, Cargo, and
+uninstall instructions. The project site includes a [tutorial](https://wess.github.io/agentx/tutorial/)
+and [reference manual](https://wess.github.io/agentx/docs/).
+
+## Build from source
 
 ```sh
 cargo build --release

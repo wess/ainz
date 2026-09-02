@@ -1,7 +1,9 @@
 # Rust
 /target
 **/target
-Cargo.lock
+/dist
+**/Cargo.lock
+!/Cargo.lock
 
 # Native artifacts pulled/built for the embed layer
 /vendor
