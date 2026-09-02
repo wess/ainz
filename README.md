@@ -171,6 +171,18 @@ An empty transcript shows one of ten built-in mastheads. Paint your own in the
 drop it in the config directory's `headers/` folder or a project's `.ainz/headers/`.
 `/headers` lists them and `/header NAME` selects one; see [`docs/headers.md`](docs/headers.md).
 
+The unit tests cover the model behind the prompt; what a keystroke actually draws needs a
+terminal, so `scripts/tui-check.py` drives a real one. It opens a pty of its own, builds a
+throwaway workspace with a fake provider, and checks 44 things — history, the cursor keys, `@`
+completion, the rewind, the mouse, vim mode, and both ways of drawing, including what happens
+when the terminal will not say where the cursor is. It needs `pyte` and never touches the
+terminal it is run from.
+
+```sh
+pip install pyte
+cargo build && python3 scripts/tui-check.py
+```
+
 ## Memory
 
 A session that forgets everything at the end re-derives the same things next week. Ainz keeps

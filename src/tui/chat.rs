@@ -317,10 +317,20 @@ pub(crate) async fn run_chat(
   initial_prompt: Option<String>,
 ) -> Result<ChatOutcome> {
   // inline keeps the terminal's own scrollback; the full screen keeps the roster beside the talk
-  let mut terminal = if config.ui.inline {
-    enter_inline_terminal(INLINE_ROWS)?
-  } else {
-    enter_terminal()?
+  let mut notice = None;
+  let (mut terminal, inline) = match config.ui.inline {
+    // the inline viewport has to ask the terminal where the cursor is; not every terminal, pipe
+    // or multiplexer answers, and a session that cannot start is worse than one drawn the old way
+    true => match enter_inline_terminal(INLINE_ROWS) {
+      Ok(terminal) => (terminal, true),
+      Err(error) => {
+        notice = Some(format!(
+          "inline drawing is not available here ({error}); using the full screen"
+        ));
+        (enter_terminal()?, false)
+      }
+    },
+    false => (enter_terminal()?, false),
   };
   let result = run_chat_inner(
     &mut terminal,
@@ -328,6 +338,8 @@ pub(crate) async fn run_chat(
     config,
     initial_session,
     initial_prompt,
+    inline,
+    notice,
   )
   .await;
   leave_terminal(&mut terminal)?;
@@ -368,6 +380,8 @@ async fn run_chat_inner(
   config: &mut Config,
   initial_session: Session,
   initial_prompt: Option<String>,
+  inline: bool,
+  notice: Option<String>,
 ) -> Result<ChatOutcome> {
   let (tx, mut rx) = mpsc::unbounded_channel();
   let events_tx = tx.clone();
@@ -473,7 +487,7 @@ async fn run_chat_inner(
   };
   let mut state = ChatState {
     input: Input::with_history(history),
-    inline: config.ui.inline,
+    inline,
     files,
     primary: AgentView {
       entries: session_entries(session.as_ref().unwrap()),
@@ -485,6 +499,12 @@ async fn run_chat_inner(
     custom_header,
     ..ChatState::default()
   };
+  if let Some(notice) = notice {
+    state
+      .primary
+      .entries
+      .push(Entry::new(EntryKind::System, notice));
+  }
   let mut task: Option<RunTask> = None;
   let mut controller: Option<RunController> = None;
   let mut current_id = session_id;
@@ -571,8 +591,13 @@ async fn run_chat_inner(
           MouseEventKind::Down(_) => {
             let palette = state.palette_area.get();
             let prompt = state.prompt_area.get();
-            if contains(palette, mouse.column, mouse.row) {
-              state.command_selected = usize::from(mouse.row - palette.y - 1);
+            // the row under the pointer, past the menu's own border line
+            if let Some(row) = mouse
+              .row
+              .checked_sub(palette.y + 1)
+              .filter(|_| contains(palette, mouse.column, mouse.row))
+            {
+              state.command_selected = usize::from(row);
               accept_command(&mut state, &commands);
             } else if contains(prompt, mouse.column, mouse.row) {
               state.input.place(
@@ -2322,7 +2347,7 @@ fn clock() -> String {
 mod tests {
   use serde_json::json;
 
-  use super::{file_fragment, tool_label, tool_result};
+  use super::{Entry, EntryKind, entry_lines, file_fragment, tool_label, tool_result};
 
   #[test]
   fn a_call_is_labelled_by_what_it_acts_on() {
@@ -2368,6 +2393,30 @@ mod tests {
     let text = tool_result("shell", &output.join("\n"), false);
 
     assert_eq!(text, "⎿ line 1\n  line 2\n  line 3\n  … +3 lines");
+  }
+
+  #[test]
+  fn ctrl_o_shows_what_a_tool_returned_in_full() {
+    let entry = Entry::with_detail(
+      EntryKind::Tool,
+      tool_result("shell", "one\ntwo\nthree\nfour", false),
+      "one\ntwo\nthree\nfour".into(),
+    );
+
+    // collapsed: the three-line preview and the count of the rest
+    assert_eq!(entry_lines(&entry, false).len(), 4);
+    // expanded: every line the tool actually wrote
+    assert_eq!(entry_lines(&entry, true).len(), 4);
+    let expanded = entry_lines(&entry, true)
+      .iter()
+      .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+      .collect::<String>();
+    assert!(expanded.contains("four"), "{expanded}");
+    let collapsed = entry_lines(&entry, false)
+      .iter()
+      .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+      .collect::<String>();
+    assert!(collapsed.contains("+1 lines"), "{collapsed}");
   }
 
   #[test]
