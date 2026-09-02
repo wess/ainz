@@ -21,7 +21,7 @@ release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep
 ## Cargo
 
 ```sh
-cargo install --git https://github.com/wess/agentx --tag v0.1.1 --locked
+cargo install --git https://github.com/wess/agentx --tag v0.1.2 --locked
 ```
 
 ## Uninstall

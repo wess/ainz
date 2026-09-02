@@ -293,9 +293,13 @@ async fn run_chat_inner(
     if commands.iter().any(|command| command.name == prompt.name) {
       continue;
     }
+    let usage = match prompt.hint.as_deref() {
+      Some(hint) if !hint.is_empty() => format!("/{} {hint}", prompt.name),
+      _ => format!("/{} [ARGS]", prompt.name),
+    };
     commands.push(SlashCommand::new(
       &prompt.name,
-      format!("/{} [ARGS]", prompt.name),
+      usage,
       if prompt.description.is_empty() {
         "Run a prompt template".to_string()
       } else {

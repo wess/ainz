@@ -34,7 +34,11 @@ impl SkillCatalog {
   }
 
   pub async fn discover_with_roots(workspace: &Path, extra_roots: &[PathBuf]) -> Result<Self> {
+    // later roots win, so a project's own definition replaces a shared or user one
     let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+      roots.push(home.join(".claude/skills"));
+    }
     if let Some(config) = dirs::config_dir() {
       roots.push(config.join("struts/skills"));
       roots.push(config.join("agentx/skills"));
@@ -44,6 +48,7 @@ impl SkillCatalog {
     for path in ancestors {
       roots.push(path.join("skills"));
       roots.push(path.join(".agents/skills"));
+      roots.push(path.join(".claude/skills"));
       roots.push(path.join(".struts/skills"));
       roots.push(path.join(".agentx/skills"));
     }
@@ -113,6 +118,45 @@ struct SkillTool {
 #[derive(Deserialize)]
 struct SkillArgs {
   name: String,
+  file: Option<String>,
+}
+
+const MAX_BUNDLED: usize = 40;
+const MAX_DEPTH: usize = 3;
+
+// a skill may sit outside the workspace, where the read tool cannot reach it, so its own
+// directory is listed and served through this tool instead
+async fn bundled(directory: &Path) -> Result<Vec<String>> {
+  let mut names = Vec::new();
+  let mut pending = vec![(directory.to_path_buf(), 0_usize)];
+  while let Some((current, depth)) = pending.pop() {
+    let Ok(mut entries) = fs::read_dir(&current).await else {
+      continue;
+    };
+    while let Some(entry) = entries.next_entry().await? {
+      if names.len() >= MAX_BUNDLED {
+        return Ok(names);
+      }
+      let path = entry.path();
+      let Ok(file_type) = entry.file_type().await else {
+        continue;
+      };
+      if file_type.is_dir() {
+        if depth + 1 < MAX_DEPTH {
+          pending.push((path, depth + 1));
+        }
+        continue;
+      }
+      if !file_type.is_file() || path.file_name().is_some_and(|name| name == "SKILL.md") {
+        continue;
+      }
+      if let Ok(relative) = path.strip_prefix(directory) {
+        names.push(relative.to_string_lossy().into_owned());
+      }
+    }
+  }
+  names.sort();
+  Ok(names)
 }
 
 #[async_trait]
@@ -132,10 +176,14 @@ impl Tool for SkillTool {
       .join("; ");
     ToolSpec {
       name: "skill".into(),
-      description: format!("Load one skill's instructions on demand. Available: {available}"),
+      description: format!(
+        "Load one skill's instructions on demand, or read a file bundled beside it by \
+         passing that file's listed path. Available: {available}"
+      ),
       parameters: json!({
-        "type": "object", "properties": {"name": {"type": "string"}},
-        "required": ["name"], "additionalProperties": false
+        "type": "object", "properties": {
+          "name": {"type": "string"}, "file": {"type": "string"}
+        }, "required": ["name"], "additionalProperties": false
       }),
     }
   }
@@ -151,11 +199,30 @@ impl Tool for SkillTool {
       .iter()
       .find(|skill| skill.name == args.name)
       .with_context(|| format!("skill {} was not found", args.name))?;
-    let text = fs::read_to_string(&skill.path)
+    let directory = skill.path.parent().unwrap_or(Path::new("."));
+    if let Some(file) = args.file.as_deref() {
+      // the same containment the workspace tools use, rooted at the skill directory
+      let path = crate::workspace::existing(directory, file)
+        .await
+        .with_context(|| format!("{file} is not a file bundled with skill {}", skill.name))?;
+      let text = fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+      return Ok(truncate(text, context.max_output_bytes));
+    }
+    let mut text = fs::read_to_string(&skill.path)
       .await
       .with_context(|| format!("read {}", skill.path.display()))?;
     if text.trim().is_empty() {
       bail!("skill {} is empty", skill.name);
+    }
+    let files = bundled(directory).await?;
+    if !files.is_empty() {
+      text.push_str(&format!(
+        "\n\nFiles bundled with this skill, each readable by calling this tool again with \
+         `file` set to its path: {}",
+        files.join(", ")
+      ));
     }
     Ok(truncate(text, context.max_output_bytes))
   }

@@ -118,11 +118,27 @@ drop it in the config directory's `headers/` folder or a project's `.agentx/head
 
 ## Instructions, skills, and prompts
 
-`AGENTS.md` files from the filesystem root down to the workspace are appended to the system
-instructions, nearest last. `SKILL.md` directories under `skills/`, `.agents/skills/`,
-`.agentx/skills/`, and the config directory are discovered up front and loaded through one
-`skill` tool only when the model asks for them. Markdown prompt templates in `prompts/`
-directories expand `{{args}}` and `{{1}}`-style positional arguments as `/name ARGS`.
+AgentX reads the layouts other harnesses already use, so an existing project works without an
+import step or a copy that drifts.
+
+`AGENTS.md` and `CLAUDE.md` are both read at every level from the filesystem root down to the
+workspace, nearest last, along with `~/.claude/CLAUDE.md` and the config directory's `AGENTS.md`.
+
+`SKILL.md` directories are discovered up front from `skills/`, `.agents/skills/`,
+`.claude/skills/`, and `.agentx/skills/` beside the workspace, plus `~/.claude/skills/` and the
+config directory. Only their names and descriptions occupy the prompt; one `skill` tool loads a
+skill's text when the model asks for it. A skill that ships scripts or reference files lists them
+on load, and the same tool serves them with `{"name": "...", "file": "scripts/run.sh"}`, which is
+how a skill outside the workspace reaches its own files.
+
+Markdown prompt templates come from `.claude/commands/` and `.agentx/prompts/` beside the
+workspace, plus `~/.claude/commands/` and the config directory. A subdirectory namespaces its
+templates, so `commands/api/audit.md` runs as `/api:audit`. Bodies expand `$ARGUMENTS` and `$1`
+as well as `{{args}}` and `{{1}}`, and an `argument-hint` in the front matter becomes the usage
+shown in the palette.
+
+Nearer definitions win, so a project can override a shared skill or command by name. `agentx
+skills`, `agentx prompts`, and `agentx doctor` show what was found.
 
 ## External tools
 

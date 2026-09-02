@@ -656,5 +656,13 @@ pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {
       .filter(|plugin| plugin.approved)
       .count()
   );
+  for issue in &catalog.issues {
+    println!("           invalid  {issue}");
+  }
+  let skills =
+    SkillCatalog::discover_with_roots(workspace, &catalog.approved_skill_roots()).await?;
+  println!("skills     {} discovered", skills.skills.len());
+  let prompts = PromptCatalog::discover(workspace).await?;
+  println!("prompts    {} discovered", prompts.prompts.len());
   Ok(())
 }
