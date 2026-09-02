@@ -6,7 +6,7 @@ use std::{
   },
 };
 
-use ainz::{Config, HttpProvider, ProcessOutput, ProviderConfig};
+use ainz::{Config, HttpProvider, ProcessOutput, ProviderConfig, ProviderKind};
 use anyhow::{Context, Result};
 use crossterm::{
   event::{
@@ -129,6 +129,39 @@ impl Choice {
   }
 }
 
+async fn discover_models(
+  config: &Config,
+  provider: &ProviderConfig,
+  endpoint: String,
+) -> Result<Vec<String>> {
+  let key = config.api_key_for(provider)?;
+  HttpProvider::new(endpoint, String::new(), key)?
+    .models()
+    .await
+}
+
+/// What the tool's own config says it is set to, so its model is offered rather than recalled.
+fn configured_model(relative: &str, key: &str) -> Option<String> {
+  let path = dirs::home_dir()?.join(relative);
+  let text = std::fs::read_to_string(path).ok()?;
+  match path_is_json(relative) {
+    true => serde_json::from_str::<serde_json::Value>(&text)
+      .ok()?
+      .get(key)?
+      .as_str()
+      .map(str::to_string),
+    false => text.lines().find_map(|line| {
+      let (name, value) = line.split_once('=')?;
+      (name.trim() == key).then(|| value.trim().trim_matches('"').to_string())
+    }),
+  }
+  .filter(|model| !model.is_empty())
+}
+
+fn path_is_json(path: &str) -> bool {
+  path.ends_with(".json")
+}
+
 /// A list to pick from, ending in a row that falls back to typing the value by hand.
 fn choose_value(
   terminal: &mut Term,
@@ -196,9 +229,10 @@ fn choose_value(
       InputEvent::Key(key) if key.kind != KeyEventKind::Release => match key.code {
         KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
         KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(rows.len() - 1),
+        // typing another value starts from nothing: the default is already a row above
         KeyCode::Enter if selected == rows.len() - 1 => {
           return Ok(
-            edit_fields(terminal, title, vec![Field::new(label, typed)])?
+            edit_fields(terminal, title, vec![Field::new(label, "")])?
               .map(|values| values[0].clone()),
           );
         }
@@ -570,11 +604,20 @@ async fn configure_inner(
       ("litellm".into(), profile, None)
     }
     Choice::Preset(ProviderPreset::Codex) => {
-      ("codex".into(), preset_profile(ProviderPreset::Codex), None)
+      let mut profile = preset_profile(ProviderPreset::Codex);
+      profile.models = configured_model(".codex/config.toml", "model")
+        .into_iter()
+        .collect();
+      ("codex".into(), profile, None)
     }
     Choice::Preset(ProviderPreset::ClaudeCode) => {
       let mut profile = preset_profile(ProviderPreset::ClaudeCode);
-      profile.models = vec!["sonnet".into(), "opus".into()];
+      profile.models = vec!["fable".into(), "opus".into(), "sonnet".into()];
+      if let Some(model) = configured_model(".claude/settings.json", "model")
+        && !profile.models.contains(&model)
+      {
+        profile.models.push(model);
+      }
       ("claude".into(), profile, None)
     }
     Choice::Existing(name) => {
@@ -609,7 +652,7 @@ async fn configure_inner(
       let Some(values) = edit_fields(
         terminal,
         "Custom HTTP provider",
-        vec![Field::new("Name", "http"), Field::new("Model", "")],
+        vec![Field::new("Name", "http")],
       )?
       else {
         return Ok(None);
@@ -621,7 +664,7 @@ async fn configure_inner(
           variable => variable,
         },
       );
-      (values[0].clone(), profile, Some(values[1].clone()))
+      (values[0].clone(), profile, None)
     }
     Choice::Process => {
       let Some(command) = choose_value(
@@ -665,7 +708,7 @@ async fn configure_inner(
 
   let model = match direct_model {
     Some(model) if !model.is_empty() => model,
-    _ => match select_model(terminal, config, &name, &profile)? {
+    _ => match select_model(terminal, config, &name, &profile).await? {
       Some(model) => model,
       None => return Ok(None),
     },
@@ -697,19 +740,29 @@ fn select_provider(
   }
 }
 
-fn select_model(
+async fn select_model(
   terminal: &mut Term,
   config: &Config,
   name: &str,
   provider: &ProviderConfig,
 ) -> Result<Option<String>> {
-  if provider.models.is_empty() {
+  let mut known = provider.models.clone();
+  // an endpoint knows what it serves, so ask it rather than making the name be remembered
+  if known.is_empty() && provider.kind == ProviderKind::Http {
+    terminal.draw(|frame| render_loading(frame, "Asking the endpoint which models it serves…"))?;
+    if let Some(endpoint) = provider.endpoint.clone()
+      && let Ok(discovered) = discover_models(config, provider, endpoint).await
+    {
+      known = discovered;
+    }
+  }
+  if known.is_empty() {
     return Ok(
       edit_fields(terminal, "Choose a model", vec![Field::new("Model", "")])?
         .map(|values| values[0].clone()),
     );
   }
-  let mut models = provider.models.clone();
+  let mut models = known;
   models.push("Enter another model…".into());
   let mut selected = if config.provider.as_deref() == Some(name) {
     models
@@ -812,6 +865,10 @@ fn edit_fields(
     };
     match key.code {
       KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(None),
+      // a prefilled field has to be clearable without holding backspace down
+      KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        fields[selected].value.clear();
+      }
       KeyCode::Char(ch) => fields[selected].value.push(ch),
       KeyCode::Backspace => {
         fields[selected].value.pop();

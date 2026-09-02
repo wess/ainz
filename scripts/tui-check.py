@@ -11,6 +11,8 @@ and it never touches the terminal it is run from.
 """
 
 import fcntl
+import http.server
+import json
 import os
 import pty
 import select
@@ -19,6 +21,7 @@ import struct
 import sys
 import tempfile
 import termios
+import threading
 import time
 
 import pyte
@@ -305,6 +308,56 @@ def check_setup(binary, root):
     term.close()
 
 
+class Models(http.server.BaseHTTPRequestHandler):
+    """The /models an OpenAI-compatible endpoint serves."""
+
+    def do_GET(self):
+        body = json.dumps(
+            {"data": [{"id": "zeta-omega-1"}, {"id": "alpha-beta-2"}]}
+        ).encode()
+        self.send_response(200 if self.path.endswith("/models") else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def check_model_list(binary, root):
+    print("\nchoosing a model")
+    server = http.server.HTTPServer(("127.0.0.1", 0), Models)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    endpoint = f"http://127.0.0.1:{server.server_address[1]}"
+
+    term = Terminal(binary, root, "config.toml")
+    term.pump(6.0)
+    term.send("/config" + ENTER, settle=1.5)
+    for _ in range(12):
+        if "Compatible endpoint" in term.body():
+            break
+        term.send(DOWN, settle=0.2)
+    check("a custom endpoint is offered", "Compatible endpoint" in term.body(), term.body()[:600])
+    term.send(ENTER, settle=1.0)
+
+    check("the endpoint list opens", "Type another" in term.body(), term.body()[:600])
+    # the last row is "Type another…", and the selection stops there
+    term.send(DOWN * 8 + ENTER, settle=0.8)
+    term.send(endpoint + ENTER, settle=0.8)
+    # no credential for this one: "None" is the first row
+    term.send(ENTER, settle=0.8)
+    term.send(ENTER, settle=2.5)
+
+    body = term.body()
+    check("the endpoint's own models are listed", "zeta-omega-1" in body, body[:800])
+    check("all of them", "alpha-beta-2" in body, body[:800])
+    check("with room to name another", "Enter another model" in body, body[:800])
+    term.send(ESC, settle=0.5)
+    term.close()
+    server.shutdown()
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/ainz"
     binary = os.path.abspath(binary)
@@ -315,6 +368,7 @@ def main():
         check_prompt(binary, root)
         check_inline(binary, root)
         check_setup(binary, root)
+        check_model_list(binary, root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\n{checks - len(failures)}/{checks} checks passed")

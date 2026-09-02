@@ -536,7 +536,7 @@ async fn configure(
     "3" | "codex" => ("codex".to_string(), preset_profile(ProviderPreset::Codex)),
     "4" | "claude" | "claude-code" => {
       let mut profile = preset_profile(ProviderPreset::ClaudeCode);
-      profile.models = vec!["sonnet".into(), "opus".into()];
+      profile.models = vec!["fable".into(), "opus".into(), "sonnet".into()];
       ("claude".to_string(), profile)
     }
     "5" | "http" => {
@@ -570,7 +570,7 @@ async fn configure(
   if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
     anyhow::bail!("provider name must be non-empty and contain no whitespace");
   }
-  if matches!(choice.as_str(), "1" | "ollama" | "2" | "litellm") {
+  if profile.kind == ProviderKind::Http && profile.models.is_empty() {
     let key = (!profile.api_key_env.is_empty())
       .then(|| std::env::var(&profile.api_key_env).ok())
       .flatten()
@@ -585,7 +585,7 @@ async fn configure(
     )?;
     match provider.models().await {
       Ok(models) => profile.models = models,
-      Err(error) => eprintln!("could not discover local models: {error:#}"),
+      Err(error) => eprintln!("could not ask the endpoint which models it serves: {error:#}"),
     }
   }
 

@@ -26,9 +26,12 @@ ainz models add NAME MODEL
 ainz models remove NAME MODEL
 ```
 
-`models list --refresh` uses the HTTP provider's `/models` endpoint and replaces its stored
-model list. Process providers have no common discovery protocol, so their models are managed
-explicitly.
+Setup asks rather than expecting a model name to be remembered: an HTTP provider is asked for
+`/models` and the answer becomes the list to pick from, and `models list --refresh` replaces a
+stored list the same way. Process providers have no common discovery protocol, so the presets
+offer what can be known — the aliases the CLI's own help documents, plus the model that tool is
+already configured with on this machine (`~/.codex/config.toml`, `~/.claude/settings.json`).
+Every list ends in a row for naming a model by hand.
 
 ## LiteLLM
 
