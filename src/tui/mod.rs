@@ -683,14 +683,11 @@ fn render_fields(frame: &mut Frame, title: &str, fields: &[Field], selected: usi
   let rows = Layout::vertical(constraints).spacing(1).split(area);
   for (index, field) in fields.iter().enumerate() {
     let border = if index == selected { ACCENT } else { MUTED };
-    // a pasted key is longer than its box; the field being edited shows its end, not its start
+    // a value that outgrows its box shows its end while it is being edited; one that fits
+    // stays put, first character and all
     let scroll = if index == selected {
       let inner = rows[index].width.saturating_sub(4) as usize;
-      let width = field.value.chars().count();
-      width
-        .saturating_sub(inner)
-        .saturating_add(1)
-        .min(u16::MAX as usize) as u16
+      u16::try_from(field.value.chars().count().saturating_sub(inner)).unwrap_or(u16::MAX)
     } else {
       0
     };
@@ -758,4 +755,43 @@ pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     .flex(ratatui::layout::Flex::Center)
     .areas(area);
   area
+}
+
+#[cfg(test)]
+mod tests {
+  use ratatui::{Terminal, backend::TestBackend};
+
+  use super::{Field, render_fields};
+
+  fn rendered(fields: &[Field], selected: usize, width: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, 14)).unwrap();
+    terminal
+      .draw(|frame| render_fields(frame, "Setup", fields, selected))
+      .unwrap();
+    terminal
+      .backend()
+      .buffer()
+      .content()
+      .iter()
+      .map(ratatui::buffer::Cell::symbol)
+      .collect()
+  }
+
+  #[test]
+  fn a_focused_field_that_fits_shows_its_first_character() {
+    let fields = vec![Field::new("Endpoint", "http://127.0.0.1:4000/v1")];
+
+    assert!(rendered(&fields, 0, 70).contains("http://127.0.0.1:4000/v1"));
+  }
+
+  #[test]
+  fn a_focused_field_longer_than_its_box_shows_its_end() {
+    let key = format!("sk-{}-tail", "x".repeat(90));
+    let fields = vec![Field::new("API key environment variable", &key)];
+
+    let text = rendered(&fields, 0, 60);
+
+    assert!(text.contains("-tail"));
+    assert!(!text.contains("sk-x"));
+  }
 }
