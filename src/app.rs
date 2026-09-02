@@ -92,8 +92,7 @@ pub(crate) async fn make_agent_with(
   let mut tools = ToolSet::default();
   tools.extend(builtins())?;
   tools.insert(JobStore::default_store()?.tool())?;
-  let sessions = SessionStore::default_store()?;
-  tools.insert(sessions.tool())?;
+  tools.insert(SessionStore::default_store()?.tool())?;
   tools.insert(
     SkillCatalog::discover_with_roots(workspace, &catalog.approved_skill_roots())
       .await?
@@ -141,9 +140,19 @@ pub(crate) async fn make_agent_with(
   let memory = match config.memory.backend {
     MemoryBackend::Off => MemoryStore::Off,
     MemoryBackend::Local => MemoryStore::local(workspace)?,
+    // asking for Synapse and quietly getting something else is worse than saying so
     MemoryBackend::Synapse => match synapse.clone() {
       Some(synapse) => MemoryStore::Synapse(synapse),
-      None => MemoryStore::local(workspace)?,
+      None => {
+        events.emit(Event::Error {
+          message: format!(
+            "memory is set to synapse but no synapse binary was found; using local memory \
+             for this session — {}",
+            synapse::SITE
+          ),
+        });
+        MemoryStore::local(workspace)?
+      }
     },
   };
   if !memory.is_off() {
