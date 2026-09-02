@@ -40,9 +40,16 @@ use crate::app::{expand_prompt, make_agent_with};
 type RunOutput = (Agent<RuntimeProvider>, Session, Result<String>);
 type RunTask = JoinHandle<RunOutput>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatNext {
+  Quit,
+  Configure,
+  Settings,
+}
+
 pub(crate) struct ChatOutcome {
   pub session: Session,
-  pub configure: bool,
+  pub next: ChatNext,
 }
 
 enum UiEvent {
@@ -500,13 +507,13 @@ async fn run_chat_inner(
             };
             return Ok(ChatOutcome {
               session,
-              configure: false,
+              next: ChatNext::Quit,
             });
           }
           None => {
             return Ok(ChatOutcome {
               session: session.context("session unavailable")?,
-              configure: false,
+              next: ChatNext::Quit,
             });
           }
         },
@@ -612,14 +619,51 @@ async fn run_chat_inner(
           CommandResult::Quit => {
             return Ok(ChatOutcome {
               session: session.take().unwrap(),
-              configure: false,
+              next: ChatNext::Quit,
             });
           }
           CommandResult::Configure => {
             return Ok(ChatOutcome {
               session: session.take().unwrap(),
-              configure: true,
+              next: ChatNext::Configure,
             });
+          }
+          CommandResult::Settings => {
+            return Ok(ChatOutcome {
+              session: session.take().unwrap(),
+              next: ChatNext::Settings,
+            });
+          }
+          CommandResult::Recall(query) => {
+            let store = crate::app::memory_store(&workspace, config).await?;
+            let entry = match store.recall(&query, 8).await {
+              Ok(records) if records.is_empty() => {
+                Entry::new(EntryKind::System, "no memories matched".into())
+              }
+              Ok(records) => Entry::new(
+                EntryKind::System,
+                records
+                  .iter()
+                  .map(|record| format!("{}  {}", record.id, record.summary(96)))
+                  .collect::<Vec<_>>()
+                  .join("\n"),
+              ),
+              Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+            };
+            state.primary.entries.push(entry);
+            continue;
+          }
+          CommandResult::Remember(content) => {
+            let store = crate::app::memory_store(&workspace, config).await?;
+            let entry = match store
+              .remember(&content, Some("typed in a session"), "project", &[])
+              .await
+            {
+              Ok(message) => Entry::new(EntryKind::System, message),
+              Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+            };
+            state.primary.entries.push(entry);
+            continue;
           }
           CommandResult::ShowAgents => {
             set_roster(&mut state, config, true).await;
@@ -726,6 +770,9 @@ async fn set_roster(state: &mut ChatState, config: &mut Config, visible: bool) {
 enum CommandResult {
   Quit,
   Configure,
+  Settings,
+  Recall(String),
+  Remember(String),
   ShowAgents,
   SetPermissions(PermissionMode),
   SetHeader(String),
@@ -748,6 +795,23 @@ fn command(
   match input {
     "/exit" | "/quit" => Ok(CommandResult::Quit),
     "/config" | "/model" | "/provider" => Ok(CommandResult::Configure),
+    "/settings" => Ok(CommandResult::Settings),
+    "/memory" => Ok(CommandResult::Recall(String::new())),
+    "/synapse" => {
+      let installed = ainz::synapse::binary(&config.synapse)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| format!("not installed — {}", ainz::synapse::SITE));
+      state.primary.entries.push(Entry::new(
+        EntryKind::System,
+        format!(
+          "synapse   {}\nbinary    {installed}\nmesh      {}\nmemory    {}\nchange these in /settings",
+          if config.synapse.enabled { "on" } else { "off" },
+          if config.synapse.mesh { "on" } else { "off" },
+          config.memory.backend.label(),
+        ),
+      ));
+      Ok(CommandResult::Handled)
+    }
     "/agents" => Ok(CommandResult::ShowAgents),
     "/header" => {
       state.primary.entries.push(Entry::new(
@@ -880,6 +944,14 @@ fn command(
         ));
       }
       Ok(CommandResult::Handled)
+    }
+    _ if input.starts_with("/memory ") => Ok(CommandResult::Recall(input[8..].trim().into())),
+    _ if input.starts_with("/remember ") => {
+      let content = input[10..].trim();
+      if content.is_empty() {
+        anyhow::bail!("usage: /remember TEXT");
+      }
+      Ok(CommandResult::Remember(content.into()))
     }
     _ if input.starts_with("/agent ") => {
       let slot = input[7..]
@@ -1449,10 +1521,16 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       }
     });
   let model = &config.model;
+  // what memory this session has, since it changes what the model can be expected to know
+  let memory = match (config.memory.backend, config.mesh_active()) {
+    (ainz::MemoryBackend::Off, _) => String::new(),
+    (backend, true) => format!(" │ {} +mesh", backend.label()),
+    (backend, false) => format!(" │ {}", backend.label()),
+  };
   let text = if area.width >= 108 {
     format!(
-      " {provider}/{model} │ {permissions} │ tokens in {input} out {output} total {total} │ \
-       agents {running}/{total_agents} │ {activity} │ ^L roster "
+      " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
+       {total} │ agents {running}/{total_agents} │ {activity} │ ^L roster "
     )
   } else if area.width >= 72 {
     format!(

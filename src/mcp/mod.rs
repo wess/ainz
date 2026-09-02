@@ -332,8 +332,23 @@ impl McpHub {
     Ok(found)
   }
 
-  pub(super) async fn call(&self, server: &str, name: &str, arguments: Value) -> Result<String> {
+  pub async fn call(&self, server: &str, name: &str, arguments: Value) -> Result<String> {
     self.server(server)?.call(name, arguments).await
+  }
+
+  pub fn has(&self, server: &str) -> bool {
+    self.servers.contains_key(server)
+  }
+
+  // one server's own instructions, for an optional server that the host wants anyway
+  pub async fn instructions_for(&self, server: &str) -> Result<Option<String>> {
+    Ok(
+      self
+        .server(server)?
+        .instructions()
+        .await?
+        .map(|text| truncate(text, MAX_INSTRUCTIONS)),
+    )
   }
 
   // only what the server already told us counts; an unknown tool is treated as executing

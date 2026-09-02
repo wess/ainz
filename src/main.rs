@@ -11,7 +11,10 @@ mod command;
 mod rpc_cli;
 mod tui;
 
-use command::{McpCommand, ModelCommand, PluginCommand, ProviderCommand};
+use command::{
+  McpCommand, MemoryCommand, ModelCommand, PluginCommand, ProviderCommand, SkillCommand,
+  SynapseCommand,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -74,11 +77,23 @@ enum Command {
   },
   Sessions {
     #[arg(long)]
+    search: Option<String>,
+    #[arg(long)]
     json: bool,
   },
   Skills {
+    #[command(subcommand)]
+    command: Option<SkillCommand>,
     #[arg(long)]
     json: bool,
+  },
+  Memory {
+    #[command(subcommand)]
+    command: MemoryCommand,
+  },
+  Synapse {
+    #[command(subcommand)]
+    command: Option<SynapseCommand>,
   },
   Prompts {
     name: Option<String>,
@@ -147,8 +162,15 @@ async fn run() -> Result<()> {
   }
 
   match cli.command {
-    Some(Command::Sessions { json }) => command::list_sessions(&workspace, json).await,
-    Some(Command::Skills { json }) => command::list_skills(&workspace, json).await,
+    Some(Command::Sessions { search, json }) => match search {
+      Some(query) => command::search_sessions(&workspace, &query, json).await,
+      None => command::list_sessions(&workspace, json).await,
+    },
+    Some(Command::Skills { command, json }) => {
+      command::skills(&workspace, &config, command, json).await
+    }
+    Some(Command::Memory { command }) => command::memory(&workspace, &mut config, command).await,
+    Some(Command::Synapse { command }) => command::synapse(&mut config, command).await,
     Some(Command::Prompts { name, args, json }) => {
       command::prompts(&workspace, name.as_deref(), &args, json).await
     }

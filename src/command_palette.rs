@@ -86,6 +86,12 @@ pub fn builtins() -> Vec<SlashCommand> {
     ),
     ("mcp", "/mcp", "List configured MCP servers", "extension"),
     (
+      "memory",
+      "/memory [QUERY]",
+      "Recall what has been written down for this workspace",
+      "memory",
+    ),
+    (
       "model",
       "/model",
       "Choose the active provider and model",
@@ -118,10 +124,22 @@ pub fn builtins() -> Vec<SlashCommand> {
     ),
     ("quit", "/quit", "Save and exit Ainz", "session"),
     (
+      "remember",
+      "/remember <TEXT>",
+      "Store a durable fact, decision, or correction",
+      "memory",
+    ),
+    (
       "sessions",
       "/sessions",
       "List saved sessions for this workspace",
       "session",
+    ),
+    (
+      "settings",
+      "/settings",
+      "Open settings: memory, Synapse, permissions, and more",
+      "config",
     ),
     ("skills", "/skills", "List discovered skills", "extension"),
     (
@@ -129,6 +147,12 @@ pub fn builtins() -> Vec<SlashCommand> {
       "/status",
       "Show session, model, permissions, and agents",
       "info",
+    ),
+    (
+      "synapse",
+      "/synapse",
+      "Show the Synapse integration state",
+      "config",
     ),
     (
       "usage",

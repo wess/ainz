@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use ainz::{
-  Event, SubagentResult,
+  Event, SubagentRegistry, SubagentRequest, SubagentResult,
   protocol::Usage,
   subagent_tool,
   tool::{Risk, ToolContext},
@@ -29,20 +29,24 @@ async fn subagent_tools_receive_the_parent_and_return_child_metadata() {
   let parent = uuid::Uuid::now_v7();
   let observed = Arc::new(Mutex::new(None));
   let captured = observed.clone();
-  let tool = subagent_tool(Arc::new(move |parent_id, prompt| {
-    *captured.lock().unwrap() = Some((parent_id, prompt));
-    Box::pin(async move {
-      Ok(SubagentResult {
-        session_id: uuid::Uuid::now_v7(),
-        name: "albedo".into(),
-        output: "delegated result".into(),
-        usage: Usage {
-          input_tokens: 4,
-          output_tokens: 2,
-        },
+  let tool = subagent_tool(
+    SubagentRegistry::new(Arc::new(move |request: SubagentRequest| {
+      *captured.lock().unwrap() = Some((request.parent_id, request.prompt));
+      let name = request.name;
+      Box::pin(async move {
+        Ok(SubagentResult {
+          session_id: uuid::Uuid::now_v7(),
+          name,
+          output: "delegated result".into(),
+          usage: Usage {
+            input_tokens: 4,
+            output_tokens: 2,
+          },
+        })
       })
-    })
-  }));
+    })),
+    false,
+  );
   let context = ToolContext {
     workspace: tempfile::tempdir().unwrap().path().into(),
     session_id: parent,
@@ -57,10 +61,65 @@ async fn subagent_tools_receive_the_parent_and_return_child_metadata() {
   )
   .unwrap();
   assert_eq!(output["output"], "delegated result");
-  assert_eq!(output["name"], "albedo");
+  assert_eq!(output["name"], "shalltear");
   assert_eq!(
     *observed.lock().unwrap(),
     Some((parent, "inspect this".into()))
+  );
+}
+
+#[tokio::test]
+async fn background_delegations_are_collected_by_name() {
+  let registry = SubagentRegistry::new(Arc::new(|request: SubagentRequest| {
+    let name = request.name;
+    Box::pin(async move {
+      Ok(SubagentResult {
+        session_id: uuid::Uuid::now_v7(),
+        name,
+        output: "worked".into(),
+        usage: Usage::default(),
+      })
+    })
+  }));
+  let tool = subagent_tool(registry, true);
+  let context = ToolContext {
+    workspace: tempfile::tempdir().unwrap().path().into(),
+    session_id: uuid::Uuid::now_v7(),
+    max_output_bytes: 4096,
+  };
+
+  let started = tool
+    .execute(
+      &context,
+      json!({"action": "delegate", "prompt": "look at the logs", "background": true}),
+    )
+    .await
+    .unwrap();
+  assert!(started.starts_with("shalltear"), "{started}");
+
+  let collected: Value = serde_json::from_str(
+    &tool
+      .execute(&context, json!({"action": "collect", "name": "shalltear"}))
+      .await
+      .unwrap(),
+  )
+  .unwrap();
+  assert_eq!(collected["output"], "worked");
+  assert_eq!(collected["name"], "shalltear");
+
+  // a name is only collectable once, and the roster empties with it
+  assert!(
+    tool
+      .execute(&context, json!({"action": "collect", "name": "shalltear"}))
+      .await
+      .is_err()
+  );
+  assert_eq!(
+    tool
+      .execute(&context, json!({"action": "list"}))
+      .await
+      .unwrap(),
+    "no background subagents"
   );
 }
 

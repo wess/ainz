@@ -220,7 +220,7 @@ async fn empty_config_starts_the_interactive_setup() {
     .stdin
     .take()
     .unwrap()
-    .write_all(b"4\ndemo\nhttp://127.0.0.1:9999/v1\n\ntiny\n/exit\n")
+    .write_all(b"5\ndemo\nhttp://127.0.0.1:9999/v1\n\ntiny\n/exit\n")
     .await
     .unwrap();
   let output = child.wait_with_output().await.unwrap();
@@ -313,4 +313,82 @@ async fn the_ainz_rename_carries_forward_existing_user_configuration() {
   assert!(String::from_utf8_lossy(&output.stdout).contains("/opt/synapse"));
   assert!(root.join("ainz/config.toml").exists());
   assert!(root.join("ainz/mcp.toml").exists());
+}
+
+#[tokio::test]
+async fn stored_memory_reaches_the_system_prompt() {
+  let home = tempfile::tempdir().unwrap();
+  let workspace = tempfile::tempdir().unwrap();
+  let config = config_root(home.path()).join("ainz/config.toml");
+  tokio::fs::create_dir_all(config.parent().unwrap())
+    .await
+    .unwrap();
+
+  let stored = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("HOME", home.path())
+    .env("AINZ_CONFIG", &config)
+    .args([
+      "--workspace",
+      workspace.path().to_str().unwrap(),
+      "memory",
+      "add",
+      "the staging database is named orbit",
+    ])
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    stored.status.success(),
+    "{}",
+    String::from_utf8_lossy(&stored.stderr)
+  );
+
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = vec![0; 64 * 1024];
+    let read = socket.read(&mut request).await.unwrap();
+    let body = r#"{"choices":[{"message":{"content":"ok","tool_calls":[]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+    let response = format!(
+      "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+      body.len(),
+      body,
+    );
+    socket.write_all(response.as_bytes()).await.unwrap();
+    String::from_utf8_lossy(&request[..read]).into_owned()
+  });
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("HOME", home.path())
+    .env("AINZ_CONFIG", &config)
+    .args([
+      "--workspace",
+      workspace.path().to_str().unwrap(),
+      "--model",
+      "test",
+      "--endpoint",
+      &format!("http://{address}"),
+      "ask",
+      "--json",
+      "--no-save",
+      "what is the staging database called",
+    ])
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let request = server.await.unwrap();
+  assert!(
+    request.contains("the staging database is named orbit"),
+    "recalled memory is missing from the request: {request}"
+  );
+  // and the tools that memory brings with it are offered to the model
+  assert!(request.contains("\"name\":\"memory\""), "{request}");
+  assert!(request.contains("\"name\":\"sessions\""), "{request}");
 }

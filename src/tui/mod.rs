@@ -27,8 +27,10 @@ use crate::command::{ProviderPreset, preset_profile};
 
 mod chat;
 mod masthead;
+mod settings;
 
-pub(crate) use chat::run_chat;
+pub(crate) use chat::{ChatNext, run_chat};
+pub(crate) use settings::settings;
 
 pub(super) type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -54,6 +56,7 @@ impl Choice {
   fn name(&self) -> &str {
     match self {
       Self::Preset(ProviderPreset::Ollama) => "Ollama",
+      Self::Preset(ProviderPreset::LiteLlm) => "LiteLLM",
       Self::Preset(ProviderPreset::Codex) => "Codex CLI",
       Self::Preset(ProviderPreset::ClaudeCode) => "Claude Code",
       Self::Existing(name) => name,
@@ -67,6 +70,14 @@ impl Choice {
       Self::Preset(ProviderPreset::Ollama) => (
         "Local models",
         "Connects to the local server and discovers installed models automatically.",
+      ),
+      Self::Preset(ProviderPreset::LiteLlm) => (
+        "Proxy for every other model",
+        concat!(
+          "Points at a LiteLLM proxy and lists the models it serves. ",
+          "The key stays in an environment variable, so one endpoint covers every provider ",
+          "behind it."
+        ),
       ),
       Self::Preset(ProviderPreset::Codex) => (
         "Headless coding agent",
@@ -97,6 +108,7 @@ impl Choice {
   fn key(&self) -> Option<&str> {
     match self {
       Self::Preset(ProviderPreset::Ollama) => Some("ollama"),
+      Self::Preset(ProviderPreset::LiteLlm) => Some("litellm"),
       Self::Preset(ProviderPreset::Codex) => Some("codex"),
       Self::Preset(ProviderPreset::ClaudeCode) => Some("claude"),
       Self::Existing(name) => Some(name),
@@ -126,6 +138,107 @@ pub async fn configure(config: &mut Config) -> Result<()> {
     }
     None if config.validate().is_ok() => Ok(()),
     None => anyhow::bail!("setup cancelled before a provider was configured"),
+  }
+}
+
+/// Offered once, after first-run setup, when a Synapse install is found. It is never turned on
+/// without an answer: memory that reaches other tools is the user's call, not a default.
+pub(crate) async fn offer_synapse(config: &mut Config) -> Result<bool> {
+  let mut terminal = enter_terminal()?;
+  let result = choose_synapse(&mut terminal);
+  leave_terminal(&mut terminal)?;
+  let accepted = result?;
+  if accepted {
+    config.synapse.enabled = true;
+    config.memory.backend = ainz::MemoryBackend::Synapse;
+    config.save().await?;
+  }
+  Ok(accepted)
+}
+
+fn choose_synapse(terminal: &mut Term) -> Result<bool> {
+  let choices = [
+    "Use Synapse for memory and guidance",
+    "Keep memory local to this machine",
+  ];
+  let mut selected = 0;
+  loop {
+    terminal.draw(|frame| {
+      let [header, body, footer] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(8),
+        Constraint::Length(1),
+      ])
+      .areas(frame.area());
+      render_header(frame, header, "Synapse found", ainz::synapse::SITE);
+      let [list, detail] =
+        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
+          .spacing(2)
+          .areas(body);
+      let mut state = ListState::default().with_selected(Some(selected));
+      frame.render_stateful_widget(
+        List::new(choices.map(ListItem::new))
+          .block(
+            Block::default()
+              .title(" Memory ")
+              .borders(Borders::ALL)
+              .border_style(Style::default().fg(MUTED))
+              .padding(ratatui::widgets::Padding::horizontal(1)),
+          )
+          .highlight_style(
+            Style::default()
+              .fg(Color::Black)
+              .bg(ACCENT)
+              .add_modifier(Modifier::BOLD),
+          ),
+        list,
+        &mut state,
+      );
+      frame.render_widget(
+        Paragraph::new(vec![
+          Line::styled(
+            ainz::synapse::SUMMARY,
+            Style::default().fg(INK).add_modifier(Modifier::BOLD),
+          ),
+          Line::raw(""),
+          Line::styled(
+            "Ainz can keep what it works out in Synapse, so a later session here — or Claude \
+             Code, or Codex — starts already knowing it. It also loads your SOUL.md guidance \
+             and can put subagents on the Synapse mesh.",
+            Style::default().fg(MUTED),
+          ),
+          Line::raw(""),
+          Line::styled(
+            "Either way this is a setting, not a commitment: /settings changes it whenever \
+             you like, and Ainz runs the same without Synapse.",
+            Style::default().fg(MUTED),
+          ),
+        ])
+        .wrap(Wrap { trim: false })
+        .block(
+          Block::default()
+            .title(" What this does ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(MUTED))
+            .padding(ratatui::widgets::Padding::new(2, 2, 1, 1)),
+        ),
+        detail,
+      );
+      render_footer(frame, footer, "↑↓ choose   enter confirm   esc keep local");
+    })?;
+    let InputEvent::Key(key) = event::read()? else {
+      continue;
+    };
+    if key.kind == KeyEventKind::Release {
+      continue;
+    }
+    match key.code {
+      KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+      KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(choices.len() - 1),
+      KeyCode::Enter => return Ok(selected == 0),
+      KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
+      _ => {}
+    }
   }
 }
 
@@ -188,6 +301,7 @@ async fn configure_inner(
 ) -> Result<Option<(String, ProviderConfig, String)>> {
   let mut choices = vec![
     Choice::Preset(ProviderPreset::Ollama),
+    Choice::Preset(ProviderPreset::LiteLlm),
     Choice::Preset(ProviderPreset::Codex),
     Choice::Preset(ProviderPreset::ClaudeCode),
   ];
@@ -213,6 +327,29 @@ async fn configure_inner(
         profile.models = models;
       }
       ("ollama".into(), profile, None)
+    }
+    Choice::Preset(ProviderPreset::LiteLlm) => {
+      let Some(values) = edit_fields(
+        terminal,
+        "LiteLLM proxy",
+        vec![
+          Field::new("Name", "litellm"),
+          Field::new("Endpoint", "http://127.0.0.1:4000/v1"),
+          Field::new("API key environment variable", "LITELLM_API_KEY"),
+        ],
+      )?
+      else {
+        return Ok(None);
+      };
+      let mut profile = ProviderConfig::http(&values[1], &values[2]);
+      terminal.draw(|frame| render_loading(frame, "Asking the proxy which models it serves…"))?;
+      let key = std::env::var(&values[2]).ok().filter(|key| !key.is_empty());
+      if let Ok(provider) = HttpProvider::new(values[1].clone(), String::new(), key)
+        && let Ok(models) = provider.models().await
+      {
+        profile.models = models;
+      }
+      (values[0].clone(), profile, None)
     }
     Choice::Preset(ProviderPreset::Codex) => {
       ("codex".into(), preset_profile(ProviderPreset::Codex), None)

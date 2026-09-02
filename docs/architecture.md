@@ -26,3 +26,15 @@ trusted tier.
 External tool servers use one lazy dispatcher so large catalogs do not occupy the model
 context. Stdio and Streamable HTTP clients share initialization, pagination, result, and
 error behavior behind the hub.
+
+Durability is a backend rather than a feature. `MemoryStore` and `Teacher` each have a local
+implementation and a Synapse one behind the same interface, so a session's tools, prompts, and
+behavior do not change with the choice; only where the writing lands does. The integration is
+composed from parts that already exist — Synapse is an optional entry in the same server hub,
+reached through the same client — so nothing in the core knows about it. Recall is assembled
+into the system prompt at agent construction and marked as context, never as instruction.
+
+Subagents are named and tracked by a registry that the delegation tool owns, which is what lets
+one run in the background and be collected by name later. With the mesh on, each child registers
+its own client rather than sharing its parent's, so identity on the mesh is per agent and a
+failure to register costs that child its seat and nothing else.

@@ -5,8 +5,9 @@ use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
 use ainz::{
-  Config, HttpProvider, McpProfile, McpServerConfig, McpTransport, PluginCatalog, ProcessOutput,
-  PromptCatalog, ProviderConfig, ProviderKind, Session, SessionStore, SkillCatalog,
+  Config, HttpProvider, LocalSkills, McpProfile, McpServerConfig, McpTransport, MemoryBackend,
+  PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind, Session, SessionStore,
+  SkillCatalog, synapse,
 };
 
 #[derive(Subcommand)]
@@ -40,6 +41,7 @@ pub enum PluginCommand {
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ProviderPreset {
   Ollama,
+  LiteLlm,
   Codex,
   ClaudeCode,
 }
@@ -47,6 +49,8 @@ pub enum ProviderPreset {
 pub(crate) fn preset_profile(preset: ProviderPreset) -> ProviderConfig {
   match preset {
     ProviderPreset::Ollama => ProviderConfig::http("http://127.0.0.1:11434/v1", ""),
+    // a LiteLLM proxy speaks the same chat-completions API for every model behind it
+    ProviderPreset::LiteLlm => ProviderConfig::http("http://127.0.0.1:4000/v1", "LITELLM_API_KEY"),
     ProviderPreset::Codex => ProviderConfig::process(
       "codex",
       strings(&[
@@ -79,6 +83,66 @@ pub(crate) fn preset_profile(preset: ProviderPreset) -> ProviderConfig {
       ProcessOutput::JsonResult,
     ),
   }
+}
+
+#[derive(Subcommand)]
+pub enum SkillCommand {
+  List {
+    #[arg(long)]
+    json: bool,
+  },
+  Proposed {
+    #[arg(long)]
+    json: bool,
+  },
+  Approve {
+    name: String,
+  },
+  Reject {
+    name: String,
+  },
+}
+
+#[derive(Subcommand)]
+pub enum MemoryCommand {
+  List {
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+  },
+  Search {
+    query: String,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+  },
+  Add {
+    #[arg(required = true, trailing_var_arg = true)]
+    content: Vec<String>,
+    #[arg(long)]
+    global: bool,
+    #[arg(long)]
+    source: Option<String>,
+  },
+  Forget {
+    id: String,
+  },
+  Backend {
+    value: String,
+  },
+  Teach {
+    state: String,
+  },
+}
+
+#[derive(Subcommand)]
+pub enum SynapseCommand {
+  Status,
+  Enable,
+  Disable,
+  Mesh { state: String },
 }
 
 #[derive(Subcommand)]
@@ -176,6 +240,191 @@ pub async fn list_sessions(workspace: &Path, json: bool) -> Result<()> {
     }
   }
   Ok(())
+}
+
+pub async fn search_sessions(workspace: &Path, query: &str, json: bool) -> Result<()> {
+  let matches = SessionStore::default_store()?
+    .search(query, Some(workspace), 20)
+    .await?;
+  if json {
+    println!("{}", serde_json::to_string_pretty(&matches)?);
+  } else if matches.is_empty() {
+    println!("no earlier session mentioned that");
+  } else {
+    for found in matches {
+      println!("{}  {} nodes matched", found.id, found.score);
+      for excerpt in found.excerpts {
+        println!("    {excerpt}");
+      }
+    }
+  }
+  Ok(())
+}
+
+pub async fn skills(
+  workspace: &Path,
+  config: &Config,
+  command: Option<SkillCommand>,
+  json: bool,
+) -> Result<()> {
+  match command {
+    None | Some(SkillCommand::List { json: false }) if !json => list_skills(workspace, json).await,
+    None | Some(SkillCommand::List { .. }) => list_skills(workspace, true).await,
+    Some(SkillCommand::Proposed { json }) => {
+      if config.memory.backend == MemoryBackend::Synapse {
+        println!("proposed skills live in Synapse: synapse skill proposed");
+        return Ok(());
+      }
+      let proposed = LocalSkills::new()?.proposed().await?;
+      if json {
+        let rows: Vec<_> = proposed
+          .iter()
+          .map(|skill| {
+            serde_json::json!({
+              "name": skill.name, "description": skill.description, "path": skill.path,
+            })
+          })
+          .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+      } else if proposed.is_empty() {
+        println!("no proposed skills");
+      } else {
+        for skill in proposed {
+          println!("{}  {}", skill.name, skill.description);
+        }
+      }
+      Ok(())
+    }
+    Some(SkillCommand::Approve { name }) => {
+      if config.memory.backend == MemoryBackend::Synapse {
+        println!("approve it in Synapse: synapse skill approve {name}");
+        return Ok(());
+      }
+      let path = LocalSkills::new()?.approve(&name).await?;
+      println!("approved {name} at {}", path.display());
+      Ok(())
+    }
+    Some(SkillCommand::Reject { name }) => {
+      if config.memory.backend == MemoryBackend::Synapse {
+        println!("reject it in Synapse: synapse skill reject {name}");
+        return Ok(());
+      }
+      LocalSkills::new()?.reject(&name).await?;
+      println!("rejected {name}");
+      Ok(())
+    }
+  }
+}
+
+pub async fn memory(workspace: &Path, config: &mut Config, command: MemoryCommand) -> Result<()> {
+  match command {
+    MemoryCommand::Backend { value } => {
+      config.memory.backend = MemoryBackend::parse(&value)?;
+      if config.memory.backend == MemoryBackend::Synapse {
+        config.synapse.enabled = true;
+      }
+      config.save().await?;
+      println!("memory backend {}", config.memory.backend.label());
+      return Ok(());
+    }
+    MemoryCommand::Teach { state } => {
+      config.memory.teach = switch(&state)?;
+      config.save().await?;
+      println!("self-improvement {}", state.trim());
+      return Ok(());
+    }
+    _ => {}
+  }
+  let store = crate::app::memory_store(workspace, config).await?;
+  if store.is_off() {
+    println!("memory is off; turn it on with `ainz memory backend local`");
+    return Ok(());
+  }
+  match command {
+    MemoryCommand::List { limit, json } | MemoryCommand::Search { limit, json, .. } => {
+      let query = match &command {
+        MemoryCommand::Search { query, .. } => query.clone(),
+        _ => String::new(),
+      };
+      let records = store.recall(&query, limit).await?;
+      if json {
+        println!("{}", serde_json::to_string_pretty(&records)?);
+      } else if records.is_empty() {
+        println!("no memories matched");
+      } else {
+        for record in records {
+          println!("{}  {}", record.id, record.summary(96));
+        }
+      }
+    }
+    MemoryCommand::Add {
+      content,
+      global,
+      source,
+    } => {
+      let scope = if global { "global" } else { "project" };
+      let message = store
+        .remember(&content.join(" "), source.as_deref(), scope, &[])
+        .await?;
+      println!("{message}");
+    }
+    MemoryCommand::Forget { id } => println!("{}", store.forget(&id).await?),
+    MemoryCommand::Backend { .. } | MemoryCommand::Teach { .. } => {}
+  }
+  Ok(())
+}
+
+pub async fn synapse(config: &mut Config, command: Option<SynapseCommand>) -> Result<()> {
+  match command {
+    Some(SynapseCommand::Enable) => {
+      config.synapse.enabled = true;
+      config.save().await?;
+    }
+    Some(SynapseCommand::Disable) => {
+      config.synapse.enabled = false;
+      config.synapse.mesh = false;
+      if config.memory.backend == MemoryBackend::Synapse {
+        config.memory.backend = MemoryBackend::Local;
+      }
+      config.save().await?;
+    }
+    Some(SynapseCommand::Mesh { state }) => {
+      config.synapse.mesh = switch(&state)?;
+      if config.synapse.mesh {
+        config.synapse.enabled = true;
+      }
+      config.save().await?;
+    }
+    Some(SynapseCommand::Status) | None => {}
+  }
+  println!(
+    "synapse   {}",
+    if config.synapse.enabled { "on" } else { "off" }
+  );
+  println!(
+    "binary    {}",
+    synapse::binary(&config.synapse)
+      .map(|path| path.display().to_string())
+      .unwrap_or_else(|| format!("not installed — {}", synapse::SITE))
+  );
+  println!(
+    "mesh      {}",
+    if config.synapse.mesh { "on" } else { "off" }
+  );
+  println!("memory    {}", config.memory.backend.label());
+  println!(
+    "learn     {}",
+    if config.memory.teach { "on" } else { "off" }
+  );
+  Ok(())
+}
+
+fn switch(state: &str) -> Result<bool> {
+  match state.trim() {
+    "on" | "true" | "yes" => Ok(true),
+    "off" | "false" | "no" => Ok(false),
+    other => anyhow::bail!("expected on or off, got {other}"),
+  }
 }
 
 pub async fn list_skills(workspace: &Path, json: bool) -> Result<()> {
@@ -664,5 +913,28 @@ pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {
   println!("skills     {} discovered", skills.skills.len());
   let prompts = PromptCatalog::discover(workspace).await?;
   println!("prompts    {} discovered", prompts.prompts.len());
+  println!(
+    "memory     {}{}",
+    config.memory.backend.label(),
+    if config.memory.teach {
+      " · self-improvement on"
+    } else {
+      ""
+    }
+  );
+  let binary = synapse::binary(&config.synapse);
+  println!(
+    "synapse    {}{}",
+    if config.synapse.enabled {
+      "enabled"
+    } else {
+      "disabled"
+    },
+    match (&binary, config.synapse.mesh) {
+      (Some(path), true) => format!(" · mesh on · {}", path.display()),
+      (Some(path), false) => format!(" · {}", path.display()),
+      (None, _) => format!(" · not installed — {}", synapse::SITE),
+    }
+  );
   Ok(())
 }

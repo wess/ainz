@@ -5,6 +5,9 @@ configuration is read only from the user profile, so a cloned repository cannot 
 server on its own. Two explicit paths add more: a launcher may pass `--mcp-config`, and an
 approved portable plugin may ship an `mcp.json` (see [plugins](plugins.md)).
 
+Synapse is the exception to the profile rule: turning the integration on registers its server for
+the session without writing anything, and turning it off removes it. See [Synapse](synapse.md).
+
 ## Profile
 
 Register a stdio server through the CLI:

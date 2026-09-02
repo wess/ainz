@@ -14,6 +14,7 @@ leaving the app.
 ```sh
 ainz providers list
 ainz providers add NAME --preset ollama
+ainz providers add NAME --preset lite-llm
 ainz providers add NAME --preset codex --known-model MODEL
 ainz providers add NAME --preset claude-code --known-model MODEL
 ainz providers use NAME MODEL
@@ -28,6 +29,22 @@ ainz models remove NAME MODEL
 `models list --refresh` uses the HTTP provider's `/models` endpoint and replaces its stored
 model list. Process providers have no common discovery protocol, so their models are managed
 explicitly.
+
+## LiteLLM
+
+A [LiteLLM](https://docs.litellm.ai/) proxy puts every provider it fronts behind one
+chat-completions endpoint, so one Ainz profile covers all of them. The preset points at
+`http://127.0.0.1:4000/v1` and reads the key from `LITELLM_API_KEY`; setup asks for the endpoint
+and the variable name, then lists the models the proxy serves.
+
+```sh
+ainz providers add litellm --preset lite-llm --api-key-env LITELLM_API_KEY
+ainz models list litellm --refresh
+ainz providers use litellm gpt-5.6-sol
+```
+
+Model names are whatever the proxy exposes, so its `model_list` is the source of truth. Ainz
+stores only the variable name; the key stays in the environment.
 
 ## Custom HTTP providers
 

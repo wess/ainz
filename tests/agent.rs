@@ -19,6 +19,7 @@ fn options() -> RunOptions {
     context_tokens: 16_000,
     compact_at_tokens: 12_000,
     preserve_messages: 4,
+    memory_nudge: None,
   }
 }
 
@@ -233,6 +234,7 @@ async fn agent_compacts_before_the_context_limit() {
         context_tokens: 2_000,
         compact_at_tokens: 200,
         preserve_messages: 2,
+        memory_nudge: Some("write down anything durable".into()),
       },
     )
     .await
@@ -240,6 +242,14 @@ async fn agent_compacts_before_the_context_limit() {
 
   assert_eq!(output, "continued");
   assert_eq!(session.summaries.len(), 1);
+  // compaction is the moment the session is asked to save what it worked out
+  assert!(
+    session
+      .messages()
+      .unwrap()
+      .iter()
+      .any(|message| message.content.as_deref() == Some("write down anything durable"))
+  );
   let event = receiver.try_recv().unwrap();
   assert!(matches!(event, ainz::Event::Compaction { .. }));
 }

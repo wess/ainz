@@ -8,7 +8,9 @@ mod frontmatter;
 pub mod header;
 pub mod instruction;
 pub mod job;
+pub mod learn;
 pub mod mcp;
+pub mod memory;
 pub mod plugin;
 mod process;
 pub mod prompt;
@@ -18,19 +20,28 @@ pub mod session;
 pub mod skill;
 mod sse;
 pub mod subagent;
+pub mod synapse;
 pub mod tool;
 mod workspace;
 
 pub use agent::{Agent, Approver, RunOptions, deny_all};
-pub use config::{Config, PermissionMode, ProcessOutput, ProviderConfig, ProviderKind};
+pub use config::{
+  Config, MemoryBackend, MemoryConfig, PermissionMode, ProcessOutput, ProviderConfig, ProviderKind,
+  SynapseConfig,
+};
 pub use control::{RunController, RunInbox, run_control};
 pub use event::{Event, EventSink};
 pub use header::{HeaderArt, HeaderCatalog};
 pub use job::JobStore;
+pub use learn::{LocalSkills, Teacher};
 pub use mcp::{McpHub, McpProfile, McpServerConfig, McpTransport};
+pub use memory::{LocalMemory, MemoryRecord, MemoryStore};
 pub use plugin::{PluginCatalog, PluginFormat, PluginManifest};
 pub use prompt::PromptCatalog;
 pub use provider::{ChatProvider, HttpProvider, ProcessProvider, RuntimeProvider};
-pub use session::{Session, SessionInfo, SessionStore};
+pub use session::{Session, SessionInfo, SessionMatch, SessionStore};
 pub use skill::SkillCatalog;
-pub use subagent::{SubagentHandler, SubagentResult, subagent_tool};
+pub use subagent::{
+  SubagentHandler, SubagentRegistry, SubagentRequest, SubagentResult, subagent_tool,
+};
+pub use synapse::Synapse;

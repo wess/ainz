@@ -4,11 +4,13 @@ Ainz is a small agent harness built in Rust on Tokio. The model loop, tools, ses
 history, and extensions are library primitives; the terminal interface is one consumer of
 them, alongside one-shot, JSON event stream, and JSON-RPC modes.
 
-It talks to OpenAI-compatible chat-completions endpoints with streaming and tool calls, and
-to headless coding CLIs as process providers. Sessions are resumable trees with automatic,
-branch-aware compaction. Tools cover workspace read, list, search, write, edit, and shell,
-durable background jobs, lazily loaded skills, prompt templates, subagents, MCP servers over
-stdio and Streamable HTTP, and content-pinned WebAssembly component or process plugins.
+It talks to OpenAI-compatible chat-completions endpoints with streaming and tool calls,
+including a LiteLLM proxy, and to headless coding CLIs as process providers. Sessions are
+resumable trees with automatic, branch-aware compaction. Tools cover workspace read, list,
+search, write, edit, and shell, durable background jobs, lazily loaded skills, prompt templates,
+subagents, MCP servers over stdio and Streamable HTTP, and content-pinned WebAssembly component
+or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
+search over earlier sessions, and skills a session writes for the next one.
 
 ## Install
 
@@ -54,13 +56,17 @@ ainz providers add ollama --preset ollama
 ainz models list ollama --refresh
 ainz providers use ollama qwen3:8b
 
+ainz providers add litellm --preset lite-llm --api-key-env LITELLM_API_KEY
+ainz models list litellm --refresh
+
 ainz providers add codex --preset codex --known-model gpt-5.6-sol
 ainz providers add claude --preset claude-code --known-model sonnet
 ```
 
 The config file lives in the platform config directory: `~/Library/Application Support/ainz/config.toml`
 on macOS, `~/.config/ainz/config.toml` on Linux. `AINZ_CONFIG` overrides the path, and
-`AINZ_MODEL`, `AINZ_ENDPOINT`, `AINZ_PROVIDER`, and `AINZ_API_KEY` override values.
+`AINZ_MODEL`, `AINZ_ENDPOINT`, `AINZ_PROVIDER`, `AINZ_API_KEY`, `AINZ_MEMORY`, and
+`AINZ_SYNAPSE` override values.
 
 ```toml
 provider = "ollama"
@@ -75,7 +81,21 @@ permissions = "ask"
 [providers.ollama]
 kind = "http"
 endpoint = "http://127.0.0.1:11434/v1"
+
+[memory]
+backend = "local"
+recall_on_start = true
+recall_limit = 5
+remember_on_compact = true
+teach = false
+
+[synapse]
+enabled = false
+mesh = false
 ```
+
+`/settings` opens the same list in a session: provider and model, permissions, memory, Synapse,
+the agent mesh, the roster, and header art, each with a line saying what it does.
 
 Without a `provider`, the legacy top-level `endpoint` and `api_key_env` keys describe one HTTP
 provider. HTTP profiles use Ainz's own model and tool loop. Process profiles run a coding CLI's
@@ -93,11 +113,16 @@ ainz ask --json "summarize this workspace"   # machine-readable event stream
 ainz rpc                                # persistent JSON-RPC process
 
 ainz sessions
+ainz sessions --search "certificate error"
 ainz resume
 ainz resume SESSION_ID --at NODE_ID "continue from this branch"
 ainz skills
+ainz skills proposed
 ainz prompts
 ainz usage
+ainz memory list
+ainz memory add the staging database is named orbit
+ainz synapse
 ainz mcp
 ainz plugins list
 ainz doctor
@@ -112,7 +137,9 @@ command palette and fuzzy-search commands and prompt templates. `Ctrl+L` toggles
 and remembers the choice, `Ctrl+1` selects the primary transcript, `Ctrl+2` through `Ctrl+9`
 select subagents, and `Ctrl+=` / `Ctrl+-` cycle through them; those chords need a terminal
 that speaks the kitty keyboard protocol, and `/agent N` works everywhere. `Ctrl+C` cancels an
-active run, and a second `Ctrl+C` abandons a run whose provider ignores the cancel. Text
+active run, and a second `Ctrl+C` abandons a run whose provider ignores the cancel. `/settings`
+opens the settings screen, `/memory` and `/remember` reach memory, and `/synapse` shows the
+integration state. Text
 entered during a run is queued as steering for the next safe turn boundary. Redirected input
 keeps a plain line interface.
 
@@ -120,6 +147,43 @@ An empty transcript shows one of ten built-in mastheads. Paint your own in the
 [masthead studio](https://wess.io/ainz/masthead/), or bring UTF-8 ASCII or ANSI-SGR art, and
 drop it in the config directory's `headers/` folder or a project's `.ainz/headers/`.
 `/headers` lists them and `/header NAME` selects one; see [`docs/headers.md`](docs/headers.md).
+
+## Memory
+
+A session that forgets everything at the end re-derives the same things next week. Ainz keeps
+durable memories, searches earlier sessions, and can let a session write down a procedure it
+worked out.
+
+Memory is on by default and local: Markdown files under the data directory, private to this
+machine, one file per memory, scoped to the workspace or global. The newest are recalled into
+the system prompt when a session opens, a `memory` tool recalls and stores more, and when the
+transcript is compacted the session is asked to write down anything durable it has not stored —
+the one moment where not having written something down costs you immediately.
+
+A `sessions` tool searches earlier transcripts by term and returns ids and excerpts, so "we hit
+this last week" is recoverable without having remembered it in advance.
+
+With `memory.teach` on, a `learn` tool lets a session propose a skill from something it figured
+out, and correct one that turned out wrong. A proposal waits in `skills/proposed/`, which
+discovery does not read, until `ainz skills approve NAME`. See [`docs/memory.md`](docs/memory.md).
+
+## Synapse
+
+[Synapse](https://wess.io/synapse/) keeps memory, one skill library, and an agent mesh on your
+machine, shared with the other tools you use. Ainz can use all three, and runs the same without
+it — the setting has to be on and the binary has to be installed.
+
+```sh
+ainz synapse enable
+ainz memory backend synapse
+ainz synapse mesh on
+```
+
+Turning it on registers `synapse mcp` for the session, appends Synapse's guidance and your
+`SOUL.md` to the system prompt, and points memory and taught skills at Synapse instead of local
+files, so a decision recorded here reaches a later session in Claude Code or Codex. With the mesh
+on, the session and every subagent register under their own names and can message each other,
+and you have a seat of your own to answer from. See [`docs/synapse.md`](docs/synapse.md).
 
 ## Instructions, skills, and prompts
 

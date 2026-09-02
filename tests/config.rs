@@ -1,4 +1,4 @@
-use ainz::{Config, ProcessOutput, ProviderConfig};
+use ainz::{Config, MemoryBackend, ProcessOutput, ProviderConfig};
 
 #[tokio::test]
 async fn provider_profiles_round_trip() {
@@ -64,4 +64,41 @@ async fn providers_without_credentials_stay_credential_free() {
   let loaded = Config::load_from(&path).await.unwrap();
 
   assert!(loaded.providers["local"].api_key_env.is_empty());
+}
+
+#[tokio::test]
+async fn memory_and_synapse_settings_round_trip() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  let mut config = Config::default();
+  config.memory.backend = MemoryBackend::Synapse;
+  config.memory.teach = true;
+  config.memory.recall_limit = 3;
+  config.synapse.mesh = true;
+  config.save_to(&path).await.unwrap();
+
+  let loaded = Config::load_from(&path).await.unwrap();
+
+  assert_eq!(loaded.memory.backend, MemoryBackend::Synapse);
+  assert!(loaded.memory.teach);
+  assert_eq!(loaded.memory.recall_limit, 3);
+  // the backend implies the integration, so the mesh setting is live without a second switch
+  assert!(loaded.synapse_active());
+  assert!(loaded.mesh_active());
+}
+
+#[tokio::test]
+async fn memory_defaults_to_local_and_synapse_stays_off() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(&path, "model = \"tiny\"\n").await.unwrap();
+
+  let loaded = Config::load_from(&path).await.unwrap();
+
+  assert_eq!(loaded.memory.backend, MemoryBackend::Local);
+  assert!(loaded.memory.recall_on_start);
+  assert!(loaded.memory.remember_on_compact);
+  assert!(!loaded.memory.teach);
+  assert!(!loaded.synapse_active());
+  assert!(!loaded.mesh_active());
 }

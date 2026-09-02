@@ -49,6 +49,11 @@ impl ToolSet {
     Ok(())
   }
 
+  // for a tool that is being rebound rather than added, such as a child's own server hub
+  pub fn replace(&mut self, tool: Arc<dyn Tool>) {
+    self.tools.insert(tool.spec().name, tool);
+  }
+
   pub fn extend(&mut self, tools: impl IntoIterator<Item = Arc<dyn Tool>>) -> Result<()> {
     for tool in tools {
       self.insert(tool)?;

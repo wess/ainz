@@ -30,6 +30,8 @@ pub struct RunOptions {
   pub context_tokens: usize,
   pub compact_at_tokens: usize,
   pub preserve_messages: usize,
+  // asked of the model once a compaction has archived messages, when memory is on
+  pub memory_nudge: Option<String>,
 }
 
 pub struct Agent<P> {
@@ -276,6 +278,10 @@ impl<P: ChatProvider> Agent<P> {
       bail!("context compaction returned an empty summary");
     }
     session.record_summary(cursor, summary.clone())?;
+    // the one moment where not having written something down costs immediately
+    if let Some(nudge) = options.memory_nudge.as_deref() {
+      session.append(Message::text(Role::System, nudge));
+    }
     self.events.emit(Event::Compaction {
       archived_messages,
       summary,

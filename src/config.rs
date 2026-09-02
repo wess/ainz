@@ -31,6 +31,66 @@ pub enum ProcessOutput {
   JsonResult,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryBackend {
+  Off,
+  #[default]
+  Local,
+  Synapse,
+}
+
+impl MemoryBackend {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Off => "off",
+      Self::Local => "local",
+      Self::Synapse => "synapse",
+    }
+  }
+
+  pub fn parse(value: &str) -> Result<Self> {
+    match value.trim() {
+      "off" | "none" => Ok(Self::Off),
+      "local" => Ok(Self::Local),
+      "synapse" => Ok(Self::Synapse),
+      other => bail!("unknown memory backend {other}; use off, local, or synapse"),
+    }
+  }
+}
+
+// Synapse is optional: nothing here starts unless the user turns it on and the binary exists
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SynapseConfig {
+  pub enabled: bool,
+  pub mesh: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub command: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MemoryConfig {
+  pub backend: MemoryBackend,
+  pub recall_on_start: bool,
+  pub recall_limit: usize,
+  pub remember_on_compact: bool,
+  pub teach: bool,
+}
+
+impl Default for MemoryConfig {
+  fn default() -> Self {
+    Self {
+      backend: MemoryBackend::Local,
+      recall_on_start: true,
+      recall_limit: 5,
+      remember_on_compact: true,
+      teach: false,
+    }
+  }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct UiConfig {
@@ -125,6 +185,8 @@ pub struct Config {
   pub preserve_messages: usize,
   pub permissions: PermissionMode,
   pub ui: UiConfig,
+  pub memory: MemoryConfig,
+  pub synapse: SynapseConfig,
   #[serde(skip)]
   pub mcp_config: Option<PathBuf>,
 }
@@ -144,6 +206,8 @@ impl Default for Config {
       preserve_messages: 8,
       permissions: PermissionMode::Ask,
       ui: UiConfig::default(),
+      memory: MemoryConfig::default(),
+      synapse: SynapseConfig::default(),
       mcp_config: None,
     }
   }
@@ -191,6 +255,12 @@ impl Config {
     if let Ok(provider) = env::var("AINZ_PROVIDER") {
       config.provider = Some(provider);
     }
+    if let Ok(backend) = env::var("AINZ_MEMORY") {
+      config.memory.backend = MemoryBackend::parse(&backend)?;
+    }
+    if let Ok(value) = env::var("AINZ_SYNAPSE") {
+      config.synapse.enabled = matches!(value.trim(), "1" | "on" | "true" | "yes");
+    }
 
     Ok(config)
   }
@@ -236,6 +306,15 @@ impl Config {
     }
   }
 
+  // the memory backend implies the integration, so `backend = "synapse"` cannot be a dead setting
+  pub fn synapse_active(&self) -> bool {
+    self.synapse.enabled || self.memory.backend == MemoryBackend::Synapse
+  }
+
+  pub fn mesh_active(&self) -> bool {
+    self.synapse.mesh && self.synapse_active()
+  }
+
   pub fn validate(&self) -> Result<()> {
     if self.model.trim().is_empty() {
       bail!(
@@ -253,6 +332,9 @@ impl Config {
     }
     if self.preserve_messages < 2 {
       bail!("preserve_messages must be at least two");
+    }
+    if self.memory.backend != MemoryBackend::Off && self.memory.recall_limit == 0 {
+      bail!("memory.recall_limit must be greater than zero");
     }
     Ok(())
   }

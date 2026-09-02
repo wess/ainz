@@ -8,13 +8,19 @@
 <section class="step"><div class="stepnum">02</div><div><h2>Open setup</h2><pre><code>ainz</code></pre><p>With no model configured, Ainz opens setup inside the TUI. Add a provider, pick a model, and save. You can return at any time with <code>/config</code>.</p></div></section>
 <section class="step"><div class="stepnum">03</div><div><h2>Choose a provider</h2><h3>Ollama</h3><pre><code>ainz providers add ollama --preset ollama
 ainz models list ollama --refresh
-ainz providers use ollama qwen3:8b</code></pre><h3>Codex process</h3><pre><code>ainz providers add codex --preset codex --known-model gpt-5.6-sol
+ainz providers use ollama qwen3:8b</code></pre><h3>LiteLLM proxy</h3><pre><code>ainz providers add litellm --preset lite-llm --api-key-env LITELLM_API_KEY
+ainz models list litellm --refresh
+ainz providers use litellm gpt-5.6-sol</code></pre><h3>Codex process</h3><pre><code>ainz providers add codex --preset codex --known-model gpt-5.6-sol
 ainz providers use codex gpt-5.6-sol</code></pre><h3>Claude Code process</h3><pre><code>ainz providers add claude --preset claude-code --known-model sonnet
 ainz providers use claude sonnet</code></pre><p>Process providers use your existing authenticated CLI. Ainz does not need a separate Claude API key for the Claude Code preset.</p></div></section>
 <section class="step"><div class="stepnum">04</div><div><h2>Run a task</h2><pre><code>ainz ask "inspect this project and explain its architecture"</code></pre><p>Or stay in the full-screen interface:</p><pre><code>ainz</code></pre><p>Type <code>/</code> for fuzzy command search. <code>Ctrl+L</code> toggles the remembered agent roster; <code>Ctrl+1</code> selects the main session, <code>Ctrl+2..9</code> select subagents, and <code>Ctrl+=/-</code> cycle (or <code>/agent N</code> in terminals without the kitty keyboard protocol).</p></div></section>
 <section class="step"><div class="stepnum">05</div><div><h2>Resume and branch</h2><pre><code>ainz sessions
 ainz resume
 ainz resume SESSION_ID --at NODE_ID "try the smaller fix"</code></pre><p>Sessions are tree-structured. Resuming at an earlier node creates another path without erasing what came after it.</p></div></section>
-<section class="step"><div class="stepnum">06</div><div><h2>Connect Synapse</h2><pre><code>ainz mcp add synapse --required -- /absolute/path/to/synapse mcp</code></pre><p>Ainz also accepts an ephemeral MCP launch profile with <code>--mcp-config</code>, so Synapse can start it with a mesh-specific tool configuration.</p></div></section>
+<section class="step"><div class="stepnum">06</div><div><h2>Let it remember</h2><pre><code>ainz memory add the staging database is named orbit
+ainz memory list</code></pre><p>Memory is on and local by default. What is stored for a workspace is recalled into the system prompt when a session opens, the session can write more with its <code>memory</code> tool, and it is asked to save anything durable before a long transcript is compacted. <code>/settings</code> changes any of it.</p></div></section>
+<section class="step"><div class="stepnum">07</div><div><h2>Connect Synapse</h2><pre><code>ainz synapse enable
+ainz memory backend synapse
+ainz synapse mesh on</code></pre><p><a href="https://wess.io/synapse/">Synapse</a> is optional and keeps memory, one skill library, and an agent mesh shared with your other tools; turning it on also loads your <code>SOUL.md</code> guidance and gives each subagent its own seat on the mesh. Registering the server by hand still works, and Ainz accepts an ephemeral MCP launch profile with <code>--mcp-config</code>, so Synapse can start it with a mesh-specific tool configuration.</p><pre><code>ainz mcp add synapse --required -- /absolute/path/to/synapse mcp</code></pre></div></section>
 <div class="actions"><a class="button" href="../docs/">Open the manual</a><a class="button secondary" href="https://github.com/wess/ainz/issues">Report a problem</a></div>
-</div></main><div class="statusline"><span>tutorial</span><span>6 steps</span><span>ready</span></div><footer><span>Ainz 0.2.0</span><span><a href="../docs/#install">alternate installs</a></span></footer></div></body></html>
+</div></main><div class="statusline"><span>tutorial</span><span>7 steps</span><span>ready</span></div><footer><span>Ainz 0.3.0</span><span><a href="../docs/#install">alternate installs</a></span></footer></div></body></html>
