@@ -21,3 +21,9 @@ The other methods are `state`, `new_session`, `save`, and `shutdown`. Risky tool
 denied unless the process was started with `--permissions auto`; RPC mode never opens an
 interactive approval prompt. Sessions save after each completed or cancelled turn unless
 `--no-save` is supplied.
+
+A hosted session is built like any other, so [memory](memory.md) and the
+[Synapse](synapse.md) integration apply here too: recalled memories reach the system prompt
+before the first turn, and remembering is a tool call the host sees as an ordinary `event`.
+Storing a memory is a write, so it needs `--permissions auto` for the same reason every other
+write does.
