@@ -1,4 +1,4 @@
-use agentx::instruction;
+use ainz::instruction;
 
 #[tokio::test]
 async fn both_instruction_filenames_are_read_with_the_nearest_last() {

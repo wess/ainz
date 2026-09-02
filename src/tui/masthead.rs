@@ -32,24 +32,19 @@ struct PixelTheme {
 }
 
 pub(super) fn render(width: usize, variant: usize) -> Vec<Line<'static>> {
-  const LETTERS: [[&str; 7]; 6] = [
+  // A I N Z on a five by seven grid; the scenes below are drawn around these
+  const LETTERS: [[&str; 7]; 4] = [
     [
       "01110", "10001", "10001", "11111", "10001", "10001", "10001",
     ],
     [
-      "01110", "10001", "10000", "10111", "10001", "10001", "01110",
-    ],
-    [
-      "11111", "10000", "10000", "11110", "10000", "10000", "11111",
+      "11111", "00100", "00100", "00100", "00100", "00100", "11111",
     ],
     [
       "10001", "11001", "11001", "10101", "10011", "10011", "10001",
     ],
     [
-      "11111", "00100", "00100", "00100", "00100", "00100", "00100",
-    ],
-    [
-      "10001", "10001", "01010", "00100", "01010", "10001", "10001",
+      "11111", "00001", "00010", "00100", "01000", "10000", "11111",
     ],
   ];
   const THEMES: [PixelTheme; 10] = [
@@ -218,9 +213,9 @@ pub(super) fn render(width: usize, variant: usize) -> Vec<Line<'static>> {
   for (letter, pattern) in LETTERS.iter().enumerate() {
     let letter_x = margin + letter * (letter_width + gap);
     let letter_y = match variant {
-      2 | 8 => [1, 0, 2, 0, 1, 0][letter] * scale / 2,
-      4 => [0, 1, 2, 1, 0, 1][letter] * scale / 2,
-      9 => [1, 0, 1, 0, 1, 0][letter] * scale / 2,
+      2 | 8 => [1, 0, 2, 0][letter] * scale / 2,
+      4 => [0, 1, 2, 1][letter] * scale / 2,
+      9 => [1, 0, 1, 0][letter] * scale / 2,
       _ => 0,
     };
     for (pattern_y, row) in pattern.iter().enumerate() {

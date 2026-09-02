@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use agentx::{Config, EventSink, Session, SessionStore, deny_all, protocol::Image, run_control};
+use ainz::{Config, EventSink, Session, SessionStore, deny_all, protocol::Image, run_control};
 
 use super::app::make_agent_with;
 
@@ -127,7 +127,7 @@ pub async fn run(workspace: PathBuf, config: Config, no_save: bool) -> Result<()
   Ok(())
 }
 
-fn handle_active(line: &str, controller: &agentx::RunController) {
+fn handle_active(line: &str, controller: &ainz::RunController) {
   let request = match serde_json::from_str::<Request>(line) {
     Ok(request) => request,
     Err(error) => {

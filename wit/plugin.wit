@@ -1,4 +1,4 @@
-package agentx:plugin@0.1.0;
+package ainz:plugin@0.1.0;
 
 interface host {
   read-file: func(path: string) -> result<string, string>;

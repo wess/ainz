@@ -1,21 +1,21 @@
-use agentx::PromptCatalog;
+use ainz::PromptCatalog;
 
 #[tokio::test]
 async fn prompt_templates_expand_arguments_by_scope() {
   let temp = tempfile::tempdir().unwrap();
   let parent = temp.path().join("project");
   let workspace = parent.join("child");
-  tokio::fs::create_dir_all(parent.join(".agentx/prompts"))
+  tokio::fs::create_dir_all(parent.join(".ainz/prompts"))
     .await
     .unwrap();
-  tokio::fs::create_dir_all(workspace.join(".agentx/prompts"))
+  tokio::fs::create_dir_all(workspace.join(".ainz/prompts"))
     .await
     .unwrap();
-  tokio::fs::write(parent.join(".agentx/prompts/review.md"), "parent {{args}}")
+  tokio::fs::write(parent.join(".ainz/prompts/review.md"), "parent {{args}}")
     .await
     .unwrap();
   tokio::fs::write(
-    workspace.join(".agentx/prompts/review.md"),
+    workspace.join(".ainz/prompts/review.md"),
     "---\nname: review\ndescription: Review a path\n---\nInspect {{1}} with {{args}}.",
   )
   .await

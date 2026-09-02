@@ -40,8 +40,8 @@ impl SkillCatalog {
       roots.push(home.join(".claude/skills"));
     }
     if let Some(config) = dirs::config_dir() {
-      roots.push(config.join("struts/skills"));
       roots.push(config.join("agentx/skills"));
+      roots.push(config.join("ainz/skills"));
     }
     let mut ancestors: Vec<_> = workspace.ancestors().collect();
     ancestors.reverse();
@@ -49,8 +49,8 @@ impl SkillCatalog {
       roots.push(path.join("skills"));
       roots.push(path.join(".agents/skills"));
       roots.push(path.join(".claude/skills"));
-      roots.push(path.join(".struts/skills"));
       roots.push(path.join(".agentx/skills"));
+      roots.push(path.join(".ainz/skills"));
     }
     roots.extend_from_slice(extra_roots);
 

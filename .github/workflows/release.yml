@@ -80,7 +80,7 @@ jobs:
           gh release create "v${VERSION}" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "AgentX ${VERSION}" \
+            --title "Ainz ${VERSION}" \
             --generate-notes \
             --notes "$(printf '%s\n' \
-              'Install with Homebrew using `brew install wess/packages/agentx`, or download the archive for your platform below. The install script verifies the matching SHA-256 file before installing.')"
+              'Install with Homebrew using `brew install wess/packages/ainz`, or download the archive for your platform below. The install script verifies the matching SHA-256 file before installing.')"

@@ -66,7 +66,7 @@ impl PluginCatalog {
     if !path.exists() {
       let legacy = dirs::data_local_dir()
         .context("could not locate the data directory")?
-        .join("struts/plugins.json");
+        .join("agentx/plugins.json");
       if legacy.exists() {
         let grants = PluginGrants::load(&legacy).await?;
         grants.save(&path).await?;
@@ -79,8 +79,8 @@ impl PluginCatalog {
     let grants = PluginGrants::load(grants_path).await?;
     let mut roots = Vec::new();
     if let Some(config) = dirs::config_dir() {
-      roots.push(config.join("struts/plugins"));
       roots.push(config.join("agentx/plugins"));
+      roots.push(config.join("ainz/plugins"));
     }
     if let Some(home) = dirs::home_dir() {
       roots.push(home.join(".agents/plugins"));
@@ -89,8 +89,8 @@ impl PluginCatalog {
     ancestors.reverse();
     for path in ancestors {
       roots.push(path.join(".agents/plugins"));
-      roots.push(path.join(".struts/plugins"));
       roots.push(path.join(".agentx/plugins"));
+      roots.push(path.join(".ainz/plugins"));
     }
     roots.dedup();
     let mut catalog = Self::default();
@@ -204,7 +204,7 @@ impl PluginGrants {
     Ok(
       dirs::data_local_dir()
         .context("could not locate the data directory")?
-        .join("agentx/plugins.json"),
+        .join("ainz/plugins.json"),
     )
   }
 
@@ -271,7 +271,7 @@ async fn discover_plugin(
       fingerprint,
       artifact_digest,
       approved,
-      format: PluginFormat::AgentX,
+      format: PluginFormat::Ainz,
     }));
   }
 
@@ -565,7 +565,7 @@ async fn merge_plugin_mcp(profile: &mut McpProfile, plugin: &DiscoveredPlugin) -
   }
   let data_root = dirs::data_local_dir()
     .context("could not locate the data directory")?
-    .join("agentx/plugin-data")
+    .join("ainz/plugin-data")
     .join(&plugin.manifest.plugin.name);
   fs::create_dir_all(&data_root).await?;
   let root_text = root.to_string_lossy();

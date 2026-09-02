@@ -32,15 +32,15 @@ impl PromptCatalog {
       roots.push(home.join(".claude/commands"));
     }
     if let Some(config) = dirs::config_dir() {
-      roots.push(config.join("struts/prompts"));
       roots.push(config.join("agentx/prompts"));
+      roots.push(config.join("ainz/prompts"));
     }
     let mut ancestors: Vec<_> = workspace.ancestors().collect();
     ancestors.reverse();
     for path in ancestors {
       roots.push(path.join(".claude/commands"));
-      roots.push(path.join(".struts/prompts"));
       roots.push(path.join(".agentx/prompts"));
+      roots.push(path.join(".ainz/prompts"));
     }
 
     let mut prompts = BTreeMap::new();

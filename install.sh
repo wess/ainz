@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-repository="wess/agentx"
-install_dir="${AGENTX_INSTALL_DIR:-${HOME}/.local/bin}"
+repository="wess/ainz"
+install_dir="${AINZ_INSTALL_DIR:-${HOME}/.local/bin}"
 base_url="https://github.com/${repository}/releases"
 
 fail() {
-  printf 'agentx: %s\n' "$*" >&2
+  printf 'ainz: %s\n' "$*" >&2
   exit 1
 }
 
@@ -26,8 +26,8 @@ case "$(uname -m)" in
 esac
 
 target="${architecture}-${platform}"
-if [ -n "${AGENTX_VERSION:-}" ]; then
-  version="${AGENTX_VERSION#v}"
+if [ -n "${AINZ_VERSION:-}" ]; then
+  version="${AINZ_VERSION#v}"
 else
   release_url="$(curl --proto '=https' --tlsv1.2 -LsS -o /dev/null -w '%{url_effective}' "${base_url}/latest")"
   version="${release_url##*/}"
@@ -35,12 +35,12 @@ else
 fi
 
 [ -n "$version" ] || fail "could not determine the latest version"
-archive="agentx-${version}-${target}.tar.gz"
+archive="ainz-${version}-${target}.tar.gz"
 download_url="${base_url}/download/v${version}/${archive}"
-temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentx-install.XXXXXX")"
+temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/ainz-install.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT HUP INT TERM
 
-printf 'Downloading AgentX %s for %s...\n' "$version" "$target"
+printf 'Downloading Ainz %s for %s...\n' "$version" "$target"
 curl --proto '=https' --tlsv1.2 -fLsS "$download_url" -o "${temporary_dir}/${archive}"
 curl --proto '=https' --tlsv1.2 -fLsS "${download_url}.sha256" -o "${temporary_dir}/${archive}.sha256"
 
@@ -57,10 +57,10 @@ curl --proto '=https' --tlsv1.2 -fLsS "${download_url}.sha256" -o "${temporary_d
 )
 
 mkdir -p "$install_dir"
-install -m 0755 "${temporary_dir}/agentx" "${install_dir}/agentx"
-printf 'Installed AgentX %s to %s/agentx\n' "$version" "$install_dir"
+install -m 0755 "${temporary_dir}/ainz" "${install_dir}/ainz"
+printf 'Installed Ainz %s to %s/ainz\n' "$version" "$install_dir"
 
 case ":${PATH}:" in
   *":${install_dir}:"*) ;;
-  *) printf 'Add %s to PATH to run agentx.\n' "$install_dir" ;;
+  *) printf 'Add %s to PATH to run ainz.\n' "$install_dir" ;;
 esac

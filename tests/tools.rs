@@ -1,4 +1,4 @@
-use agentx::tool::{ToolContext, ToolSet, builtins};
+use ainz::tool::{ToolContext, ToolSet, builtins};
 use serde_json::json;
 
 #[tokio::test]

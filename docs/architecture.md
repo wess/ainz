@@ -1,6 +1,6 @@
 # Architecture
 
-AgentX keeps the orchestration core independent from transports and user interfaces.
+Ainz keeps the orchestration core independent from transports and user interfaces.
 
 1. `Agent<P>` owns the bounded tool loop and accepts any `ChatProvider`.
 2. `ToolSet` gives built-ins, skills, external servers, subagents, and plugins one async

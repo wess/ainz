@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agentx::{
+use ainz::{
   Session, SessionStore,
   protocol::{Message, Role},
 };

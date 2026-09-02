@@ -241,14 +241,14 @@ impl SessionStore {
 
   pub fn default_path() -> Result<PathBuf> {
     let base = dirs::data_local_dir().context("could not locate the data directory")?;
-    Ok(base.join("agentx/sessions"))
+    Ok(base.join("ainz/sessions"))
   }
 
   pub fn default_store() -> Result<Self> {
     let base = dirs::data_local_dir().context("could not locate the data directory")?;
     Ok(Self {
       root: Self::default_path()?,
-      legacy_root: Some(base.join("struts/sessions")),
+      legacy_root: Some(base.join("agentx/sessions")),
     })
   }
 

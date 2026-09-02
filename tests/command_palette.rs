@@ -1,4 +1,4 @@
-use agentx::command_palette::{SlashCommand, builtins, matches};
+use ainz::command_palette::{SlashCommand, builtins, matches};
 
 #[test]
 fn slash_search_prioritizes_exact_prefix_and_fuzzy_matches() {

@@ -1,4 +1,4 @@
-use agentx::protocol::Image;
+use ainz::protocol::Image;
 
 #[tokio::test]
 async fn local_images_become_persistable_data_urls() {

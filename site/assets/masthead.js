@@ -1,10 +1,10 @@
-// masthead studio: a half-block pixel editor that reads and writes the .ans files agentx renders
+// masthead studio: a half-block pixel editor that reads and writes the .ans files ainz renders
 
 const MAX_WIDTH = 240;
 const MAX_LINES = 80;
 const MAX_BYTES = 128 * 1024;
 const ROSTER_FIT = 72;
-const STORAGE = 'agentx-masthead';
+const STORAGE = 'ainz-masthead';
 
 const PRESETS = [
   '#e2be30', '#d37e1d', '#ffe86f', '#3ebcdd', '#182c34', '#363b3d',
@@ -13,7 +13,7 @@ const PRESETS = [
   '#dadee2', '#000000',
 ];
 
-// 5x7 glyphs; the letters agentx paints its own name with come first so stamps match
+// 5x7 glyphs; the letters ainz paints its own name with come first so stamps match
 const FONT = {
   A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
   B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
@@ -71,7 +71,7 @@ const state = {
   color: 0,
   tool: 'paint',
   zoom: 10,
-  text: 'AGENTX',
+  text: 'AINZ',
   scale: 2,
 };
 
@@ -173,7 +173,7 @@ const toAns = () => {
   return lines.join('\n') + '\n';
 };
 
-// style carries across lines, the way agentx reads it
+// style carries across lines, the way ainz reads it
 const applySgr = (parameters, colors) => {
   const values = parameters === '' ? [0] : parameters.split(';').map(Number);
   for (let i = 0; i < values.length; i++) {
@@ -340,7 +340,7 @@ const stats = () => {
   ];
   if (bytes > MAX_BYTES) notes.push('over the 128 KiB limit');
   $('stats').textContent = notes.join(' · ');
-  $('install').textContent = `mkdir -p .agentx/headers\nmv ~/Downloads/${state.name}.ans .agentx/headers/\nagentx   # then /header ${state.name}`;
+  $('install').textContent = `mkdir -p .ainz/headers\nmv ~/Downloads/${state.name}.ans .ainz/headers/\nainz   # then /header ${state.name}`;
 };
 
 const palette = () => {

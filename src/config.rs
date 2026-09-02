@@ -65,7 +65,7 @@ pub struct ProviderConfig {
 }
 
 fn default_api_key_env() -> String {
-  "AGENTX_API_KEY".into()
+  "AINZ_API_KEY".into()
 }
 
 fn is_text_output(output: &ProcessOutput) -> bool {
@@ -151,21 +151,21 @@ impl Default for Config {
 
 impl Config {
   pub fn path() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("AGENTX_CONFIG") {
+    if let Some(path) = env::var_os("AINZ_CONFIG") {
       return Ok(PathBuf::from(path));
     }
     let base = dirs::config_dir().context("could not locate the config directory")?;
-    Ok(base.join("agentx/config.toml"))
+    Ok(base.join("ainz/config.toml"))
   }
 
   pub async fn load() -> Result<Self> {
     let path = Self::path()?;
-    if path.exists() || env::var_os("AGENTX_CONFIG").is_some() {
+    if path.exists() || env::var_os("AINZ_CONFIG").is_some() {
       return Self::load_from(&path).await;
     }
     let legacy = dirs::config_dir()
       .context("could not locate the config directory")?
-      .join("struts/config.toml");
+      .join("agentx/config.toml");
     if !legacy.exists() {
       return Self::load_from(&path).await;
     }
@@ -182,13 +182,13 @@ impl Config {
       Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
 
-    if let Ok(endpoint) = env::var("AGENTX_ENDPOINT") {
+    if let Ok(endpoint) = env::var("AINZ_ENDPOINT") {
       config.endpoint = endpoint;
     }
-    if let Ok(model) = env::var("AGENTX_MODEL") {
+    if let Ok(model) = env::var("AINZ_MODEL") {
       config.model = model;
     }
-    if let Ok(provider) = env::var("AGENTX_PROVIDER") {
+    if let Ok(provider) = env::var("AINZ_PROVIDER") {
       config.provider = Some(provider);
     }
 
@@ -239,7 +239,7 @@ impl Config {
   pub fn validate(&self) -> Result<()> {
     if self.model.trim().is_empty() {
       bail!(
-        "no model configured; use `agentx providers use NAME MODEL`, set AGENTX_MODEL, or set model in {}",
+        "no model configured; use `ainz providers use NAME MODEL`, set AINZ_MODEL, or set model in {}",
         Self::path()?.display()
       );
     }

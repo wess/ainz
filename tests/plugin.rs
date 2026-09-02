@@ -1,6 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
 
-use agentx::{McpProfile, PluginCatalog, PluginFormat, SkillCatalog, tool::ToolContext};
+use ainz::{McpProfile, PluginCatalog, PluginFormat, SkillCatalog, tool::ToolContext};
 use serde_json::json;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
@@ -27,7 +27,7 @@ parameters = { type = "object" }
 #[tokio::test]
 async fn plugins_require_content_pinned_approval() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/plugins/echo");
+  let root = temp.path().join(".ainz/plugins/echo");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(root.join("plugin.toml"), MANIFEST)
     .await
@@ -184,7 +184,7 @@ async fn agent_plugins_load_portable_skills_and_mcp_configuration() {
 #[tokio::test]
 async fn component_plugins_run_in_the_sandbox() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/plugins/component_echo");
+  let root = temp.path().join(".ainz/plugins/component_echo");
   tokio::fs::create_dir_all(&root).await.unwrap();
   let artifact = root.join("echo.wasm");
   tokio::fs::write(&artifact, include_bytes!("fixtures/echo.wasm"))
@@ -285,7 +285,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .iter()
     .find(|tool| tool.spec().name == "component_echo_read")
     .unwrap();
-  assert_eq!(read.risk(&json!({})), agentx::tool::Risk::Read);
+  assert_eq!(read.risk(&json!({})), ainz::tool::Risk::Read);
   assert_eq!(
     read
       .execute(
@@ -345,7 +345,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .iter()
     .find(|tool| tool.spec().name == "component_echo_run")
     .unwrap();
-  assert_eq!(run.risk(&json!({})), agentx::tool::Risk::Execute);
+  assert_eq!(run.risk(&json!({})), ainz::tool::Risk::Execute);
   assert!(
     run
       .execute(
@@ -382,7 +382,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .iter()
     .find(|tool| tool.spec().name == "component_echo_fetch")
     .unwrap();
-  assert_eq!(fetch.risk(&json!({})), agentx::tool::Risk::Network);
+  assert_eq!(fetch.risk(&json!({})), ainz::tool::Risk::Network);
   assert_eq!(
     fetch
       .execute(
@@ -416,7 +416,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
 #[tokio::test]
 async fn a_broken_manifest_is_reported_without_hiding_the_others() {
   let temp = tempfile::tempdir().unwrap();
-  let good = temp.path().join(".agentx/plugins/echo");
+  let good = temp.path().join(".ainz/plugins/echo");
   tokio::fs::create_dir_all(&good).await.unwrap();
   tokio::fs::write(good.join("plugin.toml"), MANIFEST)
     .await
@@ -424,7 +424,7 @@ async fn a_broken_manifest_is_reported_without_hiding_the_others() {
   tokio::fs::write(good.join("run.sh"), "#!/bin/sh\n")
     .await
     .unwrap();
-  let bad = temp.path().join(".agentx/plugins/broken");
+  let bad = temp.path().join(".ainz/plugins/broken");
   tokio::fs::create_dir_all(&bad).await.unwrap();
   tokio::fs::write(bad.join("plugin.toml"), "this is not toml = [")
     .await
@@ -444,7 +444,7 @@ async fn a_broken_manifest_is_reported_without_hiding_the_others() {
 #[tokio::test]
 async fn a_program_swapped_after_approval_is_refused_at_run_time() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/plugins/echo");
+  let root = temp.path().join(".ainz/plugins/echo");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(root.join("plugin.toml"), MANIFEST)
     .await

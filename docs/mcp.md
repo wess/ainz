@@ -1,6 +1,6 @@
 # External tool servers
 
-AgentX speaks the `2025-11-25` stdio and Streamable HTTP transports. Persistent server
+Ainz speaks the `2025-11-25` stdio and Streamable HTTP transports. Persistent server
 configuration is read only from the user profile, so a cloned repository cannot start a
 server on its own. Two explicit paths add more: a launcher may pass `--mcp-config`, and an
 approved portable plugin may ship an `mcp.json` (see [plugins](plugins.md)).
@@ -10,11 +10,11 @@ approved portable plugin may ship an `mcp.json` (see [plugins](plugins.md)).
 Register a stdio server through the CLI:
 
 ```sh
-agentx mcp add files -- /absolute/path/to/server --read-only
+ainz mcp add files -- /absolute/path/to/server --read-only
 ```
 
 This writes the profile in the platform config directory (`~/Library/Application
-Support/agentx/mcp.toml` on macOS, `~/.config/agentx/mcp.toml` on Linux; `AGENTX_MCP_PROFILE`
+Support/ainz/mcp.toml` on macOS, `~/.config/ainz/mcp.toml` on Linux; `AINZ_MCP_PROFILE`
 overrides the path). The file is created with mode `0600`. Its shape:
 
 ```toml
@@ -40,7 +40,7 @@ required = false
 timeout_ms = 30000
 ```
 
-Server names use letters, digits, `.`, `_`, and `-`. `agentx mcp --json` prints the profile with
+Server names use letters, digits, `.`, `_`, and `-`. `ainz mcp --json` prints the profile with
 `headers` and `env` values redacted.
 
 `required` servers start together before the first model request and stop startup on failure.
@@ -50,9 +50,9 @@ server that stops answering, closes its pipe, or times out is dropped and restar
 call; the request that hit the failure reports it.
 
 ```sh
-agentx mcp
-agentx mcp --json
-agentx mcp remove files
+ainz mcp
+ainz mcp --json
+ainz mcp remove files
 ```
 
 `--mcp-config PATH` accepts the JSON launch format used by MCP-aware harnesses:
@@ -74,26 +74,26 @@ the user profile.
 
 ## Synapse
 
-[Synapse](https://wess.io/synapse) can connect AgentX itself:
+[Synapse](https://wess.io/synapse) can connect Ainz itself:
 
 ```sh
-synapse connect agentx
+synapse connect ainz
 ```
 
-For a checkout of Synapse that predates native AgentX support, register it manually:
+For a checkout of Synapse that predates native Ainz support, register it manually:
 
 ```sh
-agentx mcp add synapse --required -- /absolute/path/to/synapse mcp
+ainz mcp add synapse --required -- /absolute/path/to/synapse mcp
 ```
 
 Required servers' MCP instructions are appended to the agent instructions, labelled with the
 server name and capped at 4 KiB each. This lets Synapse provide its memory and mesh session
-contract, including startup recall, without AgentX reading Synapse's database. Synapse-launched
+contract, including startup recall, without Ainz reading Synapse's database. Synapse-launched
 agents receive an isolated, ephemeral `--mcp-config`, so each process gets its own mesh identity.
 
 ## Context behavior
 
-AgentX exposes one built-in `mcp` tool regardless of catalog size, with three operations:
+Ainz exposes one built-in `mcp` tool regardless of catalog size, with three operations:
 
 - `search` starts configured servers as needed and returns matching names and summaries
 - `schema` loads the full input schema for one selected tool

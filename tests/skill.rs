@@ -1,10 +1,10 @@
-use agentx::{SkillCatalog, tool::ToolContext};
+use ainz::{SkillCatalog, tool::ToolContext};
 use serde_json::json;
 
 #[tokio::test]
 async fn skills_are_discovered_but_loaded_on_demand() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/skills/review");
+  let root = temp.path().join(".ainz/skills/review");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(
     root.join("SKILL.md"),

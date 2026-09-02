@@ -13,21 +13,21 @@ impl Guest for Echo {
       "echo" => Ok(arguments),
       "read" | "denied_read" => {
         let path = value["path"].as_str().ok_or("path is required")?;
-        agentx::plugin::host::read_file(path)
+        ainz::plugin::host::read_file(path)
       }
       "write" => {
         let path = value["path"].as_str().ok_or("path is required")?;
         let content = value["content"].as_str().ok_or("content is required")?;
-        agentx::plugin::host::write_file(path, content)?;
+        ainz::plugin::host::write_file(path, content)?;
         Ok("written".into())
       }
       "run" => {
         let command = value["command"].as_str().ok_or("command is required")?;
-        agentx::plugin::host::run(command)
+        ainz::plugin::host::run(command)
       }
       "fetch" => {
         let url = value["url"].as_str().ok_or("url is required")?;
-        agentx::plugin::host::fetch(url)
+        ainz::plugin::host::fetch(url)
       }
       _ => Err(format!("unknown tool: {tool}")),
     }

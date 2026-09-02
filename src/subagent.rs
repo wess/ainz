@@ -14,12 +14,39 @@ use crate::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SubagentResult {
   pub session_id: Uuid,
+  pub name: String,
   pub output: String,
   pub usage: Usage,
 }
 
 pub type SubagentFuture = Pin<Box<dyn Future<Output = Result<SubagentResult>> + Send>>;
 pub type SubagentHandler = Arc<dyn Fn(Uuid, String) -> SubagentFuture + Send + Sync>;
+
+// the guardians of each floor of Nazarick, in floor order, so a roster of running
+// subagents reads as names rather than truncated session ids
+const GUARDIANS: [&str; 10] = [
+  "shalltear",
+  "gargantua",
+  "cocytus",
+  "aura",
+  "mare",
+  "demiurge",
+  "victim",
+  "albedo",
+  "sebas",
+  "pandora",
+];
+
+// past the tenth the list repeats with a suffix, so names stay unique for long runs
+pub fn guardian(index: usize) -> String {
+  let name = GUARDIANS[index % GUARDIANS.len()];
+  let round = index / GUARDIANS.len();
+  if round == 0 {
+    name.into()
+  } else {
+    format!("{name}-{}", round + 1)
+  }
+}
 
 pub fn subagent_tool(handler: SubagentHandler) -> Arc<dyn Tool> {
   Arc::new(SubagentTool { handler })

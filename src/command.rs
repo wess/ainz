@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
-use agentx::{
+use ainz::{
   Config, HttpProvider, McpProfile, McpServerConfig, McpTransport, PluginCatalog, ProcessOutput,
   PromptCatalog, ProviderConfig, ProviderKind, Session, SessionStore, SkillCatalog,
 };
@@ -97,7 +97,7 @@ pub enum ProviderCommand {
     command: Option<String>,
     #[arg(long = "arg", allow_hyphen_values = true)]
     args: Vec<String>,
-    #[arg(long, default_value = "AGENTX_API_KEY")]
+    #[arg(long, default_value = "AINZ_API_KEY")]
     api_key_env: String,
     #[arg(long = "known-model")]
     models: Vec<String>,
@@ -269,7 +269,7 @@ pub async fn mcp(command: Option<McpCommand>, json: bool) -> Result<()> {
       required,
       command,
     }) => {
-      if !agentx::mcp::valid_name(&name) {
+      if !ainz::mcp::valid_name(&name) {
         anyhow::bail!("MCP server name {name:?} may only use letters, digits, '.', '_' and '-'");
       }
       if profile.servers.contains_key(&name) {
@@ -434,7 +434,7 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
           .models
           .first()
           .cloned()
-          .context("provider has no models; pass a model or add one with `agentx models add`")?;
+          .context("provider has no models; pass a model or add one with `ainz models add`")?;
       }
       config.provider = Some(name.clone());
       config.save().await?;
@@ -591,7 +591,7 @@ fn print_plugins(catalog: &PluginCatalog, json: bool) -> Result<()> {
   Ok(())
 }
 
-fn describe_plugin(plugin: &agentx::plugin::DiscoveredPlugin) -> String {
+fn describe_plugin(plugin: &ainz::plugin::DiscoveredPlugin) -> String {
   let manifest = &plugin.manifest;
   let artifact = plugin
     .artifact()

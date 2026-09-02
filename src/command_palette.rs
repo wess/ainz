@@ -58,7 +58,7 @@ pub fn builtins() -> Vec<SlashCommand> {
       "Configure providers and models",
       "config",
     ),
-    ("exit", "/exit", "Save and exit AgentX", "session"),
+    ("exit", "/exit", "Save and exit Ainz", "session"),
     (
       "help",
       "/help",
@@ -116,7 +116,7 @@ pub fn builtins() -> Vec<SlashCommand> {
       "Configure or switch providers",
       "config",
     ),
-    ("quit", "/quit", "Save and exit AgentX", "session"),
+    ("quit", "/quit", "Save and exit Ainz", "session"),
     (
       "sessions",
       "/sessions",

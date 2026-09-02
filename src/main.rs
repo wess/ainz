@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
-use agentx::{Config, PermissionMode, Session};
+use ainz::{Config, PermissionMode, Session};
 
 mod app;
 mod command;

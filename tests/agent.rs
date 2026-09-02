@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Mutex};
 
-use agentx::{
+use ainz::{
   Agent, EventSink, PermissionMode, RunOptions, Session,
   protocol::{Message, Role, ToolCall, ToolSpec, Usage},
   provider::{ChatProvider, ProviderReply},
@@ -73,7 +73,7 @@ async fn agent_runs_tools_until_a_final_message() {
     tools,
     temp.path().into(),
     EventSink::default(),
-    agentx::deny_all(),
+    ainz::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
 
@@ -133,7 +133,7 @@ async fn steering_is_queued_at_a_safe_conversation_boundary() {
     ToolSet::default(),
     temp.path().into(),
     EventSink::default(),
-    agentx::deny_all(),
+    ainz::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
   let (controller, mut inbox) = run_control();
@@ -167,7 +167,7 @@ async fn cancellation_interrupts_an_in_flight_provider_request() {
     ToolSet::default(),
     temp.path().into(),
     EventSink::default(),
-    agentx::deny_all(),
+    ainz::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
   let (controller, mut inbox) = run_control();
@@ -207,7 +207,7 @@ async fn agent_compacts_before_the_context_limit() {
     ToolSet::default(),
     temp.path().into(),
     events,
-    agentx::deny_all(),
+    ainz::deny_all(),
   );
   let mut session = Session::new(temp.path().into());
   for index in 0..4 {
@@ -241,5 +241,5 @@ async fn agent_compacts_before_the_context_limit() {
   assert_eq!(output, "continued");
   assert_eq!(session.summaries.len(), 1);
   let event = receiver.try_recv().unwrap();
-  assert!(matches!(event, agentx::Event::Compaction { .. }));
+  assert!(matches!(event, ainz::Event::Compaction { .. }));
 }

@@ -1,6 +1,6 @@
-# AgentX
+# Ainz
 
-AgentX is a small agent harness built in Rust on Tokio. The model loop, tools, session
+Ainz is a small agent harness built in Rust on Tokio. The model loop, tools, session
 history, and extensions are library primitives; the terminal interface is one consumer of
 them, alongside one-shot, JSON event stream, and JSON-RPC modes.
 
@@ -15,21 +15,26 @@ stdio and Streamable HTTP, and content-pinned WebAssembly component or process p
 With Homebrew on macOS or Linux:
 
 ```sh
-brew install wess/packages/agentx
+brew install wess/packages/ainz
 ```
 
 With the checksum-verifying installer:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/wess/agentx/main/install.sh | sh
+  https://raw.githubusercontent.com/wess/ainz/main/install.sh | sh
 ```
 
 Release downloads cover Intel and Apple Silicon macOS and x86_64 and arm64 Linux. The
 `search` tool shells out to [ripgrep](https://github.com/BurntSushi/ripgrep), so install `rg`
 as well. See [`docs/install.md`](docs/install.md) for pinned versions, custom install
 directories, Cargo, and uninstalling. The project site has a
-[tutorial](https://wess.io/agentx/tutorial/) and [reference manual](https://wess.io/agentx/docs/).
+[tutorial](https://wess.io/ainz/tutorial/) and [reference manual](https://wess.io/ainz/docs/).
+
+Ainz was previously called AgentX. On first launch it carries forward the configuration and MCP
+profile from the old user directory, and it keeps discovering sessions, headers, prompts, skills,
+plugins, and plugin approvals written under the old name while new state is written under `ainz`
+and `.ainz`. The `AGENTX_*` environment variables are now `AINZ_*`.
 
 ## Build from source
 
@@ -41,21 +46,21 @@ cargo install --path .
 
 ## Configure
 
-Running `agentx` with no configured model opens the setup flow. `/config` inside a session
+Running `ainz` with no configured model opens the setup flow. `/config` inside a session
 adds or switches providers without restarting, and the same operations are scriptable:
 
 ```sh
-agentx providers add ollama --preset ollama
-agentx models list ollama --refresh
-agentx providers use ollama qwen3:8b
+ainz providers add ollama --preset ollama
+ainz models list ollama --refresh
+ainz providers use ollama qwen3:8b
 
-agentx providers add codex --preset codex --known-model gpt-5.6-sol
-agentx providers add claude --preset claude-code --known-model sonnet
+ainz providers add codex --preset codex --known-model gpt-5.6-sol
+ainz providers add claude --preset claude-code --known-model sonnet
 ```
 
-The config file lives in the platform config directory: `~/Library/Application Support/agentx/config.toml`
-on macOS, `~/.config/agentx/config.toml` on Linux. `AGENTX_CONFIG` overrides the path, and
-`AGENTX_MODEL`, `AGENTX_ENDPOINT`, `AGENTX_PROVIDER`, and `AGENTX_API_KEY` override values.
+The config file lives in the platform config directory: `~/Library/Application Support/ainz/config.toml`
+on macOS, `~/.config/ainz/config.toml` on Linux. `AINZ_CONFIG` overrides the path, and
+`AINZ_MODEL`, `AINZ_ENDPOINT`, `AINZ_PROVIDER`, and `AINZ_API_KEY` override values.
 
 ```toml
 provider = "ollama"
@@ -73,7 +78,7 @@ endpoint = "http://127.0.0.1:11434/v1"
 ```
 
 Without a `provider`, the legacy top-level `endpoint` and `api_key_env` keys describe one HTTP
-provider. HTTP profiles use AgentX's own model and tool loop. Process profiles run a coding CLI's
+provider. HTTP profiles use Ainz's own model and tool loop. Process profiles run a coding CLI's
 own loop and return its final response as one assistant turn; in `ask` and `read_only` modes
 they run read-only, and `auto` permits workspace edits. See
 [`docs/providers.md`](docs/providers.md).
@@ -81,27 +86,27 @@ they run read-only, and `auto` permits workspace edits. See
 ## Use
 
 ```sh
-agentx                                    # interactive
-agentx ask "inspect the project and run its tests"
-agentx ask --image screenshot.png "explain this interface"
-agentx ask --json "summarize this workspace"   # machine-readable event stream
-agentx rpc                                # persistent JSON-RPC process
+ainz                                    # interactive
+ainz ask "inspect the project and run its tests"
+ainz ask --image screenshot.png "explain this interface"
+ainz ask --json "summarize this workspace"   # machine-readable event stream
+ainz rpc                                # persistent JSON-RPC process
 
-agentx sessions
-agentx resume
-agentx resume SESSION_ID --at NODE_ID "continue from this branch"
-agentx skills
-agentx prompts
-agentx usage
-agentx mcp
-agentx plugins list
-agentx doctor
+ainz sessions
+ainz resume
+ainz resume SESSION_ID --at NODE_ID "continue from this branch"
+ainz skills
+ainz prompts
+ainz usage
+ainz mcp
+ainz plugins list
+ainz doctor
 ```
 
 JSON mode never opens an approval prompt; pass `--permissions auto` explicitly when a
 noninteractive request may write files or execute commands.
 
-In a terminal, AgentX runs a Ratatui interface with a streaming transcript, permission prompts
+In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts
 that show the tool's arguments, tool activity, and a subagent roster. Type `/` to open the
 command palette and fuzzy-search commands and prompt templates. `Ctrl+L` toggles the roster
 and remembers the choice, `Ctrl+1` selects the primary transcript, `Ctrl+2` through `Ctrl+9`
@@ -112,33 +117,33 @@ entered during a run is queued as steering for the next safe turn boundary. Redi
 keeps a plain line interface.
 
 An empty transcript shows one of ten built-in mastheads. Paint your own in the
-[masthead studio](https://wess.io/agentx/masthead/), or bring UTF-8 ASCII or ANSI-SGR art, and
-drop it in the config directory's `headers/` folder or a project's `.agentx/headers/`.
+[masthead studio](https://wess.io/ainz/masthead/), or bring UTF-8 ASCII or ANSI-SGR art, and
+drop it in the config directory's `headers/` folder or a project's `.ainz/headers/`.
 `/headers` lists them and `/header NAME` selects one; see [`docs/headers.md`](docs/headers.md).
 
 ## Instructions, skills, and prompts
 
-AgentX reads the layouts other harnesses already use, so an existing project works without an
+Ainz reads the layouts other harnesses already use, so an existing project works without an
 import step or a copy that drifts.
 
 `AGENTS.md` and `CLAUDE.md` are both read at every level from the filesystem root down to the
 workspace, nearest last, along with `~/.claude/CLAUDE.md` and the config directory's `AGENTS.md`.
 
 `SKILL.md` directories are discovered up front from `skills/`, `.agents/skills/`,
-`.claude/skills/`, and `.agentx/skills/` beside the workspace, plus `~/.claude/skills/` and the
+`.claude/skills/`, and `.ainz/skills/` beside the workspace, plus `~/.claude/skills/` and the
 config directory. Only their names and descriptions occupy the prompt; one `skill` tool loads a
 skill's text when the model asks for it. A skill that ships scripts or reference files lists them
 on load, and the same tool serves them with `{"name": "...", "file": "scripts/run.sh"}`, which is
 how a skill outside the workspace reaches its own files.
 
-Markdown prompt templates come from `.claude/commands/` and `.agentx/prompts/` beside the
+Markdown prompt templates come from `.claude/commands/` and `.ainz/prompts/` beside the
 workspace, plus `~/.claude/commands/` and the config directory. A subdirectory namespaces its
 templates, so `commands/api/audit.md` runs as `/api:audit`. Bodies expand `$ARGUMENTS` and `$1`
 as well as `{{args}}` and `{{1}}`, and an `argument-hint` in the front matter becomes the usage
 shown in the palette.
 
-Nearer definitions win, so a project can override a shared skill or command by name. `agentx
-skills`, `agentx prompts`, and `agentx doctor` show what was found.
+Nearer definitions win, so a project can override a shared skill or command by name. `ainz
+skills`, `ainz prompts`, and `ainz doctor` show what was found.
 
 ## External tools
 
@@ -149,13 +154,13 @@ cannot start a server. A harness such as Synapse may pass an ephemeral launch pr
 one schema. See [`docs/mcp.md`](docs/mcp.md).
 
 ```sh
-agentx mcp add synapse --required -- /absolute/path/to/synapse mcp
+ainz mcp add synapse --required -- /absolute/path/to/synapse mcp
 ```
 
 ## Plugins
 
 Native plugins are discovered from the config directory's `plugins/` folder and from
-`.agentx/plugins/*/plugin.toml` between the filesystem root and the workspace. Portable Agent
+`.ainz/plugins/*/plugin.toml` between the filesystem root and the workspace. Portable Agent
 Plugins 1.0 packages using `plugin.json`, `skills/`, and `mcp.json` are also discovered there
 and from `~/.agents/plugins` or `.agents/plugins`. The nearest project definition wins when
 names collide.
@@ -164,9 +169,9 @@ Discovery reads manifests but never runs anything. Approve the exact content bef
 tools become available:
 
 ```sh
-agentx plugins list
-agentx plugins approve example
-agentx plugins revoke example
+ainz plugins list
+ainz plugins approve example
+ainz plugins revoke example
 ```
 
 The approval pins the manifest, every file under the plugin directory, and the executable or

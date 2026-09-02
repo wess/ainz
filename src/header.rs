@@ -32,14 +32,14 @@ impl HeaderCatalog {
   pub async fn discover(workspace: &Path) -> Result<Self> {
     let mut roots = Vec::new();
     if let Some(config) = dirs::config_dir() {
-      roots.push(config.join("struts/headers"));
       roots.push(config.join("agentx/headers"));
+      roots.push(config.join("ainz/headers"));
     }
     let mut ancestors: Vec<_> = workspace.ancestors().collect();
     ancestors.reverse();
     for path in ancestors {
-      roots.push(path.join(".struts/headers"));
       roots.push(path.join(".agentx/headers"));
+      roots.push(path.join(".ainz/headers"));
     }
 
     let mut headers = BTreeMap::new();

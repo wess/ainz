@@ -1,13 +1,16 @@
 use std::{
   io::{IsTerminal, Write},
   path::PathBuf,
-  sync::Arc,
+  sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  },
 };
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use agentx::{
+use ainz::{
   Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
   PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
   ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
@@ -102,7 +105,10 @@ pub(crate) async fn make_agent_with(
   let child_approver = approver.clone();
   let child_events = events.clone();
   let child_store = SessionStore::default_store()?;
+  // each delegation takes the next guardian name, shared across every subagent of this run
+  let spawned = Arc::new(AtomicUsize::new(0));
   let subagents: SubagentHandler = Arc::new(move |parent_id, prompt| {
+    let name = ainz::subagent::guardian(spawned.fetch_add(1, Ordering::Relaxed));
     let provider = child_provider.clone();
     let tools = child_tools.clone();
     let workspace = child_workspace.clone();
@@ -115,6 +121,7 @@ pub(crate) async fn make_agent_with(
       events.emit(Event::SubagentStart {
         session_id: session.id.to_string(),
         parent_id: parent_id.to_string(),
+        name: name.clone(),
       });
       let session_id = session.id.to_string();
       let forwarded = events.clone();
@@ -133,6 +140,7 @@ pub(crate) async fn make_agent_with(
       });
       Ok(SubagentResult {
         session_id: session.id,
+        name,
         output: result?,
         usage: session.usage,
       })
@@ -296,7 +304,7 @@ pub async fn interactive(
 
 fn print_header(config: &Config) {
   println!(
-    "AgentX · {} · {}",
+    "Ainz · {} · {}",
     config.provider.as_deref().unwrap_or("default"),
     config.model
   );
@@ -309,7 +317,7 @@ async fn configure(
   if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
     return crate::tui::configure(config).await;
   }
-  println!("\nAgentX setup");
+  println!("\nAinz setup");
   println!("  1  Ollama");
   println!("  2  Codex CLI (headless)");
   println!("  3  Claude Code (headless)");

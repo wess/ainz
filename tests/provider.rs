@@ -3,7 +3,7 @@ use tokio::{
   net::{TcpListener, TcpStream},
 };
 
-use agentx::{
+use ainz::{
   EventSink, HttpProvider, PermissionMode, ProcessOutput, ProcessProvider,
   protocol::{Image, Message, Role},
   provider::ChatProvider,

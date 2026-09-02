@@ -3,7 +3,7 @@ use std::{
   sync::Once,
 };
 
-use agentx::{Config, HttpProvider, ProcessOutput, ProviderConfig};
+use ainz::{Config, HttpProvider, ProcessOutput, ProviderConfig};
 use anyhow::{Context, Result};
 use crossterm::{
   event::{
@@ -518,7 +518,7 @@ fn render_fields(frame: &mut Frame, title: &str, fields: &[Field], selected: usi
     frame,
     header,
     title,
-    "Values are saved to the AgentX config file",
+    "Values are saved to the Ainz config file",
   );
   let area = centered(body, body.width.min(82), body.height);
   let constraints: Vec<_> = fields
@@ -565,7 +565,7 @@ fn render_header(frame: &mut Frame, area: Rect, title: &str, subtitle: &str) {
   frame.render_widget(
     Paragraph::new(Line::from(vec![
       Span::styled(
-        "AgentX  ",
+        "Ainz  ",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
       ),
       Span::styled(title, Style::default().fg(INK).add_modifier(Modifier::BOLD)),

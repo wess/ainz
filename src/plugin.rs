@@ -18,7 +18,7 @@ pub const MAX_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PluginFormat {
-  AgentX,
+  Ainz,
   AgentPlugin,
 }
 

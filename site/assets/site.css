@@ -72,7 +72,7 @@ code { color: var(--yellow); font-family: inherit; }
 
 .masthead { margin: 0 0 26px; color: var(--cyan); font-weight: 900; font-size: clamp(7px, 1.35vw, 16px); line-height: 1.02; white-space: pre; letter-spacing: 0; text-shadow: 2px 2px #12427b, 4px 4px #241045; overflow: hidden; }
 .prompt { color: var(--green); }
-.prompt::before { content: "agentx@local:~$ "; color: var(--cyan); }
+.prompt::before { content: "ainz@local:~$ "; color: var(--cyan); }
 h1 { max-width: 850px; margin: 13px 0 18px; font-size: clamp(2rem, 5vw, 4.8rem); line-height: .98; letter-spacing: -.06em; color: #fff; text-shadow: 3px 3px #153d92, 6px 6px #381050; }
 .lede { max-width: 720px; font-size: clamp(1rem, 2vw, 1.25rem); color: #b9d2cb; }
 

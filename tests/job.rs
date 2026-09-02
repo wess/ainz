@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use agentx::{
+use ainz::{
   JobStore,
   tool::{Risk, ToolContext},
 };

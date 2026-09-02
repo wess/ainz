@@ -1,4 +1,4 @@
-use agentx::{Config, ProcessOutput, ProviderConfig};
+use ainz::{Config, ProcessOutput, ProviderConfig};
 
 #[tokio::test]
 async fn provider_profiles_round_trip() {

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, sync::Arc};
 
-use agentx::{
+use ainz::{
   McpHub, McpProfile, McpServerConfig, McpTransport,
   tool::{Risk, ToolContext},
 };

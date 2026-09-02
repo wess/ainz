@@ -1,17 +1,17 @@
 # Plugins
 
-AgentX supports two complementary formats:
+Ainz supports two complementary formats:
 
 - Native `plugin.toml` packages expose trusted process tools or capability-scoped WebAssembly
-  components through the AgentX API described below.
+  components through the Ainz API described below.
 - Portable [Agent Plugins 1.0](https://agent-plugins.org/specification) packages use a root
   `plugin.json` plus the standard `skills/` and `mcp.json` components shared by compatible agent
   clients.
 
-Portable packages are discovered from the normal AgentX plugin roots and from
+Portable packages are discovered from the normal Ainz plugin roots and from
 `~/.agents/plugins/*/plugin.json` or project `.agents/plugins/*/plugin.json`. Their MCP servers
 are namespaced as `<plugin>__<server>`, and stdio servers receive `PLUGIN_ROOT` plus a dedicated
-writable `PLUGIN_DATA` directory. AgentX expands those variables in arguments, environment
+writable `PLUGIN_DATA` directory. Ainz expands those variables in arguments, environment
 values, and the working directory as the portable specification requires. A broken `mcp.json`
 in an approved package is an error at startup, not a silent omission.
 
@@ -19,7 +19,7 @@ Static schemas are read from the manifest without starting the runtime. Plugin d
 closer to the active workspace replace global or parent definitions with the same plugin
 name. Tools are still checked for collisions when the final tool set is assembled, so an
 extension cannot silently replace a built-in or another plugin. A directory whose manifest
-fails to parse or validate is reported by `agentx plugins list` and skipped; it never blocks
+fails to parse or validate is reported by `ainz plugins list` and skipped; it never blocks
 the other plugins.
 
 ## Manifest
@@ -88,7 +88,7 @@ ticker makes it yield every 50 ms so the timeout can fire. `memory_bytes` may no
 1 GiB. The WASI context has no inherited environment, filesystem, network, arguments, or
 standard streams.
 
-The imported `agentx:plugin/host` interface exposes `read-file`, `write-file`, `run`,
+The imported `ainz:plugin/host` interface exposes `read-file`, `write-file`, `run`,
 and `fetch`. Each function checks the capabilities declared by the selected tool; one
 tool cannot borrow authority declared for another tool in the same component. Transfers
 are bounded by the configured tool-output limit, workspace paths cannot escape through
@@ -106,7 +106,7 @@ program cannot deadlock on a full pipe.
 
 ## Request
 
-AgentX sends one newline-terminated object:
+Ainz sends one newline-terminated object:
 
 ```json
 {
@@ -135,13 +135,13 @@ or an error:
 {"error":"artifact not found"}
 ```
 
-The response must occupy one line. AgentX enforces the manifest timeout, drains stdout
+The response must occupy one line. Ainz enforces the manifest timeout, drains stdout
 and stderr concurrently with hard capture bounds, and truncates the result to the
 configured tool-output limit.
 
 ## Trust model
 
-`agentx plugins approve <name>` prints what is being trusted (kind, artifact, capabilities,
+`ainz plugins approve <name>` prints what is being trusted (kind, artifact, capabilities,
 directory) and records a SHA-256 fingerprint covering the manifest, every regular file and
 symlink target beneath the plugin directory, and the referenced component or process
 executable, which may live outside the directory. Changing any of them returns the plugin to
@@ -152,5 +152,5 @@ directory digest at discovery. Process commands must name a relative or absolute
 executable file, not rely on shell path lookup, and artifacts must be regular files under
 256 MiB.
 
-`agentx plugins revoke <name>` removes the grant. Grants are keyed by plugin name, so
+`ainz plugins revoke <name>` removes the grant. Grants are keyed by plugin name, so
 approving a same-named plugin in another workspace replaces the earlier pin.

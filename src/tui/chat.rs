@@ -6,7 +6,7 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use agentx::{
+use ainz::{
   Agent, Approver, Config, Event, EventSink, HeaderArt, HeaderCatalog, McpProfile, PermissionMode,
   PluginCatalog, PromptCatalog, RunController, RuntimeProvider, Session, SessionStore,
   SkillCatalog,
@@ -105,6 +105,8 @@ enum AgentState {
 
 struct AgentView {
   state: AgentState,
+  // the guardian this subagent was named for; empty for the primary transcript
+  name: String,
   entries: Vec<Entry>,
   tools: BTreeMap<String, String>,
   assistant: Option<usize>,
@@ -115,6 +117,7 @@ impl AgentView {
   fn new(state: AgentState) -> Self {
     Self {
       state,
+      name: String::new(),
       entries: Vec::new(),
       tools: BTreeMap::new(),
       assistant: None,
@@ -236,11 +239,13 @@ impl ChatState {
   }
 
   fn channel(&self) -> String {
-    self
-      .active
-      .as_ref()
-      .map(|id| format!("#{}", id.chars().take(8).collect::<String>()))
-      .unwrap_or_else(|| "#main".into())
+    let Some(id) = self.active.as_ref() else {
+      return "#main".into();
+    };
+    match self.agents.get(id) {
+      Some(view) if !view.name.is_empty() => format!("#{}", view.name),
+      _ => format!("#{}", id.chars().take(8).collect::<String>()),
+    }
   }
 }
 
@@ -1029,12 +1034,15 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         ));
       }
     }
-    Event::SubagentStart { session_id, .. } => {
-      state
+    Event::SubagentStart {
+      session_id, name, ..
+    } => {
+      let view = state
         .agents
         .entry(session_id)
-        .or_insert_with(|| AgentView::new(AgentState::Running))
-        .state = AgentState::Running;
+        .or_insert_with(|| AgentView::new(AgentState::Running));
+      view.state = AgentState::Running;
+      view.name = name;
     }
     Event::SubagentEnd { session_id, error } => {
       let view = state
@@ -1085,10 +1093,10 @@ fn session_entries(session: &Session) -> Vec<Entry> {
     .filter_map(|node| {
       let text = node.message.content.clone()?;
       let kind = match node.message.role {
-        agentx::protocol::Role::User => EntryKind::User,
-        agentx::protocol::Role::Assistant => EntryKind::Assistant,
-        agentx::protocol::Role::System => EntryKind::System,
-        agentx::protocol::Role::Tool => EntryKind::Tool,
+        ainz::protocol::Role::User => EntryKind::User,
+        ainz::protocol::Role::Assistant => EntryKind::Assistant,
+        ainz::protocol::Role::System => EntryKind::System,
+        ainz::protocol::Role::Tool => EntryKind::Tool,
       };
       Some(Entry::new(kind, text))
     })
@@ -1210,7 +1218,7 @@ fn render_title(
   frame.render_widget(
     Paragraph::new(Line::from(vec![
       Span::styled(
-        " AgentX",
+        " Ainz",
         Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
       ),
       Span::styled("!", Style::default().fg(MAGENTA)),
@@ -1314,7 +1322,7 @@ fn selected_header(preference: &str, catalog: &HeaderCatalog) -> (usize, Option<
 fn entry_lines(entry: &Entry) -> Vec<Line<'static>> {
   let (nick, color) = match entry.kind {
     EntryKind::User => ("you", CYAN),
-    EntryKind::Assistant => ("AgentX", ACTIVE),
+    EntryKind::Assistant => ("Ainz", ACTIVE),
     EntryKind::System => ("*", YELLOW),
     EntryKind::Tool => ("tool", MAGENTA),
     EntryKind::Error => ("error", RED),
@@ -1372,12 +1380,14 @@ fn render_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
     } else {
       "·".into()
     };
+    let label = if view.name.is_empty() {
+      id.chars().take(10).collect::<String>()
+    } else {
+      view.name.clone()
+    };
     ListItem::new(Line::from(vec![
       Span::styled(format!("{key} {marker} "), Style::default().fg(color)),
-      Span::styled(
-        id.chars().take(10).collect::<String>(),
-        Style::default().fg(color),
-      ),
+      Span::styled(label, Style::default().fg(color)),
     ]))
     .style(if selected {
       Style::default().fg(Color::White).bg(BLUE)

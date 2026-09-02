@@ -1,6 +1,6 @@
 # JSON-RPC mode
 
-`agentx rpc` runs a persistent newline-delimited JSON-RPC 2.0 process on stdin and
+`ainz rpc` runs a persistent newline-delimited JSON-RPC 2.0 process on stdin and
 stdout. It keeps one session and one initialized tool catalog alive. Model and tool
 events are emitted as `event` notifications.
 

@@ -66,7 +66,7 @@ impl JobStore {
     Ok(
       dirs::data_local_dir()
         .context("could not locate the data directory")?
-        .join("agentx/jobs"),
+        .join("ainz/jobs"),
     )
   }
 
@@ -91,7 +91,7 @@ impl JobStore {
     let error = output.try_clone()?;
     let status = status_path.to_string_lossy().into_owned();
     let child = Command::new("sh")
-      .args(["-c", RUNNER, "agentx-job", &status, &command])
+      .args(["-c", RUNNER, "ainz-job", &status, &command])
       .current_dir(workspace)
       .stdin(Stdio::null())
       .stdout(Stdio::from(output))

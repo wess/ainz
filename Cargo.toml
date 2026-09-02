@@ -1,14 +1,13 @@
 [package]
-name = "agentx"
-version = "0.1.2"
+name = "ainz"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 description = "A small, embeddable agent harness"
-repository = "https://github.com/wess/agentx"
-homepage = "https://wess.io/agentx/"
-# the crates.io name belongs to an unrelated project; agentx ships as a binary through
-# GitHub releases, Homebrew, and `cargo install --git`
+repository = "https://github.com/wess/ainz"
+homepage = "https://wess.io/ainz/"
+# ainz ships as a binary through GitHub releases, Homebrew, and `cargo install --git`
 publish = false
 
 [dependencies]

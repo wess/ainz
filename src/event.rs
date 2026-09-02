@@ -36,6 +36,7 @@ pub enum Event {
   SubagentStart {
     session_id: String,
     parent_id: String,
+    name: String,
   },
   SubagentEnd {
     session_id: String,

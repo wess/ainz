@@ -31,7 +31,7 @@ async fn ask_json_runs_end_to_end() {
     socket.write_all(response.as_bytes()).await.unwrap();
   });
 
-  let output = Command::new(env!("CARGO_BIN_EXE_agentx"))
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .args([
       "--model",
       "test",
@@ -81,7 +81,7 @@ async fn rpc_mode_keeps_a_session_and_returns_json_rpc_responses() {
     );
     socket.write_all(response.as_bytes()).await.unwrap();
   });
-  let mut child = Command::new(env!("CARGO_BIN_EXE_agentx"))
+  let mut child = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .args([
       "--model",
       "test",
@@ -135,9 +135,9 @@ async fn provider_and_model_commands_persist_selection() {
     vec!["models", "add", "local", "tiny"],
     vec!["providers", "use", "local", "tiny"],
   ] {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
       .args(args)
-      .env("AGENTX_CONFIG", &config)
+      .env("AINZ_CONFIG", &config)
       .output()
       .await
       .unwrap();
@@ -148,9 +148,9 @@ async fn provider_and_model_commands_persist_selection() {
     );
   }
 
-  let output = Command::new(env!("CARGO_BIN_EXE_agentx"))
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .args(["providers", "list", "--json"])
-    .env("AGENTX_CONFIG", &config)
+    .env("AINZ_CONFIG", &config)
     .output()
     .await
     .unwrap();
@@ -187,9 +187,9 @@ async fn switching_provider_selects_one_of_its_models() {
     vec!["providers", "use", "first", "one"],
     vec!["providers", "use", "second"],
   ] {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
       .args(args)
-      .env("AGENTX_CONFIG", &config)
+      .env("AINZ_CONFIG", &config)
       .output()
       .await
       .unwrap();
@@ -209,8 +209,8 @@ async fn switching_provider_selects_one_of_its_models() {
 async fn empty_config_starts_the_interactive_setup() {
   let dir = tempfile::tempdir().unwrap();
   let config = dir.path().join("config.toml");
-  let mut child = Command::new(env!("CARGO_BIN_EXE_agentx"))
-    .env("AGENTX_CONFIG", &config)
+  let mut child = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("AINZ_CONFIG", &config)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -231,9 +231,9 @@ async fn empty_config_starts_the_interactive_setup() {
     String::from_utf8_lossy(&output.stderr)
   );
   let stdout = String::from_utf8(output.stdout).unwrap();
-  assert!(stdout.contains("AgentX setup"));
+  assert!(stdout.contains("Ainz setup"));
   assert!(stdout.contains("configured demo · tiny"));
-  assert!(stdout.contains("AgentX · demo · tiny"));
+  assert!(stdout.contains("Ainz · demo · tiny"));
   let saved = tokio::fs::read_to_string(config).await.unwrap();
   assert!(saved.contains("provider = \"demo\""));
   assert!(saved.contains("model = \"tiny\""));
@@ -243,7 +243,7 @@ async fn empty_config_starts_the_interactive_setup() {
 async fn mcp_commands_persist_a_synapse_compatible_registration() {
   let dir = tempfile::tempdir().unwrap();
   let profile = dir.path().join("mcp.toml");
-  let added = Command::new(env!("CARGO_BIN_EXE_agentx"))
+  let added = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .args([
       "mcp",
       "add",
@@ -253,7 +253,7 @@ async fn mcp_commands_persist_a_synapse_compatible_registration() {
       "/opt/synapse",
       "mcp",
     ])
-    .env("AGENTX_MCP_PROFILE", &profile)
+    .env("AINZ_MCP_PROFILE", &profile)
     .output()
     .await
     .unwrap();
@@ -267,9 +267,9 @@ async fn mcp_commands_persist_a_synapse_compatible_registration() {
   assert!(text.contains("args = [\"mcp\"]"));
   assert!(text.contains("required = true"));
 
-  let removed = Command::new(env!("CARGO_BIN_EXE_agentx"))
+  let removed = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .args(["mcp", "remove", "synapse"])
-    .env("AGENTX_MCP_PROFILE", &profile)
+    .env("AINZ_MCP_PROFILE", &profile)
     .output()
     .await
     .unwrap();
@@ -283,10 +283,10 @@ async fn mcp_commands_persist_a_synapse_compatible_registration() {
 }
 
 #[tokio::test]
-async fn the_agentx_rename_carries_forward_existing_user_configuration() {
+async fn the_ainz_rename_carries_forward_existing_user_configuration() {
   let dir = tempfile::tempdir().unwrap();
   let root = config_root(dir.path());
-  let legacy = root.join("struts");
+  let legacy = root.join("agentx");
   tokio::fs::create_dir_all(&legacy).await.unwrap();
   tokio::fs::write(legacy.join("config.toml"), "model = \"carried-forward\"\n")
     .await
@@ -298,7 +298,7 @@ async fn the_agentx_rename_carries_forward_existing_user_configuration() {
   .await
   .unwrap();
 
-  let output = Command::new(env!("CARGO_BIN_EXE_agentx"))
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .args(["mcp", "--json"])
     .env("HOME", dir.path())
     .env("XDG_CONFIG_HOME", dir.path().join(".config"))
@@ -311,6 +311,6 @@ async fn the_agentx_rename_carries_forward_existing_user_configuration() {
     String::from_utf8_lossy(&output.stderr)
   );
   assert!(String::from_utf8_lossy(&output.stdout).contains("/opt/synapse"));
-  assert!(root.join("agentx/config.toml").exists());
-  assert!(root.join("agentx/mcp.toml").exists());
+  assert!(root.join("ainz/config.toml").exists());
+  assert!(root.join("ainz/mcp.toml").exists());
 }

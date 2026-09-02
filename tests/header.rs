@@ -1,4 +1,4 @@
-use agentx::HeaderCatalog;
+use ainz::HeaderCatalog;
 use ratatui::{
   style::{Color, Modifier},
   text::Line,
@@ -7,11 +7,11 @@ use ratatui::{
 #[tokio::test]
 async fn discovers_and_parses_safe_ansi_headers() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/headers");
+  let root = temp.path().join(".ainz/headers");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(
     root.join("neon.ans"),
-    b"\x1b[38;2;72;205;214;1mAGENTX\x1b[0m\n  glow",
+    b"\x1b[38;2;72;205;214;1mAINZ\x1b[0m\n  glow",
   )
   .await
   .unwrap();
@@ -21,7 +21,7 @@ async fn discovers_and_parses_safe_ansi_headers() {
 
   assert_eq!(header.width, 6);
   assert_eq!(header.lines.len(), 2);
-  assert_eq!(header.lines[0].spans[0].content, "AGENTX");
+  assert_eq!(header.lines[0].spans[0].content, "AINZ");
   assert_eq!(
     header.lines[0].spans[0].style.fg,
     Some(Color::Rgb(72, 205, 214))
@@ -37,7 +37,7 @@ async fn discovers_and_parses_safe_ansi_headers() {
 #[tokio::test]
 async fn rejects_terminal_control_sequences() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/headers");
+  let root = temp.path().join(".ainz/headers");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(root.join("move.ans"), b"hello\x1b[2Jworld")
     .await
@@ -58,8 +58,8 @@ async fn rejects_terminal_control_sequences() {
 async fn nearest_header_definition_wins() {
   let temp = tempfile::tempdir().unwrap();
   let workspace = temp.path().join("project/nested");
-  let outer = temp.path().join(".agentx/headers");
-  let inner = temp.path().join("project/.agentx/headers");
+  let outer = temp.path().join(".ainz/headers");
+  let inner = temp.path().join("project/.ainz/headers");
   tokio::fs::create_dir_all(&workspace).await.unwrap();
   tokio::fs::create_dir_all(&outer).await.unwrap();
   tokio::fs::create_dir_all(&inner).await.unwrap();
@@ -81,7 +81,7 @@ async fn nearest_header_definition_wins() {
 #[tokio::test]
 async fn half_block_pixel_art_keeps_both_pixels_of_a_cell() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/headers");
+  let root = temp.path().join(".ainz/headers");
   tokio::fs::create_dir_all(&root).await.unwrap();
   tokio::fs::write(
     root.join("pixels.ans"),
@@ -108,7 +108,7 @@ async fn half_block_pixel_art_keeps_both_pixels_of_a_cell() {
 #[tokio::test]
 async fn only_ansi_and_text_extensions_are_loaded() {
   let temp = tempfile::tempdir().unwrap();
-  let root = temp.path().join(".agentx/headers");
+  let root = temp.path().join(".ainz/headers");
   tokio::fs::create_dir_all(&root).await.unwrap();
   let art = "\x1b[38;2;1;2;3m\u{2588}\x1b[0m\n";
   for name in ["keep.ans", "keep2.ansi", "keep3.txt"] {

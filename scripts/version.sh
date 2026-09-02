@@ -13,8 +13,8 @@ version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 for file in docs/install.md site/index.html site/docs/index.html site/tutorial/index.html; do
   sed -i.bak -E \
     -e "s|--tag v[0-9]+\.[0-9]+\.[0-9]+|--tag v${version}|g" \
-    -e "s|AGENTX [0-9]+\.[0-9]+\.[0-9]+|AGENTX ${version}|g" \
-    -e "s|AgentX [0-9]+\.[0-9]+\.[0-9]+|AgentX ${version}|g" \
+    -e "s|AINZ [0-9]+\.[0-9]+\.[0-9]+|AINZ ${version}|g" \
+    -e "s|Ainz [0-9]+\.[0-9]+\.[0-9]+|Ainz ${version}|g" \
     -e "s|manual · [0-9]+\.[0-9]+\.[0-9]+|manual · ${version}|g" \
     -e "s|<span>[0-9]+\.[0-9]+\.[0-9]+</span>|<span>${version}</span>|g" \
     "$file"

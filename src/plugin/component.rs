@@ -30,10 +30,10 @@ wasmtime::component::bindgen!({
   world: "plugin",
   exports: { default: async },
   imports: {
-    "agentx:plugin/host.read-file": async,
-    "agentx:plugin/host.write-file": async,
-    "agentx:plugin/host.run": async,
-    "agentx:plugin/host.fetch": async,
+    "ainz:plugin/host.read-file": async,
+    "ainz:plugin/host.write-file": async,
+    "ainz:plugin/host.run": async,
+    "ainz:plugin/host.fetch": async,
   },
 });
 
@@ -143,7 +143,7 @@ impl HasData for HostBindings {
   type Data<'a> = &'a mut HostState;
 }
 
-impl agentx::plugin::host::Host for HostState {
+impl ainz::plugin::host::Host for HostState {
   async fn read_file(&mut self, path: String) -> Result<String, String> {
     self
       .host_read(&path)

@@ -142,13 +142,13 @@ pub fn valid_name(name: &str) -> bool {
 
 impl McpProfile {
   pub fn path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("AGENTX_MCP_PROFILE") {
+    if let Some(path) = std::env::var_os("AINZ_MCP_PROFILE") {
       return Ok(PathBuf::from(path));
     }
     Ok(
       dirs::config_dir()
         .context("could not locate the config directory")?
-        .join("agentx/mcp.toml"),
+        .join("ainz/mcp.toml"),
     )
   }
 
@@ -156,9 +156,9 @@ impl McpProfile {
     let path = Self::path()?;
     let legacy = dirs::config_dir()
       .context("could not locate the config directory")?
-      .join("struts/mcp.toml");
+      .join("agentx/mcp.toml");
     let source =
-      if !path.exists() && std::env::var_os("AGENTX_MCP_PROFILE").is_none() && legacy.exists() {
+      if !path.exists() && std::env::var_os("AINZ_MCP_PROFILE").is_none() && legacy.exists() {
         &legacy
       } else {
         &path

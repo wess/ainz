@@ -12,11 +12,11 @@ pub async fn load(workspace: &Path) -> Result<String> {
     files.push(home.join(".claude/CLAUDE.md"));
   }
   if let Some(config) = dirs::config_dir() {
-    let current = config.join("agentx/AGENTS.md");
+    let current = config.join("ainz/AGENTS.md");
     if current.exists() {
       files.push(current);
     } else {
-      files.push(config.join("struts/AGENTS.md"));
+      files.push(config.join("agentx/AGENTS.md"));
     }
   }
 

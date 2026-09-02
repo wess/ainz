@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use agentx::{
+use ainz::{
   Event, SubagentResult,
   protocol::Usage,
   subagent_tool,
@@ -34,6 +34,7 @@ async fn subagent_tools_receive_the_parent_and_return_child_metadata() {
     Box::pin(async move {
       Ok(SubagentResult {
         session_id: uuid::Uuid::now_v7(),
+        name: "albedo".into(),
         output: "delegated result".into(),
         usage: Usage {
           input_tokens: 4,
@@ -56,8 +57,25 @@ async fn subagent_tools_receive_the_parent_and_return_child_metadata() {
   )
   .unwrap();
   assert_eq!(output["output"], "delegated result");
+  assert_eq!(output["name"], "albedo");
   assert_eq!(
     *observed.lock().unwrap(),
     Some((parent, "inspect this".into()))
   );
+}
+
+#[test]
+fn guardian_names_cover_every_floor_then_repeat_with_a_suffix() {
+  let first: Vec<_> = (0..10).map(ainz::subagent::guardian).collect();
+
+  assert_eq!(first[0], "shalltear");
+  assert_eq!(first[7], "albedo");
+  // every name in a run is distinct, which is the point of labelling the roster
+  let mut unique = first.clone();
+  unique.sort();
+  unique.dedup();
+  assert_eq!(unique.len(), first.len());
+  // past the list the names repeat with a round number rather than colliding
+  assert_eq!(ainz::subagent::guardian(10), "shalltear-2");
+  assert_eq!(ainz::subagent::guardian(21), "gargantua-3");
 }

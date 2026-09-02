@@ -54,7 +54,7 @@ impl Client {
         "initialize",
         json!({
           "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-          "clientInfo": {"name": "agentx", "version": env!("CARGO_PKG_VERSION")}
+          "clientInfo": {"name": "ainz", "version": env!("CARGO_PKG_VERSION")}
         }),
       )
       .await?;
