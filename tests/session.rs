@@ -88,3 +88,26 @@ async fn sessions_are_searchable_after_the_fact() {
   assert_eq!(everywhere.len(), 2);
   assert!(store.search("   ", None, 5).await.is_err());
 }
+
+#[tokio::test]
+async fn search_survives_characters_whose_case_changes_length() {
+  let temp = tempfile::tempdir().unwrap();
+  let store = SessionStore::new(temp.path().join("sessions"));
+  let mut session = Session::new(PathBuf::from("/workspace"));
+  // 'İ' lowercases to two code points, so offsets taken from a lowercased copy run ahead of
+  // the original and cannot be used to slice it
+  session.append(Message::text(
+    Role::User,
+    format!("{} the GOHAN deploy failed", "İ".repeat(40)),
+  ));
+  store.save(&session).await.unwrap();
+
+  let found = store.search("gohan", None, 5).await.unwrap();
+
+  assert_eq!(found.len(), 1);
+  assert!(
+    found[0].excerpts[0].contains("GOHAN"),
+    "{:?}",
+    found[0].excerpts
+  );
+}

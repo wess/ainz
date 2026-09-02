@@ -432,8 +432,7 @@ fn search_document(document: &SearchDocument, terms: &[String]) -> Option<Sessio
   for term in terms {
     let mut hit = false;
     for (label, text) in &texts {
-      let lower = text.to_lowercase();
-      let Some(position) = lower.find(term.as_str()) else {
+      let Some(position) = find_ignoring_case(text, term) else {
         continue;
       };
       hit = true;
@@ -453,6 +452,24 @@ fn search_document(document: &SearchDocument, terms: &[String]) -> Option<Sessio
     updated_at: document.updated_at,
     score,
     excerpts,
+  })
+}
+
+// lowercasing can change a string's byte length, so a match found in a lowercased copy cannot
+// be used to slice the original; this searches the original and returns an offset into it
+fn find_ignoring_case(haystack: &str, needle: &str) -> Option<usize> {
+  if needle.is_empty() {
+    return None;
+  }
+  haystack.char_indices().find_map(|(index, _)| {
+    let mut lowered = String::with_capacity(needle.len());
+    for character in haystack[index..].chars() {
+      lowered.extend(character.to_lowercase());
+      if lowered.len() >= needle.len() {
+        break;
+      }
+    }
+    lowered.starts_with(needle).then_some(index)
   })
 }
 
