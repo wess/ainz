@@ -290,6 +290,9 @@ pub struct Config {
   pub endpoint: String,
   pub model: String,
   pub api_key_env: String,
+  /// retries for a failed HTTP provider request (connection errors, 408, 429, 5xx) before the
+  /// turn gives up; other 4xx are never retried
+  pub provider_retries: usize,
   pub providers: BTreeMap<String, ProviderConfig>,
   pub max_steps: usize,
   pub max_output_bytes: usize,
@@ -317,6 +320,7 @@ impl Default for Config {
       endpoint: "http://127.0.0.1:11434/v1".into(),
       model: "".into(),
       api_key_env: default_api_key_env(),
+      provider_retries: 3,
       providers: BTreeMap::new(),
       max_steps: 32,
       max_output_bytes: 64 * 1024,

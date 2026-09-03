@@ -76,6 +76,7 @@ pub(crate) async fn make_agent_with(
         .context("HTTP provider requires an endpoint")?,
       config.model.clone(),
       config.api_key_for(&profile)?,
+      config.provider_retries,
     )?),
     ProviderKind::Process => RuntimeProvider::Process(ProcessProvider::new(
       profile
@@ -584,6 +585,7 @@ async fn configure(
         .context("HTTP provider requires an endpoint")?,
       String::new(),
       key,
+      config.provider_retries,
     )?;
     match provider.models().await {
       Ok(models) => profile.models = models,

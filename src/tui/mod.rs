@@ -135,7 +135,7 @@ async fn discover_models(
   endpoint: String,
 ) -> Result<Vec<String>> {
   let key = config.api_key_for(provider)?;
-  HttpProvider::new(endpoint, String::new(), key)?
+  HttpProvider::new(endpoint, String::new(), key, config.provider_retries)?
     .models()
     .await
 }
@@ -564,6 +564,7 @@ async fn configure_inner(
           .context("HTTP provider requires an endpoint")?,
         String::new(),
         None,
+        config.provider_retries,
       )?;
       if let Ok(models) = provider.models().await {
         profile.models = models;
@@ -596,7 +597,7 @@ async fn configure_inner(
       let mut profile = ProviderConfig::http(&endpoint, &variable);
       terminal.draw(|frame| render_loading(frame, "Asking the proxy which models it serves…"))?;
       let key = std::env::var(&variable).ok().filter(|key| !key.is_empty());
-      if let Ok(provider) = HttpProvider::new(endpoint, String::new(), key)
+      if let Ok(provider) = HttpProvider::new(endpoint, String::new(), key, config.provider_retries)
         && let Ok(models) = provider.models().await
       {
         profile.models = models;
