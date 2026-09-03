@@ -2,13 +2,20 @@
 
 Ainz keeps the orchestration core independent from transports and user interfaces.
 
-1. `Agent<P>` owns the bounded tool loop and accepts any `ChatProvider`.
+1. `Agent<P>` owns the bounded tool loop and accepts any `ChatProvider`. What the agent is —
+   provider, tool set, workspace, event sink, approver — stays fixed for the process; how a run
+   behaves — instructions, permission mode, standing rules, step and context limits, hooks —
+   travels separately in `RunOptions`, rebuilt whenever configuration changes.
 2. `ToolSet` gives built-ins, skills, external servers, subagents, and plugins one async
-   interface and one permission path.
+   interface and one permission path: a call's risk is checked against the standing rules
+   first, then the permission mode, then a `pre_tool` hook that can still refuse it. See
+   [`docs/tools.md`](tools.md) for the built-ins and [`docs/permissions.md`](permissions.md) for
+   that path in full.
 3. `Session` is an append-only tree. Checkout moves a cursor; it never destroys another
    branch. Summaries are attached to cursors and apply only to descendant context.
-4. `EventSink` decouples streaming from presentation. The terminal, NDJSON output, and
-   JSON-RPC mode consume the same events.
+4. `EventSink` decouples streaming from presentation. A tool call that produces output before it
+   finishes reports it as a `ToolDelta`, not just a start and an end. The terminal, NDJSON
+   output, and JSON-RPC mode consume the same events.
 5. `RunController` queues steering at safe conversation boundaries and cancels provider
    or tool futures without adding UI state to the agent.
 
