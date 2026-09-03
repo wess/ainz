@@ -1292,6 +1292,7 @@ fn command(
            up/down    earlier prompts        shift+enter  newline\n\
            @name      complete a path        esc esc      rewind a prompt\n\
            ctrl+o     expand tool output     /vim /inline prompt and drawing\n\
+           y n a      allow, refuse, or keep the answer at a permission prompt\n\
            ctrl+a/e   line start/end         ctrl+w       delete word\n\
            ctrl+u/k   clear before/after     alt+←/→      move a word\n\
            wheel      scroll the transcript  page up/down  scroll a screen\n\
