@@ -87,6 +87,9 @@ impl StreamState {
         + count("cache_read_input_tokens")
         + count("cache_creation_input_tokens"),
       output_tokens: count("output_tokens"),
+      // the only field here the model itself cannot be asked to estimate; take it verbatim
+      // from the one provider that reports it, and leave it unset for everyone else
+      cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
     };
   }
 

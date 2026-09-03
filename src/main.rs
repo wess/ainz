@@ -12,8 +12,8 @@ mod rpc_cli;
 mod tui;
 
 use command::{
-  McpCommand, MemoryCommand, ModelCommand, PluginCommand, ProviderCommand, SkillCommand,
-  SynapseCommand,
+  McpCommand, MemoryCommand, ModelCommand, PluginCommand, ProviderCommand, SessionsCommand,
+  SkillCommand, SynapseCommand,
 };
 
 #[derive(Parser)]
@@ -79,6 +79,8 @@ enum Command {
     json: bool,
   },
   Sessions {
+    #[command(subcommand)]
+    command: Option<SessionsCommand>,
     #[arg(long)]
     search: Option<String>,
     #[arg(long)]
@@ -178,9 +180,18 @@ async fn run() -> Result<()> {
   }
 
   match cli.command {
-    Some(Command::Sessions { search, json }) => match search {
-      Some(query) => command::search_sessions(&workspace, &query, json).await,
-      None => command::list_sessions(&workspace, json).await,
+    Some(Command::Sessions {
+      command,
+      search,
+      json,
+    }) => match command {
+      Some(SessionsCommand::Export { id, out }) => {
+        command::export_session(&workspace, id, out.as_deref()).await
+      }
+      None => match search {
+        Some(query) => command::search_sessions(&workspace, &query, json).await,
+        None => command::list_sessions(&workspace, json).await,
+      },
     },
     Some(Command::Skills { command, json }) => {
       command::skills(&workspace, &config, command, json).await

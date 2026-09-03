@@ -115,4 +115,8 @@ pub struct ToolSpec {
 pub struct Usage {
   pub input_tokens: u64,
   pub output_tokens: u64,
+  // only a process provider that reports its own spend (Claude Code's stream-json result)
+  // ever sets this; nobody here prices tokens, so an http provider leaves it None
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cost_usd: Option<f64>,
 }

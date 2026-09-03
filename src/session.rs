@@ -104,6 +104,27 @@ impl Session {
     )
   }
 
+  /// Renders the active path as Markdown, one section per message. Exports the active path
+  /// rather than every stored node because a rewind leaves earlier branches sitting in
+  /// `nodes` — they were tried and abandoned, not part of what happened; walking `cursor` back
+  /// through `parent` links is what tells the two apart.
+  pub fn export_markdown(&self) -> Result<String> {
+    let nodes = self.active_nodes()?;
+    let mut out = format!(
+      "# Session {}\n\n- workspace: {}\n- created at: {}\n- updated at: {}\n- messages: {}\n",
+      self.id,
+      self.workspace.display(),
+      self.created_at,
+      self.updated_at,
+      nodes.len(),
+    );
+    for node in nodes {
+      out.push('\n');
+      out.push_str(&export_node(node));
+    }
+    Ok(out)
+  }
+
   pub fn context_messages(&self) -> Result<Vec<Message>> {
     let nodes = self.active_nodes()?;
     let summary = self.active_summary(&nodes);
@@ -189,6 +210,41 @@ impl Session {
       .rev()
       .find(|summary| nodes.iter().any(|node| node.id == summary.cursor))
   }
+}
+
+// one Markdown section per node, beside export_markdown so the two stay in sync
+fn export_node(node: &SessionNode) -> String {
+  let message = &node.message;
+  let mut section = match message.role {
+    Role::System => format!("## System — {}\n\n", node.created_at),
+    Role::User => format!("## User — {}\n\n", node.created_at),
+    Role::Assistant => format!("## Assistant — {}\n\n", node.created_at),
+    Role::Tool => format!(
+      "## Tool result (`{}`) — {}\n\n",
+      message.tool_call_id.as_deref().unwrap_or("unknown"),
+      node.created_at
+    ),
+  };
+  if let Some(content) = message.content.as_deref().filter(|text| !text.is_empty()) {
+    if message.role == Role::Tool {
+      section.push_str(&format!("```\n{content}\n```\n"));
+    } else {
+      section.push_str(content);
+      section.push('\n');
+    }
+  }
+  if !message.images.is_empty() {
+    section.push_str(&format!("\n*{} image(s) attached*\n", message.images.len()));
+  }
+  for call in &message.tool_calls {
+    let arguments =
+      serde_json::to_string_pretty(&call.arguments).unwrap_or_else(|_| call.arguments.to_string());
+    section.push_str(&format!(
+      "\n### Tool call: {} (`{}`)\n\n```json\n{arguments}\n```\n",
+      call.name, call.id
+    ));
+  }
+  section
 }
 
 // what a listing needs, read without materializing every message or attachment
