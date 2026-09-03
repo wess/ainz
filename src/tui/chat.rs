@@ -2081,14 +2081,20 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
     (backend, true) => format!(" │ {} +mesh", backend.label()),
     (backend, false) => format!(" │ {}", backend.label()),
   };
+  // only a provider that reports what a turn cost has one to show
+  let cost = view
+    .usage
+    .cost_usd
+    .map(|cost| format!(" │ ${cost:.2}"))
+    .unwrap_or_default();
   let text = if area.width >= 108 {
     format!(
       " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
-       {total} │ agents {running}/{total_agents} │ {activity} │ ^L roster "
+       {total}{cost} │ agents {running}/{total_agents} │ {activity} │ ^L roster "
     )
   } else if area.width >= 72 {
     format!(
-      " {provider}/{model} │ {permissions} │ tok {input}↓ {output}↑ Σ{total} │ \
+      " {provider}/{model} │ {permissions} │ tok {input}↓ {output}↑ Σ{total}{cost} │ \
        ag {running}/{total_agents} │ {activity} "
     )
   } else {

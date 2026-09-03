@@ -358,6 +358,40 @@ def check_model_list(binary, root):
     server.shutdown()
 
 
+def check_new_surface(binary, root):
+    """The things a session gained after the prompt: rules, an attached image, the plan tool."""
+    print("\nthe rest of the session")
+    term = Terminal(binary, root, "config.toml")
+    term.pump(6.0)
+
+    term.send("/rules" + ENTER, settle=1.0)
+    check(
+        "rules says there are none yet",
+        "no standing rules" in term.body(),
+        term.body()[-300:],
+    )
+
+    # a pasted image path attaches rather than typing itself into the line
+    picture = os.path.join(root, "shot.png")
+    open(picture, "wb").write(b"\x89PNG\r\n\x1a\n")
+    term.send(f"{ESC}[200~{picture}{ESC}[201~", settle=0.8)
+    check("a pasted image attaches", "attached" in term.body(), term.body()[-300:])
+    check("and does not land in the line", picture not in term.prompt(), term.prompt())
+    check("the prompt shows it", "shot.png" in term.body(), term.body()[-200:])
+
+    # an ordinary paste is still text
+    term.send(f"{ESC}[200~just words{ESC}[201~", settle=0.6)
+    # the attachment marker sits at the right of the same row, so this is a contains
+    check("a text paste still types", "> just words" in term.prompt(), term.prompt())
+    term.send(CTRL_U + CTRL_K)
+
+    term.send("/help" + ENTER, settle=1.0)
+    body = term.body()
+    for command in ["/rules", "/vim", "/inline"]:
+        check(f"{command} is in the help", command in body, body[-500:])
+    term.close()
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/ainz"
     binary = os.path.abspath(binary)
@@ -369,6 +403,7 @@ def main():
         check_inline(binary, root)
         check_setup(binary, root)
         check_model_list(binary, root)
+        check_new_surface(binary, root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\n{checks - len(failures)}/{checks} checks passed")

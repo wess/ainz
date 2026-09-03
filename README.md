@@ -7,9 +7,9 @@ them, alongside one-shot, JSON event stream, and JSON-RPC modes.
 It talks to OpenAI-compatible chat-completions endpoints with streaming and tool calls,
 including a LiteLLM proxy, and to headless coding CLIs as process providers. Sessions are
 resumable trees with automatic, branch-aware compaction. Tools cover workspace read, list,
-search, write, edit, and shell, durable background jobs, lazily loaded skills, prompt templates,
-subagents, MCP servers over stdio and Streamable HTTP, and content-pinned WebAssembly component
-or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
+search, write, edit, and shell, reading a URL, a plan the session keeps as it works, durable
+background jobs, lazily loaded skills, prompt templates, subagents, MCP servers over stdio and
+Streamable HTTP, and content-pinned WebAssembly component or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
 search over earlier sessions, and skills a session writes for the next one.
 
 ## Install
@@ -114,6 +114,7 @@ ainz rpc                                # persistent JSON-RPC process
 
 ainz sessions
 ainz sessions --search "certificate error"
+ainz sessions export SESSION_ID --out session.md
 ainz resume
 ainz resume SESSION_ID --at NODE_ID "continue from this branch"
 ainz skills
@@ -155,6 +156,18 @@ selects text the way it normally would.
 `/inline` draws the prompt at the bottom of the terminal's own scroll instead of taking the
 whole screen, so finished output stays in the scrollback the terminal already keeps — at the
 cost of the roster. It applies at the next launch.
+
+A permission prompt shows what the call would actually do — an edit as a diff, a command as the
+command — and takes three answers: `y` allows it once, `n` refuses, and `a` keeps the decision.
+`a` writes a standing rule, the tool alone or the tool with the first word of its command, so
+`shell(git *)` is a decision you can actually mean; it applies to the run in flight and every one
+after. `/rules` lists them, `/rules clear` forgets them, and they live in the config where a
+headless run reads the same ones. Deny beats allow.
+
+A long command reports itself while it runs rather than after: the call in the transcript grows
+a line showing the last thing it wrote, and `Ctrl+O` opens the whole of it. A run of more than
+ten seconds rings the terminal when it finishes. An image pasted or dragged into the prompt
+attaches to the next message.
 
 `Ctrl+L` toggles the roster
 and remembers the choice, `Ctrl+1` selects the primary transcript, `Ctrl+2` through `Ctrl+9`
