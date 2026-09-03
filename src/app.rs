@@ -11,7 +11,7 @@ use ainz::{
   Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
   PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
   ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
-  SubagentRegistry, SubagentRequest, SubagentResult,
+  SubagentRegistry, SubagentRequest, SubagentResult, TodoList,
   agent::Approval,
   config::MemoryBackend,
   deny_all, instruction,
@@ -96,6 +96,7 @@ pub(crate) async fn make_agent_with(
   tools.extend(builtins())?;
   tools.insert(JobStore::default_store()?.tool())?;
   tools.insert(SessionStore::default_store()?.tool())?;
+  tools.insert(TodoList::new().tool())?;
   tools.insert(
     SkillCatalog::discover_with_roots(workspace, &catalog.approved_skill_roots())
       .await?
