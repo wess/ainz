@@ -196,6 +196,19 @@ pip install pyte
 cargo build && python3 scripts/tui-check.py
 ```
 
+## Hooks
+
+A session crosses a few points nothing else can see: before its first turn, before and after
+every tool call, and when a run ends. A hook is a command run at one of those, taking the event
+as JSON on stdin. A `pre_tool` hook is the one with a vote — a non-zero exit blocks the call and
+its stderr becomes the error the model reads; every other event's exit status is advisory. See
+[`docs/hooks.md`](docs/hooks.md).
+
+```toml
+[hooks]
+post_tool = [{ command = ["cargo", "fmt"], matcher = "edit" }]
+```
+
 ## Memory
 
 A session that forgets everything at the end re-derives the same things next week. Ainz keeps
