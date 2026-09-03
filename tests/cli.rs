@@ -1,5 +1,9 @@
 use std::process::Stdio;
 
+use ainz::{
+  Session, SessionStore,
+  protocol::{Message, Role},
+};
 use tokio::{
   io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
   net::TcpListener,
@@ -487,4 +491,86 @@ async fn ainz(
     String::from_utf8_lossy(&output.stderr)
   );
   String::from_utf8(output.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn sessions_export_writes_the_active_path_and_defaults_to_the_latest_session() {
+  let home = tempfile::tempdir().unwrap();
+  let workspace = tempfile::tempdir().unwrap();
+  let store = SessionStore::new(config_root(home.path()).join("ainz/sessions"));
+
+  // main.rs canonicalizes --workspace before comparing it against a stored session's
+  // workspace, and a tempdir path is often a symlink (e.g. /tmp -> /private/tmp on macOS)
+  let mut session = Session::new(workspace.path().canonicalize().unwrap());
+  let root = session.append(Message::text(Role::User, "what broke the deploy"));
+  // rewound away below; export must not resurrect it
+  session.append(Message::text(Role::Assistant, "abandoned guess about DNS"));
+  session.checkout(Some(root)).unwrap();
+  session.append(Message::text(
+    Role::Assistant,
+    "checking the certificate chain",
+  ));
+  store.save(&session).await.unwrap();
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("HOME", home.path())
+    .args([
+      "--workspace",
+      workspace.path().to_str().unwrap(),
+      "sessions",
+      "export",
+    ])
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let stdout = String::from_utf8(output.stdout).unwrap();
+  assert!(stdout.contains(&format!("# Session {}", session.id)));
+  assert!(stdout.contains("what broke the deploy"));
+  assert!(stdout.contains("checking the certificate chain"));
+  assert!(!stdout.contains("abandoned guess about DNS"));
+
+  // --out writes the same Markdown to a file instead of stdout
+  let out_path = workspace.path().join("export.md");
+  let written = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("HOME", home.path())
+    .args([
+      "--workspace",
+      workspace.path().to_str().unwrap(),
+      "sessions",
+      "export",
+      "--out",
+      out_path.to_str().unwrap(),
+    ])
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    written.status.success(),
+    "{}",
+    String::from_utf8_lossy(&written.stderr)
+  );
+  assert!(written.stdout.is_empty());
+  let file_contents = tokio::fs::read_to_string(&out_path).await.unwrap();
+  assert!(file_contents.contains("checking the certificate chain"));
+
+  // plain `sessions` and `sessions --json` still list rather than export
+  let listed = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .env("HOME", home.path())
+    .args([
+      "--workspace",
+      workspace.path().to_str().unwrap(),
+      "sessions",
+      "--json",
+    ])
+    .output()
+    .await
+    .unwrap();
+  assert!(listed.status.success());
+  let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+  assert_eq!(rows[0]["id"], session.id.to_string());
 }

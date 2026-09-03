@@ -41,6 +41,7 @@ async fn subagent_tools_receive_the_parent_and_return_child_metadata() {
           usage: Usage {
             input_tokens: 4,
             output_tokens: 2,
+            cost_usd: None,
           },
         })
       })

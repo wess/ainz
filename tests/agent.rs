@@ -57,6 +57,7 @@ async fn agent_runs_tools_until_a_final_message() {
       usage: Usage {
         input_tokens: 10,
         output_tokens: 2,
+        cost_usd: None,
       },
     },
     ProviderReply {
@@ -64,6 +65,7 @@ async fn agent_runs_tools_until_a_final_message() {
       usage: Usage {
         input_tokens: 15,
         output_tokens: 1,
+        cost_usd: None,
       },
     },
   ]);
@@ -193,6 +195,7 @@ async fn agent_compacts_before_the_context_limit() {
       usage: Usage {
         input_tokens: 80,
         output_tokens: 4,
+        cost_usd: None,
       },
     },
     ProviderReply {
@@ -200,6 +203,7 @@ async fn agent_compacts_before_the_context_limit() {
       usage: Usage {
         input_tokens: 30,
         output_tokens: 1,
+        cost_usd: None,
       },
     },
   ])));

@@ -173,6 +173,7 @@ pub(super) fn parse_response(
     .map(|usage| Usage {
       input_tokens: usage.prompt_tokens,
       output_tokens: usage.completion_tokens,
+      cost_usd: None,
     })
     .unwrap_or_default();
   Ok(ProviderReply {

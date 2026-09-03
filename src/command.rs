@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
@@ -9,6 +9,16 @@ use ainz::{
   MemoryBackend, PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind,
   Session, SessionStore, SkillCatalog, import as importer, synapse,
 };
+
+#[derive(Subcommand)]
+pub enum SessionsCommand {
+  /// Write the session's active conversation path as Markdown, to --out or stdout.
+  Export {
+    id: Option<Uuid>,
+    #[arg(long)]
+    out: Option<PathBuf>,
+  },
+}
 
 #[derive(Subcommand)]
 pub enum McpCommand {
@@ -214,6 +224,18 @@ pub async fn list_sessions(workspace: &Path, json: bool) -> Result<()> {
           .map_or_else(String::new, |parent| format!("  child of {parent}"))
       );
     }
+  }
+  Ok(())
+}
+
+pub async fn export_session(workspace: &Path, id: Option<Uuid>, out: Option<&Path>) -> Result<()> {
+  let session = load_session(workspace, id).await?;
+  let markdown = session.export_markdown()?;
+  match out {
+    Some(path) => tokio::fs::write(path, &markdown)
+      .await
+      .with_context(|| format!("write {}", path.display()))?,
+    None => print!("{markdown}"),
   }
   Ok(())
 }
@@ -547,19 +569,31 @@ pub async fn usage(workspace: &Path, json: bool) -> Result<()> {
     .iter()
     .map(|session| session.usage.output_tokens)
     .sum();
+  // only a process provider that reports its own spend sets cost_usd; sum what's known and
+  // say nothing when none of these sessions used one
+  let cost_usd = sessions
+    .iter()
+    .filter_map(|session| session.usage.cost_usd)
+    .fold(None, |total: Option<f64>, cost| {
+      Some(total.unwrap_or(0.0) + cost)
+    });
   if json {
-    println!(
-      "{}",
-      serde_json::to_string_pretty(&serde_json::json!({
-        "sessions": sessions.len(), "input_tokens": input_tokens,
-        "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens,
-      }))?
-    );
+    let mut body = serde_json::json!({
+      "sessions": sessions.len(), "input_tokens": input_tokens,
+      "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens,
+    });
+    if let Some(cost_usd) = cost_usd {
+      body["cost_usd"] = serde_json::json!(cost_usd);
+    }
+    println!("{}", serde_json::to_string_pretty(&body)?);
   } else {
     println!("sessions       {}", sessions.len());
     println!("input tokens   {input_tokens}");
     println!("output tokens  {output_tokens}");
     println!("total tokens   {}", input_tokens + output_tokens);
+    if let Some(cost_usd) = cost_usd {
+      println!("cost           ${cost_usd:.2}");
+    }
   }
   Ok(())
 }

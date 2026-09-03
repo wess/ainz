@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use ainz::{
   Session, SessionStore,
-  protocol::{Message, Role},
+  protocol::{Message, Role, ToolCall, Usage},
 };
+use serde_json::json;
 
 #[tokio::test]
 async fn session_history_branches_and_round_trips() {
@@ -110,4 +111,69 @@ async fn search_survives_characters_whose_case_changes_length() {
     "{:?}",
     found[0].excerpts
   );
+}
+
+#[test]
+fn export_covers_the_active_path_and_drops_a_rewound_branch() {
+  let mut session = Session::new(PathBuf::from("/workspace"));
+  let root = session.append(Message::text(Role::User, "what broke the deploy"));
+  // this branch gets abandoned by the checkout below and must not appear in the export
+  session.append(Message::text(Role::Assistant, "abandoned guess about DNS"));
+
+  session.checkout(Some(root)).unwrap();
+  let mut answer = Message::text(Role::Assistant, "checking the certificate chain");
+  answer.tool_calls.push(ToolCall {
+    id: "call-1".into(),
+    name: "read_file".into(),
+    arguments: json!({"path": "deploy.log"}),
+  });
+  session.append(answer);
+  session.append(Message::tool("call-1", "certificate expired 2 days ago"));
+
+  let markdown = session.export_markdown().unwrap();
+
+  assert!(markdown.contains(&format!("# Session {}", session.id)));
+  assert!(markdown.contains("/workspace"));
+  assert!(markdown.contains("## User"));
+  assert!(markdown.contains("what broke the deploy"));
+  assert!(markdown.contains("## Assistant"));
+  assert!(markdown.contains("checking the certificate chain"));
+  assert!(markdown.contains("### Tool call: read_file"));
+  assert!(markdown.contains("deploy.log"));
+  assert!(markdown.contains("## Tool result (`call-1`)"));
+  assert!(markdown.contains("certificate expired 2 days ago"));
+
+  assert!(!markdown.contains("abandoned guess about DNS"));
+}
+
+#[tokio::test]
+async fn usage_cost_round_trips_through_a_saved_session() {
+  let temp = tempfile::tempdir().unwrap();
+  let store = SessionStore::new(temp.path().join("sessions"));
+
+  let mut priced = Session::new(PathBuf::from("/workspace"));
+  priced.append(Message::text(Role::User, "hi"));
+  priced.usage.cost_usd = Some(0.0842);
+  store.save(&priced).await.unwrap();
+  let loaded = store.load(priced.id).await.unwrap();
+  assert_eq!(loaded.usage.cost_usd, Some(0.0842));
+
+  let mut unpriced = Session::new(PathBuf::from("/workspace"));
+  unpriced.append(Message::text(Role::User, "hi"));
+  store.save(&unpriced).await.unwrap();
+  let loaded = store.load(unpriced.id).await.unwrap();
+  assert_eq!(loaded.usage.cost_usd, None);
+  // no cost known, so the field is left out rather than written as null
+  assert!(
+    !serde_json::to_string(&loaded.usage)
+      .unwrap()
+      .contains("cost")
+  );
+}
+
+#[test]
+fn usage_without_cost_deserializes_from_a_session_saved_before_this_field_existed() {
+  let usage: Usage = serde_json::from_str(r#"{"input_tokens":10,"output_tokens":2}"#).unwrap();
+  assert_eq!(usage.input_tokens, 10);
+  assert_eq!(usage.cost_usd, None);
 }
