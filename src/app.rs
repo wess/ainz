@@ -204,6 +204,7 @@ pub(crate) async fn make_agent_with(
   let options = RunOptions {
     instructions,
     permissions: config.permissions,
+    rules: config.rules.clone(),
     max_steps: config.max_steps,
     max_output_bytes: config.max_output_bytes,
     context_tokens: config.context_tokens,

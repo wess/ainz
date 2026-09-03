@@ -20,6 +20,7 @@ fn options() -> RunOptions {
     compact_at_tokens: 12_000,
     preserve_messages: 4,
     memory_nudge: None,
+    rules: Default::default(),
   }
 }
 
@@ -235,6 +236,7 @@ async fn agent_compacts_before_the_context_limit() {
         compact_at_tokens: 200,
         preserve_messages: 2,
         memory_nudge: Some("write down anything durable".into()),
+        rules: Default::default(),
       },
     )
     .await

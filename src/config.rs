@@ -94,6 +94,55 @@ impl Default for MemoryConfig {
   }
 }
 
+/// What may run without asking. A pattern is either a tool name (`read`) or a tool name with a
+/// prefix of its subject in parentheses (`shell(git status)`), matched against the same subject
+/// the transcript labels a call with.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PermissionRules {
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub allow: Vec<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub deny: Vec<String>,
+}
+
+impl PermissionRules {
+  /// Whether a call is already decided: denied outright, allowed without asking, or neither.
+  pub fn decide(&self, name: &str, subject: Option<&str>) -> Option<bool> {
+    // deny wins, so a rule can be added to take an allowance back without editing the other list
+    if self.matches(&self.deny, name, subject) {
+      return Some(false);
+    }
+    self.matches(&self.allow, name, subject).then_some(true)
+  }
+
+  fn matches(&self, rules: &[String], name: &str, subject: Option<&str>) -> bool {
+    rules.iter().any(|rule| match rule.split_once('(') {
+      Some((tool, rest)) => {
+        let prefix = rest.trim_end_matches(')');
+        tool.trim() == name
+          && subject.is_some_and(|subject| match prefix.strip_suffix('*') {
+            Some(prefix) => subject.starts_with(prefix),
+            None => subject == prefix,
+          })
+      }
+      None => rule.trim() == name,
+    })
+  }
+
+  /// The rule the transcript offers to remember for a call: the tool and, for one that takes a
+  /// command, its first word, since `shell(git *)` is a decision a person can actually mean.
+  pub fn rule_for(name: &str, subject: Option<&str>) -> String {
+    match subject.map(str::trim).filter(|subject| !subject.is_empty()) {
+      Some(subject) if name == "shell" => {
+        let head = subject.split_whitespace().next().unwrap_or(subject);
+        format!("{name}({head} *)")
+      }
+      _ => name.to_string(),
+    }
+  }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct UiConfig {
@@ -245,6 +294,8 @@ pub struct Config {
   pub compact_at_tokens: usize,
   pub preserve_messages: usize,
   pub permissions: PermissionMode,
+  #[serde(default)]
+  pub rules: PermissionRules,
   pub ui: UiConfig,
   pub memory: MemoryConfig,
   pub synapse: SynapseConfig,
@@ -270,6 +321,7 @@ impl Default for Config {
       compact_at_tokens: 96_000,
       preserve_messages: 8,
       permissions: PermissionMode::Ask,
+      rules: PermissionRules::default(),
       ui: UiConfig::default(),
       memory: MemoryConfig::default(),
       synapse: SynapseConfig::default(),

@@ -148,6 +148,12 @@ pub fn builtins() -> Vec<SlashCommand> {
       "config",
     ),
     (
+      "rules",
+      "/rules",
+      "List the standing permission rules; /rules clear forgets them",
+      "config",
+    ),
+    (
       "inline",
       "/inline",
       "Toggle drawing in the terminal's own scroll instead of full screen",

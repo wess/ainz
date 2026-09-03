@@ -1,9 +1,10 @@
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use anyhow::{Result, bail};
+use serde_json::Value;
 
 use crate::{
-  config::PermissionMode,
+  config::{PermissionMode, PermissionRules},
   context::{estimate_tokens, transcript},
   control::{RunInbox, RunSignal},
   event::{Event, EventSink},
@@ -25,6 +26,8 @@ pub fn deny_all() -> Approver {
 pub struct RunOptions {
   pub instructions: String,
   pub permissions: PermissionMode,
+  // what may run without asking, whatever the mode
+  pub rules: PermissionRules,
   pub max_steps: usize,
   pub max_output_bytes: usize,
   pub context_tokens: usize,
@@ -299,10 +302,14 @@ impl<P: ChatProvider> Agent<P> {
       return (format!("unknown tool: {}", call.name), true);
     };
     let risk = tool.risk(&call.arguments);
-    let allowed = match options.permissions {
-      PermissionMode::Auto => true,
-      PermissionMode::ReadOnly => risk == Risk::Read,
-      PermissionMode::Ask => risk == Risk::Read || (self.approver)(call, risk).await,
+    // a standing rule answers before anyone is asked, in every mode: it is the same decision,
+    // made once already
+    let ruled = options.rules.decide(&call.name, subject(&call.arguments));
+    let allowed = match (ruled, options.permissions) {
+      (Some(decided), _) => decided,
+      (None, PermissionMode::Auto) => true,
+      (None, PermissionMode::ReadOnly) => risk == Risk::Read,
+      (None, PermissionMode::Ask) => risk == Risk::Read || (self.approver)(call, risk).await,
     };
     if !allowed {
       return (
@@ -321,6 +328,15 @@ impl<P: ChatProvider> Agent<P> {
       Err(error) => (format!("{error:#}"), true),
     }
   }
+}
+
+/// The part of a call a rule is written against: the command, the path, whatever names what
+/// the call acts on. The transcript labels a call with the same field.
+pub fn subject(arguments: &Value) -> Option<&str> {
+  const SUBJECT: [&str; 6] = ["command", "path", "file_path", "pattern", "url", "query"];
+  SUBJECT
+    .iter()
+    .find_map(|key| arguments.get(key).and_then(Value::as_str))
 }
 
 fn record_usage(session: &mut Session, usage: &Usage) {

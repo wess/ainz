@@ -390,7 +390,16 @@ async fn run_chat_inner(
   let events_tx = tx.clone();
   let events = EventSink::new(move |event| drop(events_tx.send(UiEvent::Agent(event))));
   let approval_tx = tx;
+  // the rules the session is running under, shared so that allowing something always takes
+  // effect for the rest of this run rather than the next one
+  let rules = Arc::new(std::sync::Mutex::new(config.rules.clone()));
+  let live = rules.clone();
   let approver: Approver = Arc::new(move |call, risk| {
+    if live.lock().is_ok_and(|rules| {
+      rules.decide(&call.name, ainz::agent::subject(&call.arguments)) == Some(true)
+    }) {
+      return Box::pin(async { true });
+    }
     let (reply, answer) = oneshot::channel();
     let sent = approval_tx
       .send(UiEvent::Approval(Approval {
@@ -624,6 +633,22 @@ async fn run_chat_inner(
           state.primary.entries.push(Entry::new(
             EntryKind::System,
             format!("allowed {} ({:?})", approval.call.name, approval.risk),
+          ));
+        }
+        // the same decision, kept: it applies to the rest of this run and every one after
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+          let rule = approval_rule(&approval);
+          let _ = approval.reply.send(true);
+          if let Ok(mut live) = rules.lock() {
+            live.allow.push(rule.clone());
+          }
+          config.rules.allow.push(rule.clone());
+          config.rules.allow.sort();
+          config.rules.allow.dedup();
+          config.save().await?;
+          state.primary.entries.push(Entry::new(
+            EntryKind::System,
+            format!("always allowing {rule}; /permissions rules lists them"),
           ));
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -971,6 +996,20 @@ async fn run_chat_inner(
             ));
             continue;
           }
+          CommandResult::ClearRules => {
+            config.rules.allow.clear();
+            config.rules.deny.clear();
+            if let Ok(mut live) = rules.lock() {
+              live.allow.clear();
+              live.deny.clear();
+            }
+            config.save().await?;
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              "standing rules cleared; every call asks again".into(),
+            ));
+            continue;
+          }
           CommandResult::SetInline(on) => {
             config.ui.inline = on;
             config.save().await?;
@@ -1100,6 +1139,7 @@ enum CommandResult {
   SetHeader(String),
   SetVim(bool),
   SetInline(bool),
+  ClearRules,
   Handled,
   Prompt {
     prompt: String,
@@ -1139,6 +1179,32 @@ fn command(
     }
     "/agents" => Ok(CommandResult::ShowAgents),
     "/vim" => Ok(CommandResult::SetVim(!config.ui.vim)),
+    "/permissions rules" | "/rules" => {
+      let listing = match (config.rules.allow.is_empty(), config.rules.deny.is_empty()) {
+        (true, true) => "no standing rules; press a at a permission prompt to add one".into(),
+        _ => {
+          let allow = config
+            .rules
+            .allow
+            .iter()
+            .map(|rule| format!("allow  {rule}"))
+            .collect::<Vec<_>>();
+          let deny = config
+            .rules
+            .deny
+            .iter()
+            .map(|rule| format!("deny   {rule}"))
+            .collect::<Vec<_>>();
+          [allow, deny].concat().join("\n")
+        }
+      };
+      state
+        .primary
+        .entries
+        .push(Entry::new(EntryKind::System, listing));
+      Ok(CommandResult::Handled)
+    }
+    "/rules clear" | "/permissions rules clear" => Ok(CommandResult::ClearRules),
     "/inline" => Ok(CommandResult::SetInline(!config.ui.inline)),
     "/header" => {
       state.primary.entries.push(Entry::new(
@@ -2016,6 +2082,13 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
 
 // what the call is actually doing, the way the coding agents put it: shell(git status).
 // the key order is what these tools name their subject, whichever harness sent the call
+fn approval_rule(approval: &Approval) -> String {
+  ainz::PermissionRules::rule_for(
+    &approval.call.name,
+    ainz::agent::subject(&approval.call.arguments),
+  )
+}
+
 fn contains(area: Rect, column: u16, row: u16) -> bool {
   area.width > 0
     && area.height > 0
@@ -2355,7 +2428,11 @@ fn render_approval(frame: &mut Frame, approval: &Approval) {
       ]),
       Line::styled(arguments, Style::default().fg(INK)),
       Line::raw(""),
-      Line::styled("y allow   n deny", Style::default().fg(ACCENT)),
+      Line::styled(
+        format!("a  always allow {}", approval_rule(approval)),
+        Style::default().fg(MUTED),
+      ),
+      Line::styled("y allow   a always   n deny", Style::default().fg(ACCENT)),
     ])
     .wrap(Wrap { trim: false })
     .block(

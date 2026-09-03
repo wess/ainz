@@ -27,8 +27,8 @@ mod workspace;
 
 pub use agent::{Agent, Approver, RunOptions, deny_all};
 pub use config::{
-  Config, MemoryBackend, MemoryConfig, PermissionMode, ProcessOutput, ProviderConfig, ProviderKind,
-  SynapseConfig,
+  Config, MemoryBackend, MemoryConfig, PermissionMode, PermissionRules, ProcessOutput,
+  ProviderConfig, ProviderKind, SynapseConfig,
 };
 pub use control::{RunController, RunInbox, run_control};
 pub use event::{Event, EventSink};
