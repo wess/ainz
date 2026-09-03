@@ -55,7 +55,7 @@ async fn provider_lists_http_models() {
     );
     socket.write_all(response.as_bytes()).await.unwrap();
   });
-  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None).unwrap();
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
 
   assert_eq!(provider.models().await.unwrap(), ["alpha", "zeta"]);
   server.await.unwrap();
@@ -82,7 +82,7 @@ async fn provider_assembles_streamed_text_and_usage() {
     );
     socket.write_all(response.as_bytes()).await.unwrap();
   });
-  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None).unwrap();
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
 
   let reply = provider
     .complete(
@@ -115,7 +115,7 @@ async fn provider_sends_multimodal_content_parts() {
     );
     socket.write_all(response.as_bytes()).await.unwrap();
   });
-  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None).unwrap();
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
   let message = Message::user(
     "inspect",
     vec![Image {
@@ -190,7 +190,7 @@ async fn provider_reassembles_multibyte_text_split_across_chunks() {
     socket.flush().await.unwrap();
     socket.write_all(&bytes[cuts[1]..]).await.unwrap();
   });
-  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None).unwrap();
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
 
   let reply = provider
     .complete(
@@ -316,4 +316,150 @@ async fn process_provider_reads_a_block_shaped_tool_result() {
     }
   }
   assert_eq!(outputs, ["Read\nfound it"]);
+}
+
+fn canned_response(status: &str, body: &str, extra_headers: &str) -> String {
+  format!(
+    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{}",
+    body.len(),
+    body,
+  )
+}
+
+// each response gets its own connection, since "Connection: close" is what pushes a retrying
+// client onto a fresh socket rather than reusing the one the failed attempt closed
+async fn serve_responses(listener: TcpListener, responses: Vec<String>) {
+  for response in responses {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = vec![0; 16 * 1024];
+    let _ = socket.read(&mut request).await.unwrap();
+    socket.write_all(response.as_bytes()).await.unwrap();
+  }
+}
+
+#[tokio::test]
+async fn provider_retries_after_a_429_then_succeeds() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let body = r#"{"choices":[{"message":{"content":"ok","tool_calls":[]}}]}"#;
+  let server = tokio::spawn(serve_responses(
+    listener,
+    vec![
+      canned_response("429 Too Many Requests", "slow down", ""),
+      canned_response("200 OK", body, ""),
+    ],
+  ));
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
+  let (events, mut received) = EventSink::channel();
+
+  let reply = provider
+    .complete(&[Message::text(Role::User, "hi")], &[], &events)
+    .await
+    .unwrap();
+
+  assert_eq!(reply.message.content.as_deref(), Some("ok"));
+  let mut notices = Vec::new();
+  while let Ok(event) = received.try_recv() {
+    if let ainz::Event::Error { message } = event {
+      notices.push(message);
+    }
+  }
+  assert_eq!(notices.len(), 1);
+  assert!(notices[0].contains("429"));
+  assert!(notices[0].contains("attempt 2 of 4"));
+  server.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_retries_after_a_500_then_succeeds() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let stream_body = concat!(
+    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\r\n\r\n",
+    "data: [DONE]\r\n\r\n",
+  );
+  let stream_response = format!(
+    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    stream_body.len(),
+    stream_body,
+  );
+  let server = tokio::spawn(serve_responses(
+    listener,
+    vec![
+      canned_response("500 Internal Server Error", "boom", ""),
+      stream_response,
+    ],
+  ));
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
+
+  let reply = provider
+    .complete(
+      &[Message::text(Role::User, "hi")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(reply.message.content.as_deref(), Some("ok"));
+  server.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_does_not_retry_a_client_error() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let server = tokio::spawn(serve_responses(
+    listener,
+    vec![canned_response("400 Bad Request", "bad request", "")],
+  ));
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
+
+  let start = std::time::Instant::now();
+  let error = provider
+    .complete(
+      &[Message::text(Role::User, "hi")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap_err();
+  let elapsed = start.elapsed();
+
+  assert!(format!("{error:#}").contains("400"));
+  // a retry would have waited at least the ~500ms base backoff; failing well under that
+  // confirms the non-retryable status short-circuited instead of being retried
+  assert!(elapsed < std::time::Duration::from_millis(300));
+  server.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_honours_retry_after_header() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let body = r#"{"choices":[{"message":{"content":"ok","tool_calls":[]}}]}"#;
+  let server = tokio::spawn(serve_responses(
+    listener,
+    vec![
+      canned_response("429 Too Many Requests", "slow down", "Retry-After: 1\r\n"),
+      canned_response("200 OK", body, ""),
+    ],
+  ));
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
+
+  let start = std::time::Instant::now();
+  let reply = provider
+    .complete(
+      &[Message::text(Role::User, "hi")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap();
+  let elapsed = start.elapsed();
+
+  assert_eq!(reply.message.content.as_deref(), Some("ok"));
+  assert!(elapsed >= std::time::Duration::from_millis(950));
+  assert!(elapsed < std::time::Duration::from_millis(2500));
+  server.await.unwrap();
 }

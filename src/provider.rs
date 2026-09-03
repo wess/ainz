@@ -1,9 +1,15 @@
-use std::{collections::BTreeMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+  collections::{BTreeMap, hash_map::RandomState},
+  hash::{BuildHasher, Hasher},
+  path::PathBuf,
+  process::Stdio,
+  time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::Client;
+use reqwest::{Client, StatusCode, header::RETRY_AFTER};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{
@@ -61,16 +67,66 @@ impl ChatProvider for RuntimeProvider {
   }
 }
 
+// retry only for transient conditions: an overloaded or momentarily unreachable upstream,
+// never a client error that sending the same request again cannot fix
+fn retryable_status(status: StatusCode) -> bool {
+  status == StatusCode::REQUEST_TIMEOUT
+    || status == StatusCode::TOO_MANY_REQUESTS
+    || status.is_server_error()
+}
+
+// Retry-After is sometimes an HTTP-date rather than a second count; that form is left alone
+// and the exponential backoff below is used instead of trying to parse it
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+  response
+    .headers()
+    .get(RETRY_AFTER)?
+    .to_str()
+    .ok()?
+    .trim()
+    .parse::<u64>()
+    .ok()
+    .map(Duration::from_secs)
+}
+
+// 500ms, 1s, 2s, 4s, capped at 8s, jittered by roughly a quarter so a pile of retrying clients
+// doesn't all wake up on the same tick; a fresh hasher's randomized keys are enough entropy for
+// that without pulling in a rand dependency
+fn backoff(attempt: usize) -> Duration {
+  let exponent = attempt.saturating_sub(1).min(4) as u32;
+  let base_ms = 500u64 << exponent;
+  let wobble = base_ms / 4;
+  let sample = RandomState::new().build_hasher().finish() % (wobble * 2 + 1);
+  Duration::from_millis(base_ms - wobble + sample)
+}
+
+fn format_wait(wait: Duration) -> String {
+  let millis = wait.as_millis();
+  if millis < 1000 {
+    format!("{millis}ms")
+  } else if millis.is_multiple_of(1000) {
+    format!("{}s", millis / 1000)
+  } else {
+    format!("{:.1}s", millis as f64 / 1000.0)
+  }
+}
+
 #[derive(Clone)]
 pub struct HttpProvider {
   client: Client,
   endpoint: String,
   model: String,
   api_key: Option<String>,
+  retries: usize,
 }
 
 impl HttpProvider {
-  pub fn new(endpoint: String, model: String, api_key: Option<String>) -> Result<Self> {
+  pub fn new(
+    endpoint: String,
+    model: String,
+    api_key: Option<String>,
+    retries: usize,
+  ) -> Result<Self> {
     // NB: no read timeout on purpose; a local model can sit for minutes before its first token
     let client = Client::builder()
       .connect_timeout(Duration::from_secs(15))
@@ -81,6 +137,7 @@ impl HttpProvider {
       endpoint: endpoint.trim_end_matches('/').into(),
       model,
       api_key,
+      retries,
     })
   }
 
@@ -95,18 +152,45 @@ impl HttpProvider {
       id: String,
     }
 
-    let mut request = self.client.get(format!("{}/models", self.endpoint));
-    if let Some(key) = &self.api_key {
-      request = request.bearer_auth(key);
-    }
-    let response = request.send().await.context("list provider models")?;
-    let status = response.status();
-    if !status.is_success() {
-      bail!(
-        "model discovery failed ({status}): {}",
-        response.text().await.unwrap_or_default()
-      );
-    }
+    let attempts = self.retries + 1;
+    let mut attempt = 0usize;
+    // discovery runs during setup, before an agent (and its event sink) exists, so a retry
+    // here has nothing to report through — only the eventual outcome is visible to the caller
+    let response = loop {
+      attempt += 1;
+      let mut request = self.client.get(format!("{}/models", self.endpoint));
+      if let Some(key) = &self.api_key {
+        request = request.bearer_auth(key);
+      }
+      let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+          if attempt < attempts {
+            tokio::time::sleep(backoff(attempt)).await;
+            continue;
+          }
+          return if attempt == 1 {
+            Err(error).context("list provider models")
+          } else {
+            Err(error).with_context(|| format!("list provider models after {attempts} attempts"))
+          };
+        }
+      };
+      let status = response.status();
+      if status.is_success() {
+        break response;
+      }
+      if retryable_status(status) && attempt < attempts {
+        let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
+        tokio::time::sleep(wait).await;
+        continue;
+      }
+      let text = response.text().await.unwrap_or_default();
+      if attempt == 1 {
+        bail!("model discovery failed ({status}): {text}");
+      }
+      bail!("model discovery failed ({status}) after {attempt} attempts: {text}");
+    };
     let mut models: Vec<_> = response
       .json::<ModelList>()
       .await
@@ -143,21 +227,63 @@ impl ChatProvider for HttpProvider {
         .collect();
       body["tool_choice"] = json!("auto");
     }
-    let mut request = self
-      .client
-      .post(format!("{}/chat/completions", self.endpoint))
-      .json(&body);
-    if let Some(key) = &self.api_key {
-      request = request.bearer_auth(key);
-    }
-    let response = request.send().await.context("send model request")?;
-    let status = response.status();
-    if !status.is_success() {
-      bail!(
-        "model request failed ({status}): {}",
-        response.text().await.unwrap_or_default()
-      );
-    }
+    let attempts = self.retries + 1;
+    let mut attempt = 0usize;
+    // retrying only covers getting a response with a success status: once the stream below
+    // starts handing text to `events`, a retry would replay output the caller already saw
+    let response = loop {
+      attempt += 1;
+      let mut request = self
+        .client
+        .post(format!("{}/chat/completions", self.endpoint))
+        .json(&body);
+      if let Some(key) = &self.api_key {
+        request = request.bearer_auth(key);
+      }
+      let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+          if attempt < attempts {
+            let wait = backoff(attempt);
+            events.emit(Event::Error {
+              message: format!(
+                "model request failed ({error}); retrying in {} (attempt {} of {attempts})",
+                format_wait(wait),
+                attempt + 1,
+              ),
+            });
+            tokio::time::sleep(wait).await;
+            continue;
+          }
+          return if attempt == 1 {
+            Err(error).context("send model request")
+          } else {
+            Err(error).with_context(|| format!("send model request after {attempts} attempts"))
+          };
+        }
+      };
+      let status = response.status();
+      if status.is_success() {
+        break response;
+      }
+      if retryable_status(status) && attempt < attempts {
+        let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
+        events.emit(Event::Error {
+          message: format!(
+            "model request failed ({status}); retrying in {} (attempt {} of {attempts})",
+            format_wait(wait),
+            attempt + 1,
+          ),
+        });
+        tokio::time::sleep(wait).await;
+        continue;
+      }
+      let text = response.text().await.unwrap_or_default();
+      if attempt == 1 {
+        bail!("model request failed ({status}): {text}");
+      }
+      bail!("model request failed ({status}) after {attempt} attempts: {text}");
+    };
 
     let streaming = response
       .headers()

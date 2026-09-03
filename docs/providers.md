@@ -66,6 +66,14 @@ a 15 second connect timeout and no read timeout, because a local model can take 
 its first token; cancel a stuck run with `Ctrl+C`. When no tools are offered, the request omits
 `tools` and `tool_choice`, which some compatible servers reject when empty.
 
+A connection failure, a 408 or 429, or a 5xx status is retried with exponential backoff (roughly
+500ms, 1s, 2s, 4s, capped at 8s, with jitter so concurrent runs don't retry in lockstep); a
+`Retry-After` header is honoured when it names a plain number of seconds. Any other 4xx fails the
+turn immediately, since retrying it would not change the answer. `provider_retries` in
+`config.toml` sets how many of these retries are made beyond the first try (default 3, so 4
+attempts total); a retry only ever happens before the response has produced any text, so a run
+already streaming an answer is never replayed.
+
 ## Custom process providers
 
 Process providers receive the full transcript on stdin. Ainz invokes the executable
