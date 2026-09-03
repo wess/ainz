@@ -2,11 +2,7 @@ use ainz::{TodoList, tool::ToolContext};
 use serde_json::json;
 
 fn context() -> ToolContext {
-  ToolContext {
-    workspace: std::env::temp_dir(),
-    session_id: uuid::Uuid::now_v7(),
-    max_output_bytes: 8192,
-  }
+  ToolContext::new(std::env::temp_dir(), uuid::Uuid::now_v7(), 8192)
 }
 
 #[test]

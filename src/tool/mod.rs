@@ -1,4 +1,5 @@
 mod builtin;
+mod fetch;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 

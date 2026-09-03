@@ -208,3 +208,27 @@ async fn the_shell_reports_output_while_the_command_is_still_running() {
   );
   assert!(output.contains("[exit 0]"), "{output}");
 }
+
+#[tokio::test]
+async fn fetch_refuses_what_is_not_the_web() {
+  let temp = tempfile::tempdir().unwrap();
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
+  let mut tools = ToolSet::default();
+  tools.extend(builtins()).unwrap();
+  let fetch = tools.get("fetch").unwrap().clone();
+
+  for url in [
+    "file:///etc/passwd",
+    "http://localhost:9/",
+    "http://169.254.169.254/latest/meta-data",
+  ] {
+    let error = fetch
+      .execute(&context, json!({ "url": url }))
+      .await
+      .unwrap_err();
+    assert!(
+      format!("{error:#}").contains("fetch"),
+      "{url} was not refused: {error:#}"
+    );
+  }
+}

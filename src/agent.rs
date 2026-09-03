@@ -165,6 +165,7 @@ impl<P: ChatProvider> Agent<P> {
       };
       total.input_tokens += reply.usage.input_tokens;
       total.output_tokens += reply.usage.output_tokens;
+      total.cost_usd = add_cost(total.cost_usd, reply.usage.cost_usd);
       let final_text = reply.message.content.clone().unwrap_or_default();
       let calls = reply.message.tool_calls.clone();
       session.append(reply.message);
@@ -276,6 +277,7 @@ impl<P: ChatProvider> Agent<P> {
       .await?;
     total.input_tokens += reply.usage.input_tokens;
     total.output_tokens += reply.usage.output_tokens;
+    total.cost_usd = add_cost(total.cost_usd, reply.usage.cost_usd);
     let summary = reply.message.content.unwrap_or_default();
     if summary.trim().is_empty() {
       bail!("context compaction returned an empty summary");
@@ -342,4 +344,13 @@ pub fn subject(arguments: &Value) -> Option<&str> {
 fn record_usage(session: &mut Session, usage: &Usage) {
   session.usage.input_tokens += usage.input_tokens;
   session.usage.output_tokens += usage.output_tokens;
+  session.usage.cost_usd = add_cost(session.usage.cost_usd, usage.cost_usd);
+}
+
+// a cost nobody reported is not zero, it is unknown, so it stays None until one is
+fn add_cost(total: Option<f64>, next: Option<f64>) -> Option<f64> {
+  match (total, next) {
+    (Some(total), Some(next)) => Some(total + next),
+    (total, next) => total.or(next),
+  }
 }

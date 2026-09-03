@@ -19,6 +19,7 @@ pub fn builtins() -> Vec<Arc<dyn Tool>> {
   ["read", "list", "search", "write", "edit", "shell"]
     .into_iter()
     .map(|name| Arc::new(Builtin { name }) as Arc<dyn Tool>)
+    .chain([super::fetch::tool()])
     .collect()
 }
 
