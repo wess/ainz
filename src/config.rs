@@ -168,6 +168,17 @@ impl Default for UiConfig {
   }
 }
 
+// one entry under [hooks.EVENT]: an argv run without a shell, optionally gated to tool calls
+// whose name matches. #[serde(default)] so a hook block missing a field (an old config, or one
+// written by hand) still loads instead of failing the whole file.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HookDef {
+  pub command: Vec<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub matcher: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProviderConfig {
   pub kind: ProviderKind,
@@ -305,6 +316,8 @@ pub struct Config {
   pub ui: UiConfig,
   pub memory: MemoryConfig,
   pub synapse: SynapseConfig,
+  // keyed by event name (session_start, pre_tool, post_tool, session_end); see src/hook.rs
+  pub hooks: BTreeMap<String, Vec<HookDef>>,
   #[serde(skip)]
   pub mcp_config: Option<PathBuf>,
   // set for one session by --yeet or /yeet; never written to the file, because running wide
@@ -332,6 +345,7 @@ impl Default for Config {
       ui: UiConfig::default(),
       memory: MemoryConfig::default(),
       synapse: SynapseConfig::default(),
+      hooks: BTreeMap::new(),
       mcp_config: None,
       yeet: false,
     }
