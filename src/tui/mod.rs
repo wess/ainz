@@ -134,7 +134,7 @@ async fn discover_models(
   provider: &ProviderConfig,
   endpoint: String,
 ) -> Result<Vec<String>> {
-  let key = config.api_key_for(provider)?;
+  let key = config.api_key_for(provider).await?;
   HttpProvider::new(endpoint, String::new(), key, config.provider_retries)?
     .models()
     .await
