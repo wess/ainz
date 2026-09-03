@@ -98,7 +98,37 @@ struct Entry {
   text: String,
   // the whole of what a tool returned, kept for ctrl+o rather than shown by default
   detail: Option<String>,
+  // set for a tool call, which is drawn as a command rather than as somebody speaking
+  tool: Option<ToolLine>,
   at: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolState {
+  Running,
+  Done,
+  Failed,
+}
+
+impl ToolState {
+  fn glyph(self) -> (&'static str, Color) {
+    match self {
+      Self::Running => ("▸", YELLOW),
+      Self::Done => ("▪", ACTIVE),
+      Self::Failed => ("✗", RED),
+    }
+  }
+}
+
+/// A call as the transcript shows it: what ran, what it ran on, how it went, and the last
+/// line it wrote while it was still going.
+struct ToolLine {
+  name: String,
+  subject: String,
+  state: ToolState,
+  note: String,
+  live: String,
+  started: Instant,
 }
 
 impl Entry {
@@ -107,14 +137,22 @@ impl Entry {
       kind,
       text,
       detail: None,
+      tool: None,
       at: clock(),
     }
   }
 
-  fn with_detail(kind: EntryKind, text: String, detail: String) -> Self {
+  fn call(name: String, subject: String) -> Self {
     Self {
-      detail: (!detail.trim().is_empty()).then_some(detail),
-      ..Self::new(kind, text)
+      tool: Some(ToolLine {
+        name,
+        subject,
+        state: ToolState::Running,
+        note: String::new(),
+        live: String::new(),
+        started: Instant::now(),
+      }),
+      ..Self::new(EntryKind::Tool, String::new())
     }
   }
 }
@@ -183,6 +221,7 @@ struct ChatState {
   // an image pasted or dropped in, waiting for the message it belongs to
   pending_image: Option<PathBuf>,
   files: Vec<String>,
+  workspace: PathBuf,
   // how much of the transcript has already been handed to the terminal's scrollback
   flushed: usize,
   inline: bool,
@@ -212,6 +251,7 @@ impl Default for ChatState {
       pending_delete: false,
       pending_image: None,
       files: Vec::new(),
+      workspace: PathBuf::new(),
       flushed: 0,
       inline: false,
     }
@@ -219,6 +259,18 @@ impl Default for ChatState {
 }
 
 impl ChatState {
+  /// A path under the workspace, named by the part that is not the workspace.
+  fn relative(&self, subject: &str) -> String {
+    let root = self.workspace.to_string_lossy();
+    match subject
+      .strip_prefix(root.as_ref())
+      .map(|rest| rest.trim_start_matches('/'))
+    {
+      Some(rest) if !rest.is_empty() => rest.to_string(),
+      _ => subject.to_string(),
+    }
+  }
+
   fn busy(&self) -> bool {
     self.started.is_some()
   }
@@ -504,6 +556,7 @@ async fn run_chat_inner(
     input: Input::with_history(history),
     inline,
     files,
+    workspace: workspace.clone(),
     primary: AgentView {
       entries: session_entries(session.as_ref().unwrap()),
       usage: session.as_ref().unwrap().usage.clone(),
@@ -1527,20 +1580,22 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       view.entries[index].text.push_str(&text);
     }
     Event::ToolStart { call } => {
+      state
+        .view_mut(session_id)
+        .tools
+        .insert(call.id.clone(), call.name.clone());
+      let subject = tool_subject(&call.name, &call.arguments);
+      let subject = fit_subject(&state.relative(&subject));
       let view = state.view_mut(session_id);
-      view.tools.insert(call.id.clone(), call.name.clone());
-      let label = tool_label(&call.name, &call.arguments);
-      view
-        .entries
-        .push(Entry::new(EntryKind::Tool, label.clone()));
+      view.entries.push(Entry::call(call.name.clone(), subject));
       view
         .live
-        .insert(call.id.clone(), (view.entries.len() - 1, label));
+        .insert(call.id.clone(), (view.entries.len() - 1, call.name.clone()));
     }
     // the last line a running tool wrote, under the call that is writing it
     Event::ToolDelta { id, text } => {
       let view = state.view_mut(session_id);
-      let Some((index, label)) = view.live.get(&id).cloned() else {
+      let Some((index, _)) = view.live.get(&id).cloned() else {
         return;
       };
       let Some(entry) = view.entries.get_mut(index) else {
@@ -1555,30 +1610,35 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         .rfind(|line| !line.trim().is_empty())
         .unwrap_or_default()
         .to_string();
-      entry.text = match last.is_empty() {
-        true => label,
-        false => format!("{label}\n  {}", clip(&last, 160)),
-      };
+      if let Some(tool) = entry.tool.as_mut() {
+        tool.live = clip(&last, 160);
+      }
     }
     Event::ToolEnd { id, output, error } => {
       let view = state.view_mut(session_id);
-      // the live line goes when the result arrives; the label it belonged to stays
-      if let Some((index, label)) = view.live.remove(&id)
-        && let Some(entry) = view.entries.get_mut(index)
-      {
-        entry.text = label;
+      view.tools.remove(&id);
+      // the result belongs to the call that asked for it, not to a second line further down
+      let Some((index, _)) = view.live.remove(&id) else {
+        return;
+      };
+      let Some(entry) = view.entries.get_mut(index) else {
+        return;
+      };
+      if entry.detail.is_none() && !output.trim().is_empty() {
+        entry.detail = Some(output.clone());
       }
-      if let Some(name) = view.tools.remove(&id) {
-        view.entries.push(Entry::with_detail(
-          if error {
-            EntryKind::Error
-          } else {
-            EntryKind::Tool
-          },
-          tool_result(&name, &output, error),
-          output,
-        ));
+      if let Some(tool) = entry.tool.as_mut() {
+        tool.state = match error {
+          true => ToolState::Failed,
+          false => ToolState::Done,
+        };
+        tool.live.clear();
+        tool.note = tool_note(&output, error, tool.started.elapsed());
       }
+      entry.kind = match error {
+        true => EntryKind::Error,
+        false => EntryKind::Tool,
+      };
     }
     Event::SubagentStart {
       session_id, name, ..
@@ -1934,6 +1994,14 @@ fn selected_header(preference: &str, catalog: &HeaderCatalog) -> (usize, Option<
 }
 
 fn entry_lines(entry: &Entry, expanded: bool) -> Vec<Line<'static>> {
+  match &entry.tool {
+    Some(tool) => call_lines(entry, tool, expanded),
+    None => said_lines(entry),
+  }
+}
+
+/// Somebody speaking: the time, who, and what they said.
+fn said_lines(entry: &Entry) -> Vec<Line<'static>> {
   let (nick, color) = match entry.kind {
     EntryKind::User => ("you", CYAN),
     EntryKind::Assistant => ("Ainz", ACTIVE),
@@ -1941,11 +2009,10 @@ fn entry_lines(entry: &Entry, expanded: bool) -> Vec<Line<'static>> {
     EntryKind::Tool => ("tool", MAGENTA),
     EntryKind::Error => ("error", RED),
   };
-  let body = match (&entry.detail, expanded) {
-    (Some(detail), true) => detail.as_str(),
-    _ => entry.text.as_str(),
-  };
-  body
+  // the continuation sits under the text, whatever width the nick took
+  let indent = " ".repeat(entry.at.chars().count() + nick.chars().count() + 5);
+  entry
+    .text
     .lines()
     .enumerate()
     .map(|(index, text)| {
@@ -1960,12 +2027,72 @@ fn entry_lines(entry: &Entry, expanded: bool) -> Vec<Line<'static>> {
         ])
       } else {
         Line::from(vec![
-          Span::raw("              "),
+          Span::raw(indent.clone()),
           Span::styled(text.to_string(), Style::default().fg(INK)),
         ])
       }
     })
     .collect()
+}
+
+/// A tool call, drawn as the command line it is: a mark for how it went, what ran, what it ran
+/// on, and what it wrote underneath.
+fn call_lines(entry: &Entry, tool: &ToolLine, expanded: bool) -> Vec<Line<'static>> {
+  let (glyph, color) = tool.state.glyph();
+  let mut head = vec![
+    Span::styled(format!(" {}  ", entry.at), Style::default().fg(MUTED)),
+    Span::styled(
+      format!("{glyph} "),
+      Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ),
+    Span::styled(
+      format!("{:<8}", clip(&tool.name, 8)),
+      Style::default().fg(MAGENTA).add_modifier(Modifier::BOLD),
+    ),
+    Span::styled(tool.subject.clone(), Style::default().fg(INK)),
+  ];
+  if !tool.note.is_empty() {
+    head.push(Span::styled(
+      format!(" · {}", tool.note),
+      Style::default().fg(MUTED),
+    ));
+  }
+  let indent = " ".repeat(entry.at.chars().count() + 12);
+  let mut lines = vec![Line::from(head)];
+  // while it runs, the last line it wrote; once it is over, the first few, or all of them
+  let body: Vec<String> = match (&tool.live, &entry.detail, expanded) {
+    (live, _, _) if !live.is_empty() => vec![live.clone()],
+    (_, Some(detail), true) => detail.lines().map(str::to_string).collect(),
+    // one line of output is already in the note beside the call
+    (_, Some(detail), false)
+      if detail
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        > 1 =>
+    {
+      preview(detail)
+    }
+    (_, Some(_), false) => Vec::new(),
+    _ => Vec::new(),
+  };
+  for line in body {
+    lines.push(Line::from(vec![
+      Span::raw(indent.clone()),
+      Span::styled(clip(&line, 160), Style::default().fg(MUTED)),
+    ]));
+  }
+  lines
+}
+
+/// The first few lines of what a call wrote, and a count of what is not shown.
+fn preview(detail: &str) -> Vec<String> {
+  let mut lines = detail.lines().filter(|line| !line.trim().is_empty());
+  let shown: Vec<String> = lines.by_ref().take(3).map(str::to_string).collect();
+  match lines.count() {
+    0 => shown,
+    rest => [shown, vec![format!("… +{rest} lines")]].concat(),
+  }
 }
 
 fn render_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
@@ -2281,7 +2408,9 @@ fn vim_key(state: &mut ChatState, code: KeyCode) -> bool {
   true
 }
 
-fn tool_label(name: &str, arguments: &serde_json::Value) -> String {
+/// What the call acts on, as it would be written on a command line. The key order is what
+/// these tools name their subject, whichever harness sent the call.
+fn tool_subject(name: &str, arguments: &serde_json::Value) -> String {
   const SUBJECT: [&str; 12] = [
     "name",
     "tool",
@@ -2296,6 +2425,7 @@ fn tool_label(name: &str, arguments: &serde_json::Value) -> String {
     "task",
     "prompt",
   ];
+  let _ = name;
   let subject = SUBJECT.iter().find_map(|key| {
     arguments
       .get(key)
@@ -2303,13 +2433,15 @@ fn tool_label(name: &str, arguments: &serde_json::Value) -> String {
       .map(str::trim)
       .filter(|value| !value.is_empty())
   });
-  match subject {
-    // a path is identified by its end, so an overlong one keeps its tail rather than its root
-    Some(subject) if subject.contains('/') && !subject.contains(char::is_whitespace) => {
-      format!("{name}({})", clip_start(subject, 72))
-    }
-    Some(subject) => format!("{name}({})", clip(subject, 72)),
-    None => name.to_string(),
+  subject.map(str::to_string).unwrap_or_default()
+}
+
+/// The subject as it fits on one line: a path is identified by its end, so an overlong one
+/// keeps its tail rather than its root.
+fn fit_subject(subject: &str) -> String {
+  match subject.contains('/') && !subject.contains(char::is_whitespace) {
+    true => clip_start(subject, 72),
+    false => clip(subject, 72),
   }
 }
 
@@ -2324,25 +2456,31 @@ fn clip_start(text: &str, width: usize) -> String {
     .collect()
 }
 
-/// The first few lines of what a tool actually returned, under the call that asked for it.
-fn tool_result(name: &str, output: &str, error: bool) -> String {
-  let mut lines = output.lines().filter(|line| !line.trim().is_empty());
-  let preview: Vec<_> = lines.by_ref().take(3).map(|line| clip(line, 160)).collect();
-  let rest = lines.count();
-  let mut text = match (preview.first(), error) {
-    (None, _) => return format!("⎿ {name} {}", if error { "failed" } else { "done" }),
-    // an error says which tool failed, since the failure is the part worth reading
-    (Some(first), true) => format!("⎿ {name} failed: {first}"),
-    (Some(first), false) => format!("⎿ {first}"),
+/// What the call cost, once it is over: how long it took, and how much it wrote or why it did
+/// not. That is the part worth reading when the output itself is not.
+fn tool_note(output: &str, error: bool, took: Duration) -> String {
+  let seconds = took.as_secs_f64();
+  let spent = match seconds {
+    seconds if seconds < 1.0 => format!("{}ms", took.as_millis()),
+    seconds if seconds < 60.0 => format!("{seconds:.1}s"),
+    seconds => elapsed(seconds as u64),
   };
-  for line in preview.iter().skip(1) {
-    text.push_str("\n  ");
-    text.push_str(line);
+  if error {
+    let first = output
+      .lines()
+      .find(|line| !line.trim().is_empty())
+      .unwrap_or("failed");
+    return format!("{spent} · {}", clip(first, 80));
   }
-  if rest > 0 {
-    text.push_str(&format!("\n  … +{rest} lines"));
+  match output
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .count()
+  {
+    0 => spent,
+    1 => format!("{spent} · {}", clip(output.trim(), 80)),
+    lines => format!("{spent} · {lines} lines"),
   }
-  text
 }
 
 fn clip(text: &str, width: usize) -> String {
@@ -2558,30 +2696,87 @@ fn clock() -> String {
 mod tests {
   use serde_json::json;
 
-  use super::{Entry, EntryKind, entry_lines, file_fragment, tool_label, tool_result};
+  use super::{Duration, Entry, entry_lines, file_fragment, fit_subject, tool_note, tool_subject};
 
   #[test]
-  fn a_call_is_labelled_by_what_it_acts_on() {
+  fn a_call_reads_as_the_command_it_is() {
     assert_eq!(
-      tool_label("shell", &json!({"command": "git status --short"})),
-      "shell(git status --short)"
+      tool_subject("shell", &json!({"command": "git status --short"})),
+      "git status --short"
     );
     assert_eq!(
-      tool_label("Read", &json!({"file_path": "/tmp/notes.md"})),
-      "Read(/tmp/notes.md)"
+      tool_subject("Read", &json!({"file_path": "/tmp/notes.md"})),
+      "/tmp/notes.md"
     );
-    // nothing recognisable to name, so the tool stands alone rather than showing raw JSON
-    assert_eq!(tool_label("TodoWrite", &json!({"todos": []})), "TodoWrite");
+    // nothing recognisable to name, so the line is the tool alone rather than raw JSON
+    assert_eq!(tool_subject("TodoWrite", &json!({"todos": []})), "");
   }
 
   #[test]
   fn a_long_path_keeps_the_end_that_names_the_file() {
     let path = format!("/{}/notes.md", "deep".repeat(30));
 
-    let label = tool_label("Read", &json!({ "file_path": path }));
+    let subject = fit_subject(&tool_subject("Read", &json!({ "file_path": path })));
 
-    assert!(label.ends_with("deepdeep/notes.md)"), "{label}");
-    assert!(label.starts_with("Read(…"), "{label}");
+    assert!(subject.ends_with("deepdeep/notes.md"), "{subject}");
+    assert!(subject.starts_with('…'), "{subject}");
+  }
+
+  #[test]
+  fn what_a_call_cost_is_what_the_line_carries() {
+    let quick = Duration::from_millis(120);
+    assert_eq!(tool_note("", false, quick), "120ms");
+    assert_eq!(tool_note("only this", false, quick), "120ms · only this");
+    assert_eq!(
+      tool_note("one\ntwo\nthree", false, Duration::from_secs_f64(2.5)),
+      "2.5s · 3 lines"
+    );
+    // a failure says why, since that is the part worth reading
+    assert_eq!(
+      tool_note("no such file", true, quick),
+      "120ms · no such file"
+    );
+  }
+
+  #[test]
+  fn a_finished_call_shows_a_few_lines_and_counts_the_rest() {
+    let output = (1..=6).map(|n| format!("line {n}")).collect::<Vec<_>>();
+    let mut entry = Entry::call("shell".into(), "seq 6".into());
+    entry.detail = Some(output.join("\n"));
+
+    let collapsed = rendered(&entry, false);
+    assert!(
+      collapsed.contains("line 1") && collapsed.contains("… +3 lines"),
+      "{collapsed}"
+    );
+    assert!(!collapsed.contains("line 5"), "{collapsed}");
+
+    // ctrl+o opens the whole of it
+    let expanded = rendered(&entry, true);
+    assert!(expanded.contains("line 6"), "{expanded}");
+  }
+
+  #[test]
+  fn a_running_call_shows_the_last_line_it_wrote() {
+    let mut entry = Entry::call("shell".into(), "cargo build".into());
+    entry.detail = Some("Compiling ainz\nCompiling serde\n".into());
+    if let Some(tool) = entry.tool.as_mut() {
+      tool.live = "Compiling serde".into();
+    }
+
+    let text = rendered(&entry, false);
+
+    assert!(text.contains("▸"), "{text}");
+    assert!(text.contains("Compiling serde"), "{text}");
+    // the earlier lines wait for ctrl+o rather than crowding the line
+    assert!(!text.contains("Compiling ainz"), "{text}");
+  }
+
+  fn rendered(entry: &Entry, expanded: bool) -> String {
+    entry_lines(entry, expanded)
+      .iter()
+      .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+      .collect()
   }
 
   #[test]
@@ -2595,47 +2790,5 @@ mod tests {
     assert_eq!(file_fragment("mail me@wess.io", 15), None);
     // and neither is a finished word
     assert_eq!(file_fragment("@src/main.rs now", 16), None);
-  }
-
-  #[test]
-  fn a_result_shows_the_first_lines_and_counts_the_rest() {
-    let output = (1..=6).map(|n| format!("line {n}")).collect::<Vec<_>>();
-
-    let text = tool_result("shell", &output.join("\n"), false);
-
-    assert_eq!(text, "⎿ line 1\n  line 2\n  line 3\n  … +3 lines");
-  }
-
-  #[test]
-  fn ctrl_o_shows_what_a_tool_returned_in_full() {
-    let entry = Entry::with_detail(
-      EntryKind::Tool,
-      tool_result("shell", "one\ntwo\nthree\nfour", false),
-      "one\ntwo\nthree\nfour".into(),
-    );
-
-    // collapsed: the three-line preview and the count of the rest
-    assert_eq!(entry_lines(&entry, false).len(), 4);
-    // expanded: every line the tool actually wrote
-    assert_eq!(entry_lines(&entry, true).len(), 4);
-    let expanded = entry_lines(&entry, true)
-      .iter()
-      .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
-      .collect::<String>();
-    assert!(expanded.contains("four"), "{expanded}");
-    let collapsed = entry_lines(&entry, false)
-      .iter()
-      .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
-      .collect::<String>();
-    assert!(collapsed.contains("+1 lines"), "{collapsed}");
-  }
-
-  #[test]
-  fn a_failure_names_the_tool_that_failed() {
-    assert_eq!(
-      tool_result("edit", "no such file", true),
-      "⎿ edit failed: no such file"
-    );
-    assert_eq!(tool_result("write", "", false), "⎿ write done");
   }
 }

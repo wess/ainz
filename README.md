@@ -171,8 +171,18 @@ command — and takes three answers: `y` allows it once, `n` refuses, and `a` ke
 after. `/rules` lists them, `/rules clear` forgets them, and they live in the config where a
 headless run reads the same ones. Deny beats allow.
 
-A long command reports itself while it runs rather than after: the call in the transcript grows
-a line showing the last thing it wrote, and `Ctrl+O` opens the whole of it. A run of more than
+A tool call is drawn as the command line it is — a mark for how it went, what ran, what it ran
+on, and what it cost — rather than as a function call somebody spoke:
+
+```
+ 15:31  ▸ shell   cargo build --release
+            Compiling ainz v0.8.0
+ 15:31  ▪ shell   cargo build --release · 41.2s · 12 lines
+ 15:32  ✗ edit    src/main.rs · 8ms · no such file
+```
+
+A long command reports itself while it runs rather than after: the call grows a line showing the
+last thing it wrote, and `Ctrl+O` opens the whole of it. A run of more than
 ten seconds rings the terminal when it finishes. An image pasted or dragged into the prompt
 attaches to the next message.
 
