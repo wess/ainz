@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use ainz::{
-  Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
-  PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
-  ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
-  SubagentRegistry, SubagentRequest, SubagentResult,
+  Agent, Approver, Config, Event, EventSink, HookRunner, HttpProvider, JobStore, McpHub,
+  McpProfile, PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog,
+  ProviderConfig, ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog,
+  SubagentHandler, SubagentRegistry, SubagentRequest, SubagentResult,
   agent::Approval,
   config::MemoryBackend,
   deny_all, instruction,
@@ -214,6 +214,7 @@ pub(crate) async fn make_agent_with(
        and is not written down yet, call memory remember now, then carry on."
         .to_string()
     }),
+    hooks: HookRunner::new(config.hooks.clone()),
   };
   let child_provider = provider.clone();
   let child_tools = tools.clone();

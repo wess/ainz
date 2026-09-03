@@ -7,6 +7,7 @@ use crate::{
   context::{estimate_tokens, transcript},
   control::{RunInbox, RunSignal},
   event::{Event, EventSink},
+  hook::HookRunner,
   protocol::{Image, Message, Role, ToolCall, Usage},
   provider::ChatProvider,
   session::Session,
@@ -32,6 +33,8 @@ pub struct RunOptions {
   pub preserve_messages: usize,
   // asked of the model once a compaction has archived messages, when memory is on
   pub memory_nudge: Option<String>,
+  // empty by default, so a session with no [hooks] configured spawns nothing
+  pub hooks: HookRunner,
 }
 
 pub struct Agent<P> {
@@ -112,7 +115,37 @@ impl<P: ChatProvider> Agent<P> {
       .await
   }
 
+  // fires session_start and session_end around a single run; split from run_turn so those two
+  // hooks fire exactly once no matter which of run_turn's several return paths (success,
+  // cancellation, step limit, an estimate over budget) is taken
   async fn run_message(
+    &self,
+    session: &mut Session,
+    prompt: Message,
+    options: RunOptions,
+    inbox: Option<&mut RunInbox>,
+  ) -> Result<String> {
+    if session.nodes.is_empty() {
+      options
+        .hooks
+        .session_start(&self.workspace, session.id, &self.events)
+        .await;
+    }
+    let result = self.run_turn(session, prompt, options.clone(), inbox).await;
+    options
+      .hooks
+      .session_end(
+        &self.workspace,
+        session.id,
+        result.as_ref().ok().map(String::as_str),
+        result.is_err(),
+        &self.events,
+      )
+      .await;
+    result
+  }
+
+  async fn run_turn(
     &self,
     session: &mut Session,
     prompt: Message,
@@ -310,15 +343,37 @@ impl<P: ChatProvider> Agent<P> {
         true,
       );
     }
+    // a call refused above never reaches this, so a pre_tool hook only ever sees work that
+    // was already going to run
+    if let Err(reason) = options
+      .hooks
+      .pre_tool(&self.workspace, session_id, call, &self.events)
+      .await
+    {
+      return (reason, true);
+    }
     let context = ToolContext {
       workspace: self.workspace.clone(),
       session_id,
       max_output_bytes: options.max_output_bytes,
     };
-    match tool.execute(&context, call.arguments.clone()).await {
+    let (output, error) = match tool.execute(&context, call.arguments.clone()).await {
       Ok(output) => (output, false),
       Err(error) => (format!("{error:#}"), true),
-    }
+    };
+    // post_tool only ever reports; the call already happened and its outcome is fixed
+    options
+      .hooks
+      .post_tool(
+        &self.workspace,
+        session_id,
+        call,
+        &output,
+        error,
+        &self.events,
+      )
+      .await;
+    (output, error)
   }
 }
 

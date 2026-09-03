@@ -6,6 +6,7 @@ pub mod control;
 pub mod event;
 mod frontmatter;
 pub mod header;
+pub mod hook;
 pub mod import;
 pub mod instruction;
 pub mod job;
@@ -27,12 +28,13 @@ mod workspace;
 
 pub use agent::{Agent, Approver, RunOptions, deny_all};
 pub use config::{
-  Config, MemoryBackend, MemoryConfig, PermissionMode, ProcessOutput, ProviderConfig, ProviderKind,
-  SynapseConfig,
+  Config, HookDef, MemoryBackend, MemoryConfig, PermissionMode, ProcessOutput, ProviderConfig,
+  ProviderKind, SynapseConfig,
 };
 pub use control::{RunController, RunInbox, run_control};
 pub use event::{Event, EventSink};
 pub use header::{HeaderArt, HeaderCatalog};
+pub use hook::{HookEvent, HookRunner};
 pub use import::{Candidate, ImportKind};
 pub use job::JobStore;
 pub use learn::{LocalSkills, Teacher};
