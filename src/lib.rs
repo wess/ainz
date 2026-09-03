@@ -22,6 +22,7 @@ pub mod skill;
 mod sse;
 pub mod subagent;
 pub mod synapse;
+pub mod todo;
 pub mod tool;
 mod workspace;
 
@@ -47,3 +48,4 @@ pub use subagent::{
   SubagentHandler, SubagentRegistry, SubagentRequest, SubagentResult, subagent_tool,
 };
 pub use synapse::Synapse;
+pub use todo::TodoList;
