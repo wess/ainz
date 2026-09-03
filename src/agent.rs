@@ -314,6 +314,7 @@ impl<P: ChatProvider> Agent<P> {
       workspace: self.workspace.clone(),
       session_id,
       max_output_bytes: options.max_output_bytes,
+      progress: Some((self.events.clone(), call.id.clone())),
     };
     match tool.execute(&context, call.arguments.clone()).await {
       Ok(output) => (output, false),

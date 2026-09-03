@@ -17,6 +17,11 @@ pub enum Event {
   ToolStart {
     call: ToolCall,
   },
+  // what a tool has written so far, so a long command is visible while it runs
+  ToolDelta {
+    id: String,
+    text: String,
+  },
   ToolEnd {
     id: String,
     output: String,

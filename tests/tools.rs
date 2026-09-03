@@ -4,11 +4,7 @@ use serde_json::json;
 #[tokio::test]
 async fn builtins_edit_inside_the_workspace() {
   let temp = tempfile::tempdir().unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 1024,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
   let mut tools = ToolSet::default();
   tools.extend(builtins()).unwrap();
 
@@ -60,11 +56,7 @@ async fn builtins_reject_symlinks_that_escape_the_workspace() {
     .await
     .unwrap();
   symlink(outside.path(), workspace.path().join("escape")).unwrap();
-  let context = ToolContext {
-    workspace: workspace.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 1024,
-  };
+  let context = ToolContext::new(workspace.path().into(), uuid::Uuid::nil(), 1024);
   let tools = builtins();
   let read = tools
     .iter()
@@ -89,11 +81,7 @@ async fn builtins_reject_symlinks_that_escape_the_workspace() {
 #[tokio::test]
 async fn builtins_reject_paths_outside_the_workspace() {
   let temp = tempfile::tempdir().unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 1024,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
   let mut tools = ToolSet::default();
   tools.extend(builtins()).unwrap();
   let error = tools
@@ -119,11 +107,7 @@ async fn search_treats_a_leading_dash_as_pattern_text() {
   tokio::fs::write(temp.path().join("notes.txt"), "keep --pre out of flags\n")
     .await
     .unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 1024,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
   let mut tools = ToolSet::default();
   tools.extend(builtins()).unwrap();
   let output = tools
@@ -138,11 +122,7 @@ async fn search_treats_a_leading_dash_as_pattern_text() {
 #[tokio::test]
 async fn shell_timeout_takes_the_whole_process_tree_down() {
   let temp = tempfile::tempdir().unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 1024,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
   let mut tools = ToolSet::default();
   tools.extend(builtins()).unwrap();
   let marker = temp.path().join("marker");
@@ -167,11 +147,7 @@ async fn read_returns_the_requested_window_of_lines() {
   tokio::fs::write(temp.path().join("big.txt"), text)
     .await
     .unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
   let mut tools = ToolSet::default();
   tools.extend(builtins()).unwrap();
   let output = tools
@@ -184,4 +160,51 @@ async fn read_returns_the_requested_window_of_lines() {
     .await
     .unwrap();
   assert_eq!(output, "line 10\nline 11\nline 12");
+}
+
+#[tokio::test]
+async fn the_shell_reports_output_while_the_command_is_still_running() {
+  let temp = tempfile::tempdir().unwrap();
+  let (events, mut received) = ainz::EventSink::channel();
+  let mut context = ToolContext::new(temp.path().to_path_buf(), uuid::Uuid::nil(), 8192);
+  context.progress = Some((events, "call-1".into()));
+  let tool = builtins()
+    .into_iter()
+    .find(|tool| tool.spec().name == "shell")
+    .unwrap();
+
+  let run = tokio::spawn(async move {
+    tool
+      .execute(
+        &context,
+        json!({"command": "echo first; sleep 0.4; echo second"}),
+      )
+      .await
+      .unwrap()
+  });
+
+  // the first line has to arrive before the command that writes the second one is done
+  let first = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    loop {
+      match received.recv().await {
+        Some(ainz::Event::ToolDelta { id, text }) => {
+          assert_eq!(id, "call-1");
+          return text;
+        }
+        Some(_) => continue,
+        None => panic!("the sink closed before a delta arrived"),
+      }
+    }
+  })
+  .await
+  .expect("no delta while the command was running");
+  assert_eq!(first.trim(), "first");
+  assert!(!run.is_finished(), "the command had already finished");
+
+  let output = run.await.unwrap();
+  assert!(
+    output.contains("first") && output.contains("second"),
+    "{output}"
+  );
+  assert!(output.contains("[exit 0]"), "{output}");
 }

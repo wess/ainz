@@ -65,11 +65,7 @@ async fn plugins_require_content_pinned_approval() {
     .unwrap();
   let output = tool
     .execute(
-      &ToolContext {
-        workspace: temp.path().into(),
-        session_id: uuid::Uuid::nil(),
-        max_output_bytes: 1024,
-      },
+      &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
       json!({"message": "hello"}),
     )
     .await
@@ -266,11 +262,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .unwrap();
   let output = tool
     .execute(
-      &ToolContext {
-        workspace: temp.path().into(),
-        session_id: uuid::Uuid::nil(),
-        max_output_bytes: 1024,
-      },
+      &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
       json!({"message": "hello"}),
     )
     .await
@@ -289,11 +281,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
   assert_eq!(
     read
       .execute(
-        &ToolContext {
-          workspace: temp.path().into(),
-          session_id: uuid::Uuid::nil(),
-          max_output_bytes: 1024,
-        },
+        &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
         json!({"path": "input.txt"}),
       )
       .await
@@ -306,11 +294,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .unwrap();
   let error = denied
     .execute(
-      &ToolContext {
-        workspace: temp.path().into(),
-        session_id: uuid::Uuid::nil(),
-        max_output_bytes: 1024,
-      },
+      &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
       json!({"path": "input.txt"}),
     )
     .await
@@ -326,11 +310,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
     .unwrap();
   write
     .execute(
-      &ToolContext {
-        workspace: temp.path().into(),
-        session_id: uuid::Uuid::nil(),
-        max_output_bytes: 1024,
-      },
+      &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
       json!({"path": "nested/output.txt", "content": "host write"}),
     )
     .await
@@ -349,11 +329,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
   assert!(
     run
       .execute(
-        &ToolContext {
-          workspace: temp.path().into(),
-          session_id: uuid::Uuid::nil(),
-          max_output_bytes: 1024,
-        },
+        &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
         json!({"command": "printf component-process"}),
       )
       .await
@@ -386,11 +362,7 @@ parameters = { type = "object", properties = { url = { type = "string" } } }
   assert_eq!(
     fetch
       .execute(
-        &ToolContext {
-          workspace: temp.path().into(),
-          session_id: uuid::Uuid::nil(),
-          max_output_bytes: 1024,
-        },
+        &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
         json!({"url": format!("http://{address}/value")}),
       )
       .await
@@ -472,11 +444,7 @@ async fn a_program_swapped_after_approval_is_refused_at_run_time() {
     .into_iter()
     .find(|tool| tool.spec().name == "echo_say")
     .unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 1024,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
   assert_eq!(tool.execute(&context, json!({})).await.unwrap(), "first");
 
   // the model, or anyone else, rewrites the program mid-session

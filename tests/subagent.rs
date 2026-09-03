@@ -47,11 +47,7 @@ async fn subagent_tools_receive_the_parent_and_return_child_metadata() {
     })),
     false,
   );
-  let context = ToolContext {
-    workspace: tempfile::tempdir().unwrap().path().into(),
-    session_id: parent,
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(tempfile::tempdir().unwrap().path().into(), parent, 4096);
   assert_eq!(tool.risk(&json!({})), Risk::Execute);
   let output: Value = serde_json::from_str(
     &tool
@@ -82,11 +78,11 @@ async fn background_delegations_are_collected_by_name() {
     })
   }));
   let tool = subagent_tool(registry, true);
-  let context = ToolContext {
-    workspace: tempfile::tempdir().unwrap().path().into(),
-    session_id: uuid::Uuid::now_v7(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(
+    tempfile::tempdir().unwrap().path().into(),
+    uuid::Uuid::now_v7(),
+    4096,
+  );
 
   let started = tool
     .execute(

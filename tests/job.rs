@@ -10,11 +10,7 @@ use serde_json::{Value, json};
 async fn background_jobs_persist_status_and_output() {
   let temp = tempfile::tempdir().unwrap();
   let tool = JobStore::new(temp.path().join("jobs")).tool();
-  let context = ToolContext {
-    workspace: temp.path().to_path_buf(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().to_path_buf(), uuid::Uuid::nil(), 4096);
   assert_eq!(tool.risk(&json!({"command": "start"})), Risk::Execute);
   let started: Value = serde_json::from_str(
     &tool
@@ -63,11 +59,7 @@ async fn background_jobs_persist_status_and_output() {
 async fn background_jobs_can_be_stopped_safely() {
   let temp = tempfile::tempdir().unwrap();
   let tool = JobStore::new(temp.path().join("jobs")).tool();
-  let context = ToolContext {
-    workspace: temp.path().to_path_buf(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().to_path_buf(), uuid::Uuid::nil(), 4096);
   let started: Value = serde_json::from_str(
     &tool
       .execute(&context, json!({"command": "start", "shell": "sleep 30"}))
@@ -90,11 +82,7 @@ async fn background_jobs_can_be_stopped_safely() {
 async fn long_job_output_keeps_its_tail() {
   let temp = tempfile::tempdir().unwrap();
   let tool = JobStore::new(temp.path().join("jobs")).tool();
-  let context = ToolContext {
-    workspace: temp.path().to_path_buf(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 256,
-  };
+  let context = ToolContext::new(temp.path().to_path_buf(), uuid::Uuid::nil(), 256);
   let started: Value = serde_json::from_str(
     &tool
       .execute(

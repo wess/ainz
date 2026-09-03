@@ -8,6 +8,7 @@ use tokio::{
   fs,
   io::{AsyncBufReadExt, BufReader},
   process::Command,
+  sync::mpsc,
   time::timeout,
 };
 
@@ -282,7 +283,7 @@ fn default_timeout() -> u64 {
 
 async fn shell(context: &ToolContext, value: Value) -> Result<String> {
   let args: ShellArgs = serde_json::from_value(value)?;
-  let child = Command::new("sh")
+  let mut child = Command::new("sh")
     .args(["-c", &args.command])
     .current_dir(&context.workspace)
     .stdin(Stdio::null())
@@ -293,24 +294,59 @@ async fn shell(context: &ToolContext, value: Value) -> Result<String> {
     .spawn()
     .context("start shell")?;
   let guard = GroupGuard::new(child.id());
-  let Ok(output) = timeout(
-    Duration::from_millis(args.timeout_ms),
-    child.wait_with_output(),
-  )
+  let (sender, mut lines) = mpsc::unbounded_channel();
+  // both pipes are read as they fill, which is what makes a long command visible while it
+  // runs; the cost is that stderr lands where it happened rather than after all of stdout
+  for pipe in [
+    child.stdout.take().map(Pipe::Out),
+    child.stderr.take().map(Pipe::Err),
+  ]
+  .into_iter()
+  .flatten()
+  {
+    let sender = sender.clone();
+    tokio::spawn(async move {
+      match pipe {
+        Pipe::Out(pipe) => forward(BufReader::new(pipe).lines(), sender).await,
+        Pipe::Err(pipe) => forward(BufReader::new(pipe).lines(), sender).await,
+      }
+    });
+  }
+  drop(sender);
+  let drain = async {
+    let mut text = String::new();
+    while let Some(line) = lines.recv().await {
+      context.report(&format!("{line}\n"));
+      text.push_str(&line);
+      text.push('\n');
+    }
+    text
+  };
+  let Ok((status, mut text)) = timeout(Duration::from_millis(args.timeout_ms), async {
+    tokio::join!(child.wait(), drain)
+  })
   .await
   else {
     bail!("command timed out after {} ms", args.timeout_ms);
   };
-  let output = output.context("wait for shell")?;
+  let status = status.context("wait for shell")?;
   guard.disarm();
-  let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-  let stderr = String::from_utf8_lossy(&output.stderr);
-  if !stderr.is_empty() {
-    if !text.is_empty() && !text.ends_with('\n') {
-      text.push('\n');
-    }
-    text.push_str(&stderr);
-  }
-  text.push_str(&format!("\n[exit {}]", output.status.code().unwrap_or(-1)));
+  text.push_str(&format!("[exit {}]", status.code().unwrap_or(-1)));
   Ok(truncate(text, context.max_output_bytes))
+}
+
+enum Pipe {
+  Out(tokio::process::ChildStdout),
+  Err(tokio::process::ChildStderr),
+}
+
+async fn forward<R: tokio::io::AsyncBufRead + Unpin>(
+  mut lines: tokio::io::Lines<R>,
+  sender: mpsc::UnboundedSender<String>,
+) {
+  while let Ok(Some(line)) = lines.next_line().await {
+    if sender.send(line).is_err() {
+      break;
+    }
+  }
 }

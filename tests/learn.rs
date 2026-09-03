@@ -7,11 +7,7 @@ async fn a_taught_skill_waits_for_approval_before_it_is_discovered() {
   let root = temp.path().join("skills");
   let skills = LocalSkills::with_root(root.clone());
   let teacher = Teacher::Local(skills.clone());
-  let context = ToolContext {
-    workspace: temp.path().to_path_buf(),
-    session_id: uuid::Uuid::now_v7(),
-    max_output_bytes: 8192,
-  };
+  let context = ToolContext::new(temp.path().to_path_buf(), uuid::Uuid::now_v7(), 8192);
 
   let message = teacher
     .tool()

@@ -4,11 +4,7 @@ use ainz::{LocalMemory, MemoryStore, tool::ToolContext};
 use serde_json::json;
 
 fn context(workspace: &std::path::Path) -> ToolContext {
-  ToolContext {
-    workspace: workspace.to_path_buf(),
-    session_id: uuid::Uuid::now_v7(),
-    max_output_bytes: 8192,
-  }
+  ToolContext::new(workspace.to_path_buf(), uuid::Uuid::now_v7(), 8192)
 }
 
 #[tokio::test]

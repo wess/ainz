@@ -25,11 +25,7 @@ async fn skills_are_discovered_but_loaded_on_demand() {
 
   let loaded = tool
     .execute(
-      &ToolContext {
-        workspace: temp.path().into(),
-        session_id: uuid::Uuid::nil(),
-        max_output_bytes: 1024,
-      },
+      &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
       json!({"name": "review"}),
     )
     .await
@@ -56,11 +52,7 @@ async fn skills_in_the_other_harness_layout_serve_their_bundled_files() {
   tokio::fs::write(root.join("reference.md"), "the long version")
     .await
     .unwrap();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
 
   let catalog = SkillCatalog::discover(temp.path()).await.unwrap();
   let tool = catalog.tool();

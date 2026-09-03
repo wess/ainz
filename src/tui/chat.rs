@@ -128,6 +128,8 @@ enum AgentState {
 
 struct AgentView {
   state: AgentState,
+  // a running tool call: where its entry is, and the label the entry started with
+  live: BTreeMap<String, (usize, String)>,
   // the guardian this subagent was named for; empty for the primary transcript
   name: String,
   entries: Vec<Entry>,
@@ -140,6 +142,7 @@ impl AgentView {
   fn new(state: AgentState) -> Self {
     Self {
       state,
+      live: BTreeMap::new(),
       name: String::new(),
       entries: Vec::new(),
       tools: BTreeMap::new(),
@@ -1434,13 +1437,45 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     Event::ToolStart { call } => {
       let view = state.view_mut(session_id);
       view.tools.insert(call.id.clone(), call.name.clone());
-      view.entries.push(Entry::new(
-        EntryKind::Tool,
-        tool_label(&call.name, &call.arguments),
-      ));
+      let label = tool_label(&call.name, &call.arguments);
+      view
+        .entries
+        .push(Entry::new(EntryKind::Tool, label.clone()));
+      view
+        .live
+        .insert(call.id.clone(), (view.entries.len() - 1, label));
+    }
+    // the last line a running tool wrote, under the call that is writing it
+    Event::ToolDelta { id, text } => {
+      let view = state.view_mut(session_id);
+      let Some((index, label)) = view.live.get(&id).cloned() else {
+        return;
+      };
+      let Some(entry) = view.entries.get_mut(index) else {
+        return;
+      };
+      entry.detail.get_or_insert_with(String::new).push_str(&text);
+      let last = entry
+        .detail
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .to_string();
+      entry.text = match last.is_empty() {
+        true => label,
+        false => format!("{label}\n  {}", clip(&last, 160)),
+      };
     }
     Event::ToolEnd { id, output, error } => {
       let view = state.view_mut(session_id);
+      // the live line goes when the result arrives; the label it belonged to stays
+      if let Some((index, label)) = view.live.remove(&id)
+        && let Some(entry) = view.entries.get_mut(index)
+      {
+        entry.text = label;
+      }
       if let Some(name) = view.tools.remove(&id) {
         view.entries.push(Entry::with_detail(
           if error {

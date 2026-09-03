@@ -78,11 +78,7 @@ done
     )]
   );
   let tool = hub.tool();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
 
   let search = tool
     .execute(&context, json!({"command": "search", "query": "echo"}))
@@ -279,11 +275,7 @@ async fn streamable_http_keeps_sessions_and_accepts_event_streams() {
   };
   let temp = tempfile::tempdir().unwrap();
   let tool = Arc::new(McpHub::new(profile)).tool();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
   let found = tool
     .execute(&context, json!({"command": "search", "query": "echo"}))
     .await
@@ -378,11 +370,7 @@ done
     )]),
   };
   let tool = Arc::new(McpHub::new(profile)).tool();
-  let context = ToolContext {
-    workspace: temp.path().into(),
-    session_id: uuid::Uuid::nil(),
-    max_output_bytes: 4096,
-  };
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
   let call = json!({"command": "call", "server": "flaky", "name": "once"});
   assert_eq!(
     tool.execute(&context, call.clone()).await.unwrap(),

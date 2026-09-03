@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::protocol::ToolSpec;
+use crate::{
+  event::{Event, EventSink},
+  protocol::ToolSpec,
+};
 use uuid::Uuid;
 
 pub use builtin::builtins;
@@ -21,11 +24,35 @@ pub enum Risk {
   Network,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolContext {
   pub workspace: PathBuf,
   pub session_id: Uuid,
   pub max_output_bytes: usize,
+  // where a tool reports what it has produced so far, and the call it belongs to
+  pub progress: Option<(EventSink, String)>,
+}
+
+impl ToolContext {
+  pub fn new(workspace: PathBuf, session_id: Uuid, max_output_bytes: usize) -> Self {
+    Self {
+      workspace,
+      session_id,
+      max_output_bytes,
+      progress: None,
+    }
+  }
+
+  /// A line a tool has just produced. A run that says nothing for three minutes looks the
+  /// same as one that has wedged, so anything long-running says so as it goes.
+  pub fn report(&self, text: &str) {
+    if let Some((events, id)) = &self.progress {
+      events.emit(Event::ToolDelta {
+        id: id.clone(),
+        text: text.into(),
+      });
+    }
+  }
 }
 
 #[async_trait]
