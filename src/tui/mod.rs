@@ -6,7 +6,7 @@ use std::{
   },
 };
 
-use ainz::{Config, HttpProvider, ProcessOutput, ProviderConfig, ProviderKind};
+use ainz::{Config, Credential, HttpProvider, ProcessOutput, ProviderConfig, ProviderKind};
 use anyhow::{Context, Result};
 use crossterm::{
   event::{
@@ -160,6 +160,81 @@ fn configured_model(relative: &str, key: &str) -> Option<String> {
 
 fn path_is_json(path: &str) -> bool {
   path.ends_with(".json")
+}
+
+/// Where a provider's key comes from, chosen rather than remembered: a token typed once into
+/// the keychain, a secret Synapse already holds, or the name of an environment variable.
+async fn choose_credential(
+  terminal: &mut Term,
+  config: &Config,
+  title: &str,
+  name: &str,
+  default_var: &str,
+  current: Option<Credential>,
+) -> Result<Option<Credential>> {
+  let mut rows: Vec<(String, Credential)> = Vec::new();
+  if let Some(current) = current {
+    rows.push((format!("Keep {}", describe_credential(&current)), current));
+  }
+  if ainz::credential::keychain_available() {
+    rows.push((TYPE_TOKEN.into(), Credential::None));
+  }
+  for secret in ainz::synapse::secrets(&config.synapse).await {
+    rows.push((
+      format!("Synapse · {} → {}", secret.name, secret.var),
+      Credential::Synapse {
+        secret: secret.name,
+        var: secret.var,
+      },
+    ));
+  }
+  for var in credential_variables() {
+    rows.push((format!("Environment · {var}"), Credential::Env { var }));
+  }
+  rows.push(("None".into(), Credential::None));
+  let labels: Vec<String> = rows.iter().map(|(label, _)| label.clone()).collect();
+  let Some(chosen) = choose_value(
+    terminal,
+    title,
+    "A token is kept in the keychain; everything else is a name, never a value",
+    "Credential",
+    labels,
+    default_var,
+  )?
+  else {
+    return Ok(None);
+  };
+  if chosen == TYPE_TOKEN {
+    let Some(values) = edit_fields(terminal, title, vec![Field::secret("Token")])? else {
+      return Ok(None);
+    };
+    let token = values[0].trim().to_string();
+    if token.is_empty() {
+      return Ok(Some(Credential::None));
+    }
+    ainz::credential::store(name, &token).await?;
+    return Ok(Some(Credential::Keychain {
+      account: name.to_string(),
+    }));
+  }
+  // anything not on the list was typed, and what a person types here is a variable name
+  Ok(Some(
+    match rows.into_iter().find(|(label, _)| *label == chosen) {
+      Some((_, credential)) => credential,
+      None => Credential::Env { var: chosen },
+    },
+  ))
+}
+
+const TYPE_TOKEN: &str = "Type a token (kept in the keychain)";
+
+fn describe_credential(credential: &Credential) -> String {
+  match credential {
+    Credential::None => "no credential".into(),
+    Credential::Env { var } => format!("the {var} variable"),
+    Credential::Synapse { secret, .. } => format!("the Synapse secret {secret}"),
+    Credential::Keychain { account } => format!("the token kept for {account}"),
+  }
 }
 
 /// A list to pick from, ending in a row that falls back to typing the value by hand.
@@ -583,20 +658,22 @@ async fn configure_inner(
       else {
         return Ok(None);
       };
-      let Some(variable) = choose_value(
+      let Some(credential) = choose_credential(
         terminal,
+        config,
         "LiteLLM proxy",
-        "The environment variable holding the key; the key itself is never stored",
-        "API key environment variable",
-        credential_variables(),
+        "litellm",
         "LITELLM_API_KEY",
-      )?
+        None,
+      )
+      .await?
       else {
         return Ok(None);
       };
-      let mut profile = ProviderConfig::http(&endpoint, &variable);
+      let mut profile = ProviderConfig::http(&endpoint, "");
+      profile.credential = Some(credential);
       terminal.draw(|frame| render_loading(frame, "Asking the proxy which models it serves…"))?;
-      let key = std::env::var(&variable).ok().filter(|key| !key.is_empty());
+      let key = config.api_key_for(&profile).await?;
       if let Ok(provider) = HttpProvider::new(endpoint, String::new(), key, config.provider_retries)
         && let Ok(models) = provider.models().await
       {
@@ -622,7 +699,28 @@ async fn configure_inner(
       ("claude".into(), profile, None)
     }
     Choice::Existing(name) => {
-      let profile = config.providers[&name].clone();
+      let mut profile = config.providers[&name].clone();
+      // the key a saved provider uses is the thing most likely to have changed since
+      if profile.kind == ProviderKind::Http {
+        let current = profile.credential.clone().or_else(|| {
+          (!profile.api_key_env.is_empty()).then(|| Credential::Env {
+            var: profile.api_key_env.clone(),
+          })
+        });
+        let Some(credential) = choose_credential(
+          terminal,
+          config,
+          &format!("Provider {name}"),
+          &name,
+          &profile.api_key_env,
+          current,
+        )
+        .await?
+        else {
+          return Ok(None);
+        };
+        profile.credential = Some(credential);
+      }
       (name, profile, None)
     }
     Choice::Http => {
@@ -637,19 +735,6 @@ async fn configure_inner(
       else {
         return Ok(None);
       };
-      let mut variables = credential_variables();
-      variables.insert(0, "None".into());
-      let Some(variable) = choose_value(
-        terminal,
-        "Custom HTTP provider",
-        "The environment variable holding the key; the key itself is never stored",
-        "API key environment variable",
-        variables,
-        "",
-      )?
-      else {
-        return Ok(None);
-      };
       let Some(values) = edit_fields(
         terminal,
         "Custom HTTP provider",
@@ -658,14 +743,15 @@ async fn configure_inner(
       else {
         return Ok(None);
       };
-      let profile = ProviderConfig::http(
-        &endpoint,
-        match variable.as_str() {
-          "None" => "",
-          variable => variable,
-        },
-      );
-      (values[0].clone(), profile, None)
+      let name = values[0].clone();
+      let Some(credential) =
+        choose_credential(terminal, config, "Custom HTTP provider", &name, "", None).await?
+      else {
+        return Ok(None);
+      };
+      let mut profile = ProviderConfig::http(&endpoint, "");
+      profile.credential = Some(credential);
+      (name, profile, None)
     }
     Choice::Process => {
       let Some(command) = choose_value(
@@ -846,6 +932,8 @@ pub(super) fn flatten_paste(text: &str) -> String {
 struct Field {
   label: &'static str,
   value: String,
+  // a token is typed in front of whoever is in the room; show its shape, not its text
+  secret: bool,
 }
 
 impl Field {
@@ -853,6 +941,21 @@ impl Field {
     Self {
       label,
       value: value.into(),
+      secret: false,
+    }
+  }
+
+  fn secret(label: &'static str) -> Self {
+    Self {
+      secret: true,
+      ..Self::new(label, "")
+    }
+  }
+
+  fn shown(&self) -> String {
+    match self.secret {
+      true => "•".repeat(self.value.chars().count()),
+      false => self.value.clone(),
     }
   }
 }
@@ -1060,7 +1163,7 @@ fn render_fields(frame: &mut Frame, title: &str, fields: &[Field], selected: usi
       0
     };
     frame.render_widget(
-      Paragraph::new(field.value.as_str())
+      Paragraph::new(field.shown())
         .scroll((0, scroll))
         .style(Style::default().fg(INK))
         .block(

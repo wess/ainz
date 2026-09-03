@@ -345,9 +345,21 @@ def check_model_list(binary, root):
     # the last row is "Type another…", and the selection stops there
     term.send(DOWN * 8 + ENTER, settle=0.8)
     term.send(endpoint + ENTER, settle=0.8)
-    # no credential for this one: "None" is the first row
+    # the name, then where the key comes from
     term.send(ENTER, settle=0.8)
-    term.send(ENTER, settle=2.5)
+    check(
+        "the credential chooser offers a typed token",
+        "Type a token" in term.body(),
+        term.body()[:800],
+    )
+    check(
+        "and says a value is never stored",
+        "never a value" in term.body(),
+        term.body()[:800],
+    )
+    # "None" is the row above "Type another…", however many variables this machine has
+    term.send(DOWN * 30, settle=0.3)
+    term.send(UP + ENTER, settle=2.5)
 
     body = term.body()
     check("the endpoint's own models are listed", "zeta-omega-1" in body, body[:800])

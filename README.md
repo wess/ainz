@@ -160,6 +160,10 @@ cost of the roster. It applies at the next launch.
 The tools a session has, and what each one takes, are in [`docs/tools.md`](docs/tools.md); what
 may run without asking is in [`docs/permissions.md`](docs/permissions.md).
 
+A provider's key comes from an environment variable named in the config, a secret Synapse
+already holds, or a token typed once into the operating system's keychain. Setup offers whichever
+of those are available on the machine; the config file never holds the value itself.
+
 A permission prompt shows what the call would actually do — an edit as a diff, a command as the
 command — and takes three answers: `y` allows it once, `n` refuses, and `a` keeps the decision.
 `a` writes a standing rule, the tool alone or the tool with the first word of its command, so

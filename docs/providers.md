@@ -49,6 +49,31 @@ ainz providers use litellm gpt-5.6-sol
 Model names are whatever the proxy exposes, so its `model_list` is the source of truth. Ainz
 stores only the variable name; the key stays in the environment.
 
+## Credentials
+
+A provider's key comes from one of three places, chosen during setup rather than typed from
+memory:
+
+- an environment variable, by name — Ainz stores the name, never the value, and reads it when
+  a request is made;
+- a secret Synapse already holds, stored as `apis.Something` and the variable it resolves into.
+  Ainz asks Synapse for the value when it needs one, so a secret scoped to another directory is
+  simply unavailable here rather than an error;
+- a token typed once, kept in the operating system's keychain (macOS `security`, Linux
+  `secret-tool`) under the provider's name. The config file records that the token is in the
+  keychain, and nothing else.
+
+```toml
+[providers.litellm.credential]
+from = "synapse"
+secret = "apis.OpenRouter"
+var = "OPENROUTER_API_KEY"
+```
+
+A profile written before this existed keeps its `api_key_env` name and resolves exactly as it
+did. `/config` on a saved provider offers to keep what it uses or change it, which is the usual
+reason to open setup again.
+
 ## Custom HTTP providers
 
 Any chat-completions-compatible endpoint can be added directly. Credentials remain in an
