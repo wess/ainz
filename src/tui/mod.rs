@@ -741,29 +741,35 @@ fn select_provider(
   }
 }
 
+/// The row that asks the endpoint again, for a list that came back empty the first time.
+const ASK_AGAIN: &str = "Ask the endpoint again";
+
 async fn select_model(
   terminal: &mut Term,
   config: &Config,
   name: &str,
   provider: &ProviderConfig,
 ) -> Result<Option<String>> {
+  let endpoint = (provider.kind == ProviderKind::Http)
+    .then(|| provider.endpoint.clone())
+    .flatten();
   let mut known = provider.models.clone();
+  let mut trouble = String::new();
   // an endpoint knows what it serves, so ask it rather than making the name be remembered
-  if known.is_empty() && provider.kind == ProviderKind::Http {
+  if known.is_empty()
+    && let Some(endpoint) = endpoint.clone()
+  {
     terminal.draw(|frame| render_loading(frame, "Asking the endpoint which models it serves…"))?;
-    if let Some(endpoint) = provider.endpoint.clone()
-      && let Ok(discovered) = discover_models(config, provider, endpoint).await
-    {
-      known = discovered;
+    match discover_models(config, provider, endpoint).await {
+      Ok(discovered) => known = discovered,
+      // the reason matters: a key that is not set yet reads as an endpoint that serves nothing
+      Err(error) => trouble = format!("{error:#}"),
     }
   }
-  if known.is_empty() {
-    return Ok(
-      edit_fields(terminal, "Choose a model", vec![Field::new("Model", "")])?
-        .map(|values| values[0].clone()),
-    );
-  }
   let mut models = known;
+  if endpoint.is_some() {
+    models.push(ASK_AGAIN.into());
+  }
   models.push("Enter another model…".into());
   let mut selected = if config.provider.as_deref() == Some(name) {
     models
@@ -774,7 +780,7 @@ async fn select_model(
     0
   };
   loop {
-    terminal.draw(|frame| render_model(frame, name, &models, selected))?;
+    terminal.draw(|frame| render_model(frame, name, &models, selected, &trouble))?;
     let key = match event::read()? {
       InputEvent::Mouse(mouse) => {
         match mouse.kind {
@@ -802,6 +808,24 @@ async fn select_model(
           edit_fields(terminal, "Choose a model", vec![Field::new("Model", "")])?
             .map(|values| values[0].clone()),
         );
+      }
+      // a list that came back empty because the key was not set yet is worth asking for twice
+      KeyCode::Enter if models[selected] == ASK_AGAIN => {
+        let Some(endpoint) = endpoint.clone() else {
+          continue;
+        };
+        terminal.draw(|frame| render_loading(frame, "Asking the endpoint again…"))?;
+        match discover_models(config, provider, endpoint).await {
+          Ok(discovered) if !discovered.is_empty() => {
+            trouble.clear();
+            models = discovered;
+            models.push(ASK_AGAIN.into());
+            models.push("Enter another model…".into());
+            selected = 0;
+          }
+          Ok(_) => trouble = "the endpoint listed no models".into(),
+          Err(error) => trouble = format!("{error:#}"),
+        }
       }
       KeyCode::Enter => return Ok(Some(models[selected].clone())),
       KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
@@ -962,14 +986,25 @@ fn render_provider(frame: &mut Frame, config: &Config, choices: &[Choice], selec
   render_footer(frame, footer, "↑↓ navigate   enter select   esc cancel");
 }
 
-fn render_model(frame: &mut Frame, provider: &str, models: &[String], selected: usize) {
+fn render_model(
+  frame: &mut Frame,
+  provider: &str,
+  models: &[String],
+  selected: usize,
+  trouble: &str,
+) {
   let [header, body, footer] = Layout::vertical([
     Constraint::Length(3),
     Constraint::Min(8),
     Constraint::Length(1),
   ])
   .areas(frame.area());
-  render_header(frame, header, "Choose a model", provider);
+  // why the list is short is the thing worth saying, when there is a why
+  let subtitle = match trouble.is_empty() {
+    true => provider.to_string(),
+    false => format!("{provider} · {trouble}"),
+  };
+  render_header(frame, header, "Choose a model", &subtitle);
   let width = body.width.min(72);
   let area = centered(body, width, body.height);
   let mut state = ListState::default().with_selected(Some(selected));
