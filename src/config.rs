@@ -149,6 +149,8 @@ pub struct UiConfig {
   pub roster_visible: bool,
   pub header: String,
   pub vim: bool,
+  /// Ring the terminal when a long run ends, so a session left working can say it is done.
+  pub bell: bool,
   /// Draw in the terminal's own scroll instead of taking the whole screen, so finished
   /// transcript stays in the scrollback the terminal already keeps.
   pub inline: bool,
@@ -160,6 +162,7 @@ impl Default for UiConfig {
       roster_visible: true,
       header: "random".into(),
       vim: false,
+      bell: true,
       inline: false,
     }
   }

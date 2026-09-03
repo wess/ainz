@@ -27,9 +27,10 @@ enum Row {
   Header,
   Vim,
   Inline,
+  Bell,
 }
 
-const ROWS: [Row; 12] = [
+const ROWS: [Row; 13] = [
   Row::Provider,
   Row::Permissions,
   Row::Memory,
@@ -42,6 +43,7 @@ const ROWS: [Row; 12] = [
   Row::Header,
   Row::Vim,
   Row::Inline,
+  Row::Bell,
 ];
 
 impl Row {
@@ -57,6 +59,7 @@ impl Row {
       Self::Mesh => "Agent mesh",
       Self::Roster => "Agent roster",
       Self::Header => "Header art",
+      Self::Bell => "Bell when done",
       Self::Vim => "Vim keys",
       Self::Inline => "Draw inline",
     }
@@ -101,6 +104,7 @@ impl Row {
         }
       }
       Self::Header => config.ui.header.clone(),
+      Self::Bell => on_off(config.ui.bell),
       Self::Vim => on_off(config.ui.vim),
       Self::Inline => on_off(config.ui.inline),
     }
@@ -179,6 +183,12 @@ impl Row {
         "Show the running subagents beside the transcript. Ctrl+L toggles it during a session."
           .into(),
       ),
+      Self::Bell => (
+        "Saying so when you are not looking".into(),
+        "Rings the terminal when a run that took more than ten seconds finishes, so a session \
+         left working in another pane can say it is done."
+          .into(),
+      ),
       Self::Vim => (
         "Modal editing in the prompt".into(),
         "Esc leaves insert mode; hjkl, w, b, 0, $, i, a, x, dd and D work as they do in vim, \
@@ -249,6 +259,7 @@ impl Row {
         }
       }
       Self::Roster => config.ui.roster_visible = !config.ui.roster_visible,
+      Self::Bell => config.ui.bell = !config.ui.bell,
       Self::Vim => config.ui.vim = !config.ui.vim,
       Self::Inline => config.ui.inline = !config.ui.inline,
       Self::Header => {

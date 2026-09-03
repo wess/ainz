@@ -180,6 +180,8 @@ struct ChatState {
   rewinding: bool,
   // vim's `d`, waiting for what to delete
   pending_delete: bool,
+  // an image pasted or dropped in, waiting for the message it belongs to
+  pending_image: Option<PathBuf>,
   files: Vec<String>,
   // how much of the transcript has already been handed to the terminal's scrollback
   flushed: usize,
@@ -208,6 +210,7 @@ impl Default for ChatState {
       expanded: false,
       rewinding: false,
       pending_delete: false,
+      pending_image: None,
       files: Vec::new(),
       flushed: 0,
       inline: false,
@@ -575,6 +578,16 @@ async fn run_chat_inner(
         store.save(&returned_session).await?;
         session = Some(returned_session);
         controller = None;
+        // a run long enough to walk away from says so when it is done
+        if config.ui.bell
+          && state
+            .started
+            .is_some_and(|start| start.elapsed() >= Duration::from_secs(10))
+        {
+          let mut out = std::io::stdout();
+          drop(std::io::Write::write_all(&mut out, b"\x07"));
+          drop(std::io::Write::flush(&mut out));
+        }
         state.started = None;
         state.cancelled = false;
         state.primary.assistant = None;
@@ -590,7 +603,18 @@ async fn run_chat_inner(
       Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => key,
       Wake::Input(Some(Ok(InputEvent::Paste(text)))) => {
         if state.active.is_none() && state.approval.is_none() {
-          state.input.insert_str(&super::flatten_paste(&text));
+          // a terminal pastes an image as its path, which is a file to attach rather than
+          // text to type; dragging one into the window arrives the same way
+          match image_path(&text) {
+            Some(path) => {
+              state.primary.entries.push(Entry::new(
+                EntryKind::System,
+                format!("attached {}; it goes with the next message", path.display()),
+              ));
+              state.pending_image = Some(path);
+            }
+            None => state.input.insert_str(&super::flatten_paste(&text)),
+          }
           state.command_selected = 0;
         }
         continue;
@@ -1043,6 +1067,7 @@ async fn run_chat_inner(
             continue;
           }
           CommandResult::Prompt { prompt, image } => {
+            let image = image.or_else(|| state.pending_image.take());
             let expanded = expand_prompt(&prompt, &prompts).await?;
             state
               .primary
@@ -2082,6 +2107,17 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
 
 // what the call is actually doing, the way the coding agents put it: shell(git status).
 // the key order is what these tools name their subject, whichever harness sent the call
+/// A pasted path to an image, however the terminal spelled it: quoted, escaped, or a file URL.
+fn image_path(text: &str) -> Option<PathBuf> {
+  const KINDS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+  let text = text.trim().trim_matches(['"', '\'']);
+  let text = text.strip_prefix("file://").unwrap_or(text);
+  let cleaned = text.replace("\\ ", " ");
+  let path = PathBuf::from(&cleaned);
+  let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+  (KINDS.contains(&extension.as_str()) && path.is_file()).then_some(path)
+}
+
 fn approval_rule(approval: &Approval) -> String {
   ainz::PermissionRules::rule_for(
     &approval.call.name,
@@ -2354,6 +2390,20 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     return;
   }
   state.prompt_area.set(area);
+  if let Some(path) = &state.pending_image {
+    let name = path
+      .file_name()
+      .map(|name| name.to_string_lossy().to_string())
+      .unwrap_or_default();
+    frame.render_widget(
+      Paragraph::new(Line::styled(
+        format!(" 🖼 {name}"),
+        Style::default().fg(MAGENTA),
+      ))
+      .alignment(Alignment::Right),
+      area,
+    );
+  }
   let prefix = match (state.busy(), state.input.mode()) {
     (true, _) => "↳ ",
     (false, input::Mode::Normal) => "▪ ",
@@ -2402,40 +2452,82 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
 }
 
 // the arguments are the decision, so they are shown, clipped to what fits
+/// What the call would actually do, in the shape the decision is about: a change to a file
+/// reads as a diff, a command as the command. Raw JSON is the last resort, not the first.
+fn approval_preview(call: &ToolCall) -> Vec<Line<'static>> {
+  let field = |key: &str| {
+    call
+      .arguments
+      .get(key)
+      .and_then(serde_json::Value::as_str)
+      .unwrap_or_default()
+      .to_string()
+  };
+  let marked = |text: String, mark: &'static str, color: Color| {
+    text
+      .lines()
+      .take(6)
+      .map(|line| {
+        Line::from(vec![
+          Span::styled(mark, Style::default().fg(color)),
+          Span::styled(clip(line, 80), Style::default().fg(color)),
+        ])
+      })
+      .collect::<Vec<_>>()
+  };
+  match call.name.as_str() {
+    "edit" => {
+      let mut lines = vec![Line::styled(field("path"), Style::default().fg(INK))];
+      lines.extend(marked(field("old"), "- ", RED));
+      lines.extend(marked(field("new"), "+ ", ACTIVE));
+      lines
+    }
+    "write" => {
+      let mut lines = vec![Line::styled(field("path"), Style::default().fg(INK))];
+      lines.extend(marked(field("content"), "+ ", ACTIVE));
+      lines
+    }
+    "shell" => vec![Line::styled(
+      clip(&field("command"), 200),
+      Style::default().fg(INK),
+    )],
+    _ => vec![Line::styled(
+      clip(&call.arguments.to_string(), 240),
+      Style::default().fg(INK),
+    )],
+  }
+}
+
 fn render_approval(frame: &mut Frame, approval: &Approval) {
-  let area = centered(frame.area(), frame.area().width.min(76), 11);
-  let arguments: String = approval
-    .call
-    .arguments
-    .to_string()
-    .chars()
-    .take(240)
-    .collect();
+  let preview = approval_preview(&approval.call);
+  let height = (preview.len() as u16 + 8).min(frame.area().height);
+  let area = centered(frame.area(), frame.area().width.min(88), height);
   frame.render_widget(Clear, area);
+  let mut lines = vec![
+    Line::styled(
+      "permission required",
+      Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+    ),
+    Line::raw(""),
+    Line::from(vec![
+      Span::styled(
+        approval.call.name.clone(),
+        Style::default().fg(INK).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled(format!("  {:?}", approval.risk), Style::default().fg(MUTED)),
+    ]),
+  ];
+  lines.extend(preview);
+  lines.extend([
+    Line::raw(""),
+    Line::styled(
+      format!("a  always allow {}", approval_rule(approval)),
+      Style::default().fg(MUTED),
+    ),
+    Line::styled("y allow   a always   n deny", Style::default().fg(ACCENT)),
+  ]);
   frame.render_widget(
-    Paragraph::new(vec![
-      Line::styled(
-        "permission required",
-        Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
-      ),
-      Line::raw(""),
-      Line::from(vec![
-        Span::styled(
-          &approval.call.name,
-          Style::default().fg(INK).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!("  {:?}", approval.risk), Style::default().fg(MUTED)),
-      ]),
-      Line::styled(arguments, Style::default().fg(INK)),
-      Line::raw(""),
-      Line::styled(
-        format!("a  always allow {}", approval_rule(approval)),
-        Style::default().fg(MUTED),
-      ),
-      Line::styled("y allow   a always   n deny", Style::default().fg(ACCENT)),
-    ])
-    .wrap(Wrap { trim: false })
-    .block(
+    Paragraph::new(lines).wrap(Wrap { trim: false }).block(
       Block::default()
         .title(" approval ")
         .borders(Borders::ALL)
