@@ -75,7 +75,7 @@ pub(crate) async fn make_agent_with(
         .clone()
         .context("HTTP provider requires an endpoint")?,
       config.model.clone(),
-      config.api_key_for(&profile)?,
+      config.api_key_for(&profile).await?,
       config.provider_retries,
     )?),
     ProviderKind::Process => RuntimeProvider::Process(ProcessProvider::new(

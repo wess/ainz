@@ -7,6 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::credential::Credential;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
@@ -187,6 +189,8 @@ pub struct ProviderConfig {
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub api_key_env: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub credential: Option<Credential>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub command: Option<String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub args: Vec<String>,
@@ -214,6 +218,7 @@ impl ProviderConfig {
       kind: ProviderKind::Http,
       endpoint: Some(endpoint.into()),
       api_key_env: api_key_env.into(),
+      credential: None,
       command: None,
       args: Vec::new(),
       output: ProcessOutput::Text,
@@ -226,6 +231,7 @@ impl ProviderConfig {
       kind: ProviderKind::Process,
       endpoint: None,
       api_key_env: String::new(),
+      credential: None,
       command: Some(command.into()),
       args,
       output,
@@ -462,15 +468,18 @@ impl Config {
     }
   }
 
-  pub fn api_key_for(&self, provider: &ProviderConfig) -> Result<Option<String>> {
-    if provider.api_key_env.is_empty() {
-      return Ok(None);
-    }
-    match env::var(&provider.api_key_env) {
-      Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-      Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
-      Err(error) => Err(error).context("API key environment variable is not valid Unicode"),
-    }
+  // `credential` is the current source of truth; `api_key_env` is what every config written
+  // before it existed still has, so a bare variable name is treated as an implicit `Env`
+  // credential rather than requiring every old file to be rewritten.
+  pub async fn api_key_for(&self, provider: &ProviderConfig) -> Result<Option<String>> {
+    let credential = match &provider.credential {
+      Some(credential) => credential.clone(),
+      None if !provider.api_key_env.is_empty() => Credential::Env {
+        var: provider.api_key_env.clone(),
+      },
+      None => return Ok(None),
+    };
+    credential.resolve().await
   }
 
   // the memory backend implies the integration, so `backend = "synapse"` cannot be a dead setting

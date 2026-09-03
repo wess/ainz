@@ -807,7 +807,7 @@ pub async fn models(config: &mut Config, command: ModelCommand) -> Result<()> {
             .clone()
             .context("HTTP provider requires an endpoint")?,
           config.model.clone(),
-          config.api_key_for(&profile)?,
+          config.api_key_for(&profile).await?,
           config.provider_retries,
         )?;
         let models = provider.models().await?;

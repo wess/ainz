@@ -3,6 +3,7 @@ pub mod command_palette;
 pub mod config;
 pub mod context;
 pub mod control;
+pub mod credential;
 pub mod event;
 mod frontmatter;
 pub mod header;
@@ -33,6 +34,7 @@ pub use config::{
   ProviderConfig, ProviderKind, SynapseConfig,
 };
 pub use control::{RunController, RunInbox, run_control};
+pub use credential::Credential;
 pub use event::{Event, EventSink};
 pub use header::{HeaderArt, HeaderCatalog};
 pub use hook::{HookEvent, HookRunner};
