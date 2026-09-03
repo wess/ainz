@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use tokio::process::Command;
 
 use crate::{
   config::SynapseConfig,
@@ -61,6 +62,76 @@ pub fn server_config(command: &Path, workspace: &Path) -> McpServerConfig {
     required: false,
     timeout_ms: TIMEOUT_MS,
   }
+}
+
+/// One secret Synapse holds: its qualified name, the env var it resolves into, and whether it
+/// is readable outside an approved directory scope.
+pub struct Secret {
+  pub name: String,
+  pub var: String,
+  pub global: bool,
+}
+
+/// Every secret Synapse holds, for a chooser to offer during provider setup. Empty whenever
+/// Synapse can't answer — no binary, a bad exit, output that doesn't parse — because setup uses
+/// this only to decide whether to show a picker; a broken or absent Synapse must degrade to "no
+/// secrets offered", never to a failed setup.
+pub async fn secrets(config: &SynapseConfig) -> Vec<Secret> {
+  let Some(command) = binary(config) else {
+    return Vec::new();
+  };
+  let Some(vaults) = run(&command, &["vault", "list"]).await else {
+    return Vec::new();
+  };
+  let mut found = Vec::new();
+  for vault in vaults
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+  {
+    // one vault failing to list (deleted mid-walk, denied scope) shouldn't hide the rest
+    if let Some(output) = run(&command, &["secret", "list", vault]).await {
+      found.extend(parse_secrets(&output));
+    }
+  }
+  found.sort_by(|a, b| a.name.cmp(&b.name));
+  found
+}
+
+async fn run(command: &Path, args: &[&str]) -> Option<String> {
+  let output = Command::new(command).args(args).output().await.ok()?;
+  output
+    .status
+    .success()
+    .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// parse `secret list` rows: qualified name, env var, scope word — tab-separated. rows with
+/// the wrong shape are skipped rather than guessed at. public so tests/synapse.rs can exercise
+/// it without a real vault.
+pub fn parse_secrets(vault_output: &str) -> Vec<Secret> {
+  vault_output
+    .lines()
+    .filter_map(|line| {
+      let mut columns = line.split('\t');
+      let name = columns.next()?.trim();
+      let var = columns.next()?.trim();
+      let scope = columns.next()?.trim();
+      if name.is_empty() || var.is_empty() || columns.next().is_some() {
+        return None;
+      }
+      let global = match scope {
+        "global" => true,
+        "scoped" => false,
+        _ => return None,
+      };
+      Some(Secret {
+        name: name.to_string(),
+        var: var.to_string(),
+        global,
+      })
+    })
+    .collect()
 }
 
 /// Typed access to the Synapse server already in the hub.
