@@ -157,6 +157,9 @@ selects text the way it normally would.
 whole screen, so finished output stays in the scrollback the terminal already keeps — at the
 cost of the roster. It applies at the next launch.
 
+The tools a session has, and what each one takes, are in [`docs/tools.md`](docs/tools.md); what
+may run without asking is in [`docs/permissions.md`](docs/permissions.md).
+
 A permission prompt shows what the call would actually do — an edit as a diff, a command as the
 command — and takes three answers: `y` allows it once, `n` refuses, and `a` keeps the decision.
 `a` writes a standing rule, the tool alone or the tool with the first word of its command, so
