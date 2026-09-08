@@ -497,7 +497,12 @@ async fn ainz(
 async fn sessions_export_writes_the_active_path_and_defaults_to_the_latest_session() {
   let home = tempfile::tempdir().unwrap();
   let workspace = tempfile::tempdir().unwrap();
-  let store = SessionStore::new(config_root(home.path()).join("ainz/sessions"));
+  let data = if cfg!(target_os = "macos") {
+    home.path().join("Library/Application Support")
+  } else {
+    home.path().join(".local/share")
+  };
+  let store = SessionStore::new(data.join("ainz/sessions"));
 
   // main.rs canonicalizes --workspace before comparing it against a stored session's
   // workspace, and a tempdir path is often a symlink (e.g. /tmp -> /private/tmp on macOS)
@@ -514,6 +519,7 @@ async fn sessions_export_writes_the_active_path_and_defaults_to_the_latest_sessi
 
   let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .env("HOME", home.path())
+    .env("XDG_DATA_HOME", &data)
     .args([
       "--workspace",
       workspace.path().to_str().unwrap(),
@@ -538,6 +544,7 @@ async fn sessions_export_writes_the_active_path_and_defaults_to_the_latest_sessi
   let out_path = workspace.path().join("export.md");
   let written = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .env("HOME", home.path())
+    .env("XDG_DATA_HOME", &data)
     .args([
       "--workspace",
       workspace.path().to_str().unwrap(),
@@ -561,6 +568,7 @@ async fn sessions_export_writes_the_active_path_and_defaults_to_the_latest_sessi
   // plain `sessions` and `sessions --json` still list rather than export
   let listed = Command::new(env!("CARGO_BIN_EXE_ainz"))
     .env("HOME", home.path())
+    .env("XDG_DATA_HOME", &data)
     .args([
       "--workspace",
       workspace.path().to_str().unwrap(),
