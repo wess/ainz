@@ -1,13 +1,15 @@
 use std::path::PathBuf;
 
+pub(crate) use crate::output::capture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{protocol::ToolSpec, tool::Risk};
 
 mod catalog;
 mod component;
+mod host;
+mod lua;
 mod process;
 
 pub use catalog::{DiscoveredPlugin, PluginCatalog};
@@ -50,7 +52,7 @@ fn api_version() -> u32 {
   1
 }
 
-// memory_bytes and fuel only apply to components; command only to processes
+// memory_bytes and fuel apply to sandboxed runtimes; command only to processes
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PluginRuntime {
   #[serde(default)]
@@ -72,6 +74,7 @@ pub enum RuntimeKind {
   #[default]
   Process,
   Component,
+  Lua,
 }
 
 fn default_timeout() -> u64 {
@@ -132,26 +135,4 @@ impl PluginTool {
       .max()
       .unwrap_or(Risk::Read)
   }
-}
-
-struct Capture {
-  bytes: Vec<u8>,
-  truncated: bool,
-}
-
-// reads to the end but keeps only `limit` bytes, so a runaway child cannot grow host memory
-async fn capture(mut reader: impl AsyncRead + Unpin, limit: usize) -> std::io::Result<Capture> {
-  let mut bytes = Vec::with_capacity(limit.min(8192));
-  let mut buffer = [0_u8; 8192];
-  let mut truncated = false;
-  loop {
-    let read = reader.read(&mut buffer).await?;
-    if read == 0 {
-      break;
-    }
-    let remaining = limit.saturating_sub(bytes.len());
-    bytes.extend_from_slice(&buffer[..read.min(remaining)]);
-    truncated |= read > remaining;
-  }
-  Ok(Capture { bytes, truncated })
 }

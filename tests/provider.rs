@@ -463,3 +463,23 @@ async fn provider_honours_retry_after_header() {
   assert!(elapsed < std::time::Duration::from_millis(2500));
   server.await.unwrap();
 }
+
+#[tokio::test]
+async fn provider_distinguishes_terminal_and_truncated_streams() {
+  for reason in ["stop", "length", "content_filter"] {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.unwrap();
+      read_request(&mut socket).await;
+      let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"text\"}},\"finish_reason\":\"{reason}\"}}]}}\n\n"
+      );
+      socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    });
+    let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 0).unwrap();
+    let reply = provider.complete(&[], &[], &EventSink::default()).await;
+    assert_eq!(reply.is_ok(), reason == "stop", "{reason}");
+    server.await.unwrap();
+  }
+}

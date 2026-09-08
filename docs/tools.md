@@ -11,20 +11,20 @@ own tools instead and never sees these; see [`docs/providers.md`](providers.md).
 
 `read`, `list`, `search`, `write`, and `edit` all take a `path` resolved against the workspace:
 an absolute path or a `..` segment is rejected, and the resolved path — following any symlink —
-must still land inside the workspace. `write` and `edit` accept a path that does not exist yet,
-as long as its nearest existing ancestor is inside the workspace.
+must still land inside the workspace. `write` can create a missing path; `edit` requires an existing regular file. File opens use
+workspace directory handles so dangling symlinks and concurrent link swaps cannot redirect
+access outside that directory. Absolute symlink targets are refused by the file-access layer.
 
 A tool that runs long enough to have something to say before it finishes can report that through
 `ToolContext::report`, which the agent turns into a `ToolDelta` event carrying the call's id and
 the text produced so far. The terminal shows the last non-empty line under the call while it is
-still running, instead of nothing until the call ends. Only `shell` does this today — it reports
-each line of output as it arrives — but the mechanism is there for any tool.
+still running, instead of nothing until the call ends. `shell` reports output chunks as they arrive, and Lua plugins can report through `ainz.log`.
 
 ## Built in
 
 **`read`** — `path` (required), `offset` and `limit` (1-based line number and line count). Streams
 the file and returns only the requested window, so a large file costs the window, not the whole
-file. Risk: read.
+file. A line larger than the transfer limit is refused. Risk: read.
 
 **`list`** — `path` (default `.`). Lists a directory's entries, one per line, sorted, directories
 suffixed with `/`. Risk: read.
@@ -39,12 +39,13 @@ write.
 
 **`edit`** — `path`, `old`, and `new` (all required). `old` must occur in the file exactly once;
 that occurrence is replaced with `new`. Zero matches or more than one is an error rather than a
-guess. Risk: write.
+guess. Files above 16 MiB are refused. Risk: write.
 
 **`shell`** — `command` (required), `timeout_ms` (default 30000, 100–300000). Runs `sh -c
 COMMAND` in the workspace, in its own process group so a timeout takes the whole tree down.
-Stdout and stderr are drained as they arrive and interleaved in arrival order, each line reported
-as a `ToolDelta`; the reply ends with `[exit N]`. Risk: execute.
+Stdout and stderr are drained as they arrive and interleaved in arrival order, bounded chunks reported
+as `ToolDelta` events. Capture and progress stop growing at the configured output limit while
+the pipes continue draining. Untruncated replies end with `[exit N]`. Risk: execute.
 
 **`fetch`** — `url` (required), `max_bytes` (default: the configured tool-output limit). A GET
 over `http(s)` only; it refuses `localhost`, loopback, and the private and link-local ranges
@@ -52,7 +53,10 @@ over `http(s)` only; it refuses `localhost`, loopback, and the private and link-
 to reach the machine's own network or a cloud metadata endpoint. An HTML response is reduced to
 text a person would read — tags stripped, `script`/`style` bodies dropped, block tags become line
 breaks, entities unescaped; anything else comes back as-is. The reply is the final URL (after
-redirects) and content type, then the body. Risk: network — the only built-in tool at that level.
+redirects) and content type, then the body. DNS answers are checked and pinned for each
+connection, redirects are validated independently, and IPv6 private and mapped addresses are
+refused. Ambient proxies are not used. `max_bytes` cannot raise the configured output limit;
+oversized bodies fail while streaming, before HTML conversion. Risk: network — the only built-in tool at that level.
 
 **`todo`** — `action` (`set`, `start`, `done`, or `list`), `items` (for `set`), `target` (for
 `start`/`done`, an item's 1-based position or its exact text). A short plan kept in memory for

@@ -29,7 +29,7 @@ pub async fn existing(workspace: &Path, input: &str) -> Result<PathBuf> {
 pub async fn writable(workspace: &Path, input: &str) -> Result<PathBuf> {
   let workspace = fs::canonicalize(workspace).await?;
   let candidate = workspace.join(relative(input)?);
-  if fs::try_exists(&candidate).await? {
+  if fs::symlink_metadata(&candidate).await.is_ok() {
     let path = fs::canonicalize(&candidate).await?;
     ensure_contained(&workspace, &path)?;
     return Ok(path);
@@ -47,5 +47,48 @@ fn ensure_contained(workspace: &Path, path: &Path) -> Result<()> {
   if !path.starts_with(workspace) {
     bail!("path escapes the workspace");
   }
+  Ok(())
+}
+
+// resolve and open relative to a directory handle; a path check followed by an ambient
+// open would allow a symlink swap to redirect the operation after the check.
+pub async fn open(workspace: &Path, input: &str, write: bool, create: bool) -> Result<fs::File> {
+  let root = workspace.to_path_buf();
+  let path = relative(input)?;
+  let file = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+    use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt};
+    let dir = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    if create
+      && let Some(parent) = path.parent()
+      && !parent.as_os_str().is_empty()
+    {
+      dir
+        .create_dir_all(parent)
+        .context("path escapes the workspace or its parent cannot be created")?;
+    }
+    let mut options = OpenOptions::new();
+    options
+      .read(true)
+      .write(write)
+      .create(create)
+      .custom_flags(libc::O_NONBLOCK);
+    let file = dir
+      .open_with(&path, &options)
+      .context("path escapes the workspace or cannot be opened")?;
+    if !file.metadata()?.is_file() {
+      bail!("workspace file must be a regular file");
+    }
+    Ok(file.into_std())
+  })
+  .await??;
+  Ok(fs::File::from_std(file))
+}
+
+pub async fn write(workspace: &Path, input: &str, content: &[u8]) -> Result<()> {
+  use tokio::io::AsyncWriteExt;
+  let mut file = open(workspace, input, true, true).await?;
+  file.set_len(0).await?;
+  file.write_all(content).await?;
+  file.flush().await?;
   Ok(())
 }

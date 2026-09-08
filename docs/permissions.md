@@ -49,6 +49,18 @@ in parentheses (`shell(git *)`, `write(notes.md)`). The subject is whichever of 
 is checked first and wins, so taking an allowance back is one line in `deny` rather than an edit
 to `allow`. A call that matches neither list falls through to the mode, unchanged.
 
+File rules for `read`, `write`, `edit`, and `list` use normalized workspace paths, including
+resolved symlinks. A spelling such as `./notes.md` is the same target as `notes.md`. Built-in
+arguments are validated before permission checks; an unrelated extra field cannot change
+which target is checked.
+
+Shell prefix allowances cover simple commands only. Shell operators, redirects, substitutions,
+backslashes, and multiline commands require a fresh approval under `ask` and are refused
+under `read_only` unless a bare `shell` rule grants unrestricted shell access. For example,
+`shell(git *)` does not authorize `git status; another-command`. The selected program still
+has its full authority: allowing all `git` invocations includes its configuration and helper
+execution features. A bare `shell` allowance deliberately grants all shell commands.
+
 At a permission prompt, `y` allows the call once and `n` refuses it; `a` allows it and also
 writes a rule for it to `[rules] allow`, so the same decision is not asked again. For a `shell`
 call the rule remembers only the command's first word (`shell(git *)`, not the exact command

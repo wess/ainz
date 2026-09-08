@@ -2,7 +2,7 @@
 
 Ainz supports two complementary formats:
 
-- Native `plugin.toml` packages expose trusted process tools or capability-scoped WebAssembly
+- Native `plugin.toml` packages expose trusted process tools, Lua scripts, or capability-scoped WebAssembly
   components through the Ainz API described below.
 - Portable [Agent Plugins 1.0](https://agent-plugins.org/specification) packages use a root
   `plugin.json` plus the standard `skills/` and `mcp.json` components shared by compatible agent
@@ -49,7 +49,7 @@ Names use lowercase letters, numbers, and underscores. Tools are exposed as
 Tool names must be unique inside a plugin, descriptions must be non-empty, and
 `parameters` must be a JSON Schema object. `[plugin] enabled = false` keeps a plugin listed
 but never loads its tools. `timeout_ms` must be between 1 and 300000; `memory_bytes` and
-`fuel` apply to components only and `command` to processes only.
+`fuel` apply to Lua and components; `command` applies to processes only.
 
 Plugin capabilities are:
 
@@ -61,6 +61,83 @@ Plugin capabilities are:
 
 Every tool must declare a non-empty subset of the plugin's capabilities. The highest
 risk capability on that tool determines whether a call needs approval.
+
+## Lua runtime
+
+Lua 5.4 plugins expose functions in a returned table. Put the manifest and source in
+`.ainz/plugins/greeting/`, then run `ainz plugins approve greeting`. The example in
+[`fixtures/lua`](../fixtures/lua) is ready to copy into that directory.
+
+```toml
+capabilities = ["compute"]
+
+[plugin]
+name = "greeting"
+version = "0.1.0"
+
+[runtime]
+kind = "lua"
+path = "main.lua"
+timeout_ms = 30000
+memory_bytes = 67108864
+fuel = 10000000
+
+[[tools]]
+name = "hello"
+description = "Greet someone by name"
+capabilities = ["compute"]
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"] }
+```
+
+```lua
+local greeting = require("greeting")
+
+return {
+  hello = function(args)
+    return { message = greeting.hello(args.name) }
+  end,
+}
+```
+
+The function receives arguments as a Lua table. Return a string for plain text, or a table
+for JSON output; `error("message")` returns a tool failure. Each invocation gets a fresh Lua
+state, including its module cache. Module names such as `text.format` resolve only to
+`lua/text/format.lua` or `lua/text/format/init.lua` within the approved bundle. Circular
+imports fail. Lua sources must be regular files, total at most 4 MiB, and number at most
+1024. The entry path must be relative to the plugin directory.
+
+The `ainz` table provides:
+
+| Function | Capability | Result |
+| --- | --- | --- |
+| `ainz.read(path)` | `workspace_read` | UTF-8 file contents |
+| `ainz.write(path, text)` | `workspace_write` | Creates or replaces a workspace file |
+| `ainz.run(command)` | `process_exec` | Shell output and exit status |
+| `ainz.fetch(url)` | `network` | HTTP(S) response text |
+| `ainz.log(text)` | None | Bounded tool progress |
+| `ainz.json_encode(value)` | None | JSON string |
+| `ainz.json_decode(text)` | None | Lua value |
+
+Host operations check the selected tool's capabilities and use the same transfer limits
+and workspace containment as component plugins. An approved `network` capability includes
+local services; the built-in web `fetch` tool has a separate public-network-only policy.
+`process_exec` grants full user shell authority, including inherited environment variables.
+
+The runtime exposes base functions, `table`, `string`, `math`, and `utf8`. There is no `io`,
+`os`, `debug`, `package`, user coroutine API, ambient module loader, native module loading,
+or bytecode loading. Use `ainz.log` instead of `print`. Lua is embedded in the binary; no
+separate interpreter installation is needed. This is a Lua plugin API, not an implementation
+of editor-specific APIs.
+
+`memory_bytes` bounds Lua allocations and may not exceed 1 GiB. The VM yields every 1000
+instructions so the host can enforce `fuel`, deadlines, and cancellation. Instruction
+accounting covers Lua bytecode; standard-library C operations return before the next VM
+yield. Host calls are asynchronous and bounded. Limits apply during module initialization
+as well as tool execution, and Lua `pcall` cannot catch instruction-budget termination.
+
+Approval covers every Lua source, including modules. At runtime construction the bundle is
+read again and compared with the approved digest; execution uses those checked bytes.
+Changing a source file requires approval and a runtime rebuild to use the new code.
 
 ## Component runtime
 

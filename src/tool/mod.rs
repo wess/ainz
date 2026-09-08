@@ -1,5 +1,6 @@
 mod builtin;
 mod fetch;
+mod shell;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -60,6 +61,9 @@ impl ToolContext {
 pub trait Tool: Send + Sync {
   fn spec(&self) -> ToolSpec;
   fn risk(&self, arguments: &Value) -> Risk;
+  fn validate(&self, _arguments: &Value) -> Result<()> {
+    Ok(())
+  }
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String>;
 }
 

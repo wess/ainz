@@ -9,7 +9,7 @@ including a LiteLLM proxy, and to headless coding CLIs as process providers. Ses
 resumable trees with automatic, branch-aware compaction. Tools cover workspace read, list,
 search, write, edit, and shell, reading a URL, a plan the session keeps as it works, durable
 background jobs, lazily loaded skills, prompt templates, subagents, MCP servers over stdio and
-Streamable HTTP, and content-pinned WebAssembly component or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
+Streamable HTTP, and content-pinned Lua, WebAssembly component, or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
 search over earlier sessions, and skills a session writes for the next one.
 
 ## Install
@@ -336,7 +336,8 @@ ainz plugins revoke example
 
 The approval pins the manifest, every file under the plugin directory, and the executable or
 component it names; changing any of them returns the plugin to pending, and the artifact is
-rechecked when it runs. Component plugins run with fuel, memory, instance, table, and
+rechecked when it runs. Lua plugins expose functions and bundled modules with per-tool
+capabilities, fresh states, memory and instruction budgets, and cancellation. Component plugins run with fuel, memory, instance, table, and
 wall-clock limits, no WASI authority, and capability-checked host imports per tool. Process
 plugins are trusted native programs; capabilities drive visibility and approval but cannot
 sandbox one. See [`docs/plugins.md`](docs/plugins.md).

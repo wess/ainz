@@ -115,6 +115,21 @@ impl PermissionRules {
     if self.matches(&self.deny, name, subject) {
       return Some(false);
     }
+    // a shell prefix only grants a simple command. compound syntax needs its own approval;
+    // a bare shell rule remains an explicit grant of unrestricted shell execution.
+    if name == "shell"
+      && subject.is_some_and(|value| {
+        value.contains([
+          ';', '&', '|', '$', '`', '<', '>', '(', ')', '\n', '\r', '\\',
+        ])
+      })
+    {
+      return self
+        .allow
+        .iter()
+        .any(|rule| rule.trim() == "shell")
+        .then_some(true);
+    }
     self.matches(&self.allow, name, subject).then_some(true)
   }
 

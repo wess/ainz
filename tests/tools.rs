@@ -232,3 +232,76 @@ async fn fetch_refuses_what_is_not_the_web() {
     );
   }
 }
+
+#[tokio::test]
+async fn shell_output_and_progress_stay_bounded() {
+  let temp = tempfile::tempdir().unwrap();
+  let (events, mut received) = ainz::EventSink::channel();
+  let mut context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
+  context.progress = Some((events, "bounded".into()));
+  let shell = builtins()
+    .into_iter()
+    .find(|tool| tool.spec().name == "shell")
+    .unwrap();
+  let output = shell
+    .execute(
+      &context,
+      json!({"command":"head -c 2097152 /dev/zero", "timeout_ms":5000}),
+    )
+    .await
+    .unwrap();
+  assert!(output.len() <= 1024 + 32);
+  assert!(output.contains("truncated"));
+  let mut bytes = 0;
+  while let Ok(event) = received.try_recv() {
+    if let ainz::Event::ToolDelta { text, .. } = event {
+      bytes += text.len();
+    }
+  }
+  assert!(bytes <= 1024 + 32, "unbounded progress: {bytes}");
+}
+
+#[tokio::test]
+async fn read_refuses_a_line_larger_than_its_transfer_limit() {
+  let temp = tempfile::tempdir().unwrap();
+  tokio::fs::write(temp.path().join("long"), "x".repeat(128 * 1024))
+    .await
+    .unwrap();
+  let read = builtins()
+    .into_iter()
+    .find(|tool| tool.spec().name == "read")
+    .unwrap();
+  let error = read
+    .execute(
+      &ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024),
+      json!({"path":"long"}),
+    )
+    .await
+    .unwrap_err();
+  assert!(error.to_string().contains("transfer limit"));
+}
+
+#[tokio::test]
+async fn shell_progress_preserves_characters_split_across_reads() {
+  let temp = tempfile::tempdir().unwrap();
+  let (events, mut received) = ainz::EventSink::channel();
+  let mut context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
+  context.progress = Some((events, "unicode".into()));
+  let shell = builtins()
+    .into_iter()
+    .find(|tool| tool.spec().name == "shell")
+    .unwrap();
+  let output = shell
+    .execute(
+      &context,
+      json!({"command": "printf '\\303'; sleep 0.1; printf '\\251'"}),
+    )
+    .await
+    .unwrap();
+  assert!(output.starts_with("é\n[exit 0]"));
+  let mut progress = String::new();
+  while let Ok(ainz::Event::ToolDelta { text, .. }) = received.try_recv() {
+    progress.push_str(&text);
+  }
+  assert_eq!(progress, "é");
+}

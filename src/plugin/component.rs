@@ -1,28 +1,23 @@
 use std::{
-  collections::BTreeSet,
   path::{Path, PathBuf},
-  process::Stdio,
   sync::{Arc, LazyLock},
   time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use serde_json::Value;
-use tokio::{fs, io::AsyncReadExt, process::Command, time::timeout};
+use tokio::time::timeout;
 use wasmtime::{
   Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
   component::{Component, HasData, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use super::{Capability, PluginManifest, PluginTool, capture, catalog::read_artifact};
+use super::{Capability, PluginManifest, PluginTool, catalog::read_artifact, host::Host};
 use crate::{
-  process::GroupGuard,
   protocol::ToolSpec,
   tool::{Risk, Tool, ToolContext, truncate},
-  workspace,
 };
 
 wasmtime::component::bindgen!({
@@ -58,7 +53,6 @@ static ENGINE: LazyLock<Result<Engine, String>> = LazyLock::new(|| {
 pub(super) struct ComponentRuntime {
   engine: Engine,
   pre: PluginPre<HostState>,
-  client: reqwest::Client,
   timeout: Duration,
   memory_bytes: usize,
   fuel: u64,
@@ -95,10 +89,6 @@ impl ComponentRuntime {
     Ok(Self {
       engine,
       pre,
-      client: reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .context("build HTTP client")?,
       timeout: Duration::from_millis(manifest.runtime.timeout_ms),
       memory_bytes: manifest.runtime.memory_bytes,
       fuel: manifest.runtime.fuel,
@@ -118,7 +108,6 @@ impl ComponentRuntime {
       capabilities,
       self.timeout,
       context.max_output_bytes,
-      self.client.clone(),
     );
     let mut store = Store::new(&self.engine, state);
     store.limiter(|state| &mut state.limits);
@@ -146,6 +135,7 @@ impl HasData for HostBindings {
 impl ainz::plugin::host::Host for HostState {
   async fn read_file(&mut self, path: String) -> Result<String, String> {
     self
+      .host
       .host_read(&path)
       .await
       .map_err(|error| format!("{error:#}"))
@@ -153,6 +143,7 @@ impl ainz::plugin::host::Host for HostState {
 
   async fn write_file(&mut self, path: String, content: String) -> Result<(), String> {
     self
+      .host
       .host_write(&path, &content)
       .await
       .map_err(|error| format!("{error:#}"))
@@ -160,6 +151,7 @@ impl ainz::plugin::host::Host for HostState {
 
   async fn run(&mut self, command: String) -> Result<String, String> {
     self
+      .host
       .host_run(&command)
       .await
       .map_err(|error| format!("{error:#}"))
@@ -167,6 +159,7 @@ impl ainz::plugin::host::Host for HostState {
 
   async fn fetch(&mut self, url: String) -> Result<String, String> {
     self
+      .host
       .host_fetch(&url)
       .await
       .map_err(|error| format!("{error:#}"))
@@ -177,11 +170,7 @@ struct HostState {
   wasi: WasiCtx,
   table: ResourceTable,
   limits: StoreLimits,
-  workspace: PathBuf,
-  capabilities: BTreeSet<Capability>,
-  timeout: Duration,
-  max_output_bytes: usize,
-  client: reqwest::Client,
+  host: Host,
 }
 
 impl HostState {
@@ -191,7 +180,6 @@ impl HostState {
     capabilities: &[Capability],
     timeout: Duration,
     max_output_bytes: usize,
-    client: reqwest::Client,
   ) -> Self {
     Self {
       wasi: WasiCtxBuilder::new().build(),
@@ -203,108 +191,8 @@ impl HostState {
         .tables(4)
         .trap_on_grow_failure(true)
         .build(),
-      workspace,
-      capabilities: capabilities.iter().copied().collect(),
-      timeout,
-      max_output_bytes,
-      client,
+      host: Host::new(workspace, capabilities, timeout, max_output_bytes),
     }
-  }
-
-  fn require(&self, capability: Capability) -> Result<()> {
-    if !self.capabilities.contains(&capability) {
-      bail!("{capability:?} capability is required");
-    }
-    Ok(())
-  }
-
-  async fn host_read(&mut self, input: &str) -> Result<String> {
-    self.require(Capability::WorkspaceRead)?;
-    let path = workspace::existing(&self.workspace, input).await?;
-    let file = fs::File::open(&path).await?;
-    let mut bytes = Vec::new();
-    file
-      .take(self.max_output_bytes.saturating_add(1) as u64)
-      .read_to_end(&mut bytes)
-      .await?;
-    if bytes.len() > self.max_output_bytes {
-      bail!("file exceeds the host transfer limit");
-    }
-    String::from_utf8(bytes).context("file was not UTF-8")
-  }
-
-  async fn host_write(&mut self, input: &str, content: &str) -> Result<()> {
-    self.require(Capability::WorkspaceWrite)?;
-    if content.len() > self.max_output_bytes {
-      bail!("content exceeds the host transfer limit");
-    }
-    let path = workspace::writable(&self.workspace, input).await?;
-    if let Some(parent) = path.parent() {
-      fs::create_dir_all(parent).await?;
-    }
-    fs::write(path, content).await?;
-    Ok(())
-  }
-
-  // NB: process_exec is full user authority: the shell inherits the host environment
-  async fn host_run(&mut self, command: &str) -> Result<String> {
-    self.require(Capability::ProcessExec)?;
-    let mut child = Command::new("sh")
-      .args(["-c", command])
-      .current_dir(&self.workspace)
-      .stdin(Stdio::null())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .kill_on_drop(true)
-      .process_group(0)
-      .spawn()?;
-    let guard = GroupGuard::new(child.id());
-    let stdout = child.stdout.take().context("command stdout unavailable")?;
-    let stderr = child.stderr.take().context("command stderr unavailable")?;
-    let run = async {
-      let (status, stdout, stderr) = tokio::try_join!(
-        child.wait(),
-        capture(stdout, self.max_output_bytes),
-        capture(stderr, self.max_output_bytes)
-      )?;
-      if stdout.truncated || stderr.truncated {
-        bail!("command output exceeded the host transfer limit");
-      }
-      let mut output = String::from_utf8(stdout.bytes).context("stdout was not UTF-8")?;
-      output.push_str(&String::from_utf8(stderr.bytes).context("stderr was not UTF-8")?);
-      output.push_str(&format!("\n[exit {}]", status.code().unwrap_or(-1)));
-      Result::<String>::Ok(output)
-    };
-    let output = timeout(self.timeout, run)
-      .await
-      .context("command timed out")??;
-    guard.disarm();
-    Ok(output)
-  }
-
-  async fn host_fetch(&mut self, url: &str) -> Result<String> {
-    self.require(Capability::Network)?;
-    let url = reqwest::Url::parse(url)?;
-    if !matches!(url.scheme(), "http" | "https") {
-      bail!("only HTTP and HTTPS URLs are supported");
-    }
-    let response = self
-      .client
-      .get(url)
-      .timeout(self.timeout)
-      .send()
-      .await?
-      .error_for_status()?;
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-      let chunk = chunk?;
-      if bytes.len().saturating_add(chunk.len()) > self.max_output_bytes {
-        bail!("response exceeded the host transfer limit");
-      }
-      bytes.extend_from_slice(&chunk);
-    }
-    String::from_utf8(bytes).context("response was not UTF-8")
   }
 }
 

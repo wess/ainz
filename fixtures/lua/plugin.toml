@@ -1,0 +1,18 @@
+capabilities = ["compute"]
+
+[plugin]
+name = "greeting"
+version = "0.1.0"
+
+[runtime]
+kind = "lua"
+path = "main.lua"
+timeout_ms = 30000
+memory_bytes = 67108864
+fuel = 10000000
+
+[[tools]]
+name = "hello"
+description = "Greet someone by name"
+capabilities = ["compute"]
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"] }

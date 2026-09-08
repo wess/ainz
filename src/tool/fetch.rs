@@ -3,16 +3,16 @@
 
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Risk, Tool, ToolContext, truncate};
-use crate::protocol::ToolSpec;
+use crate::{network, protocol::ToolSpec};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FetchArgs {
   url: String,
   #[serde(default)]
@@ -46,63 +46,21 @@ impl Tool for Fetch {
 
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {
     let args: FetchArgs = serde_json::from_value(arguments)?;
-    let url = reqwest::Url::parse(args.url.trim()).context("invalid url")?;
-    guard(&url)?;
-    let client = Client::builder()
-      .connect_timeout(Duration::from_secs(15))
-      .timeout(Duration::from_secs(30))
-      .build()
-      .context("build HTTP client")?;
-    let response = client.get(url).send().await.context("fetch")?;
-    let status = response.status();
-    let final_url = response.url().to_string();
-    let kind = response
-      .headers()
-      .get(reqwest::header::CONTENT_TYPE)
-      .and_then(|value| value.to_str().ok())
-      .unwrap_or("unknown")
-      .to_string();
-    let body = response.text().await.context("read the body")?;
-    if !status.is_success() {
-      bail!("{final_url} answered {status}");
-    }
-    let text = match kind.contains("html") {
-      true => readable(&body),
-      false => body,
+    let limit = args
+      .max_bytes
+      .unwrap_or(context.max_output_bytes)
+      .min(context.max_output_bytes);
+    let response = network::fetch(&args.url, limit, Duration::from_secs(30)).await?;
+    let text = if response.kind.contains("html") {
+      readable(&response.text)
+    } else {
+      response.text
     };
-    let limit = args.max_bytes.unwrap_or(context.max_output_bytes);
     Ok(truncate(
-      format!("{final_url}\n{kind}\n\n{}", text.trim()),
+      format!("{}\n{}\n\n{}", response.url, response.kind, text.trim()),
       limit,
     ))
   }
-}
-
-/// A coding agent that can reach the machine's own network is a way into everything the machine
-/// can reach, including a cloud metadata service. The web is what this tool is for.
-fn guard(url: &reqwest::Url) -> Result<()> {
-  if !matches!(url.scheme(), "http" | "https") {
-    bail!("fetch reads http and https, not {}", url.scheme());
-  }
-  let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-  let local = host == "localhost"
-    || host.ends_with(".localhost")
-    || host == "::1"
-    || host == "[::1]"
-    || host.starts_with("127.")
-    || host.starts_with("10.")
-    || host.starts_with("192.168.")
-    || host.starts_with("169.254.")
-    || (host.starts_with("172.")
-      && host
-        .split('.')
-        .nth(1)
-        .and_then(|part| part.parse::<u8>().ok())
-        .is_some_and(|part| (16..=31).contains(&part)));
-  if local {
-    bail!("fetch will not reach {host}; it is on this machine's own network");
-  }
-  Ok(())
 }
 
 /// HTML as a person would read it: no markup, no script or style bodies, one space where the
@@ -167,7 +125,8 @@ fn collapse(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::{guard, readable};
+  use super::readable;
+  use crate::network::guard;
 
   fn url(value: &str) -> reqwest::Url {
     reqwest::Url::parse(value).unwrap()

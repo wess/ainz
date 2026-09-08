@@ -203,6 +203,7 @@ impl<P: ChatProvider> Agent<P> {
       let calls = reply.message.tool_calls.clone();
       session.append(reply.message);
       if self.drain_signals(&mut inbox, &mut steering) {
+        self.cancel_calls(session, &calls);
         record_usage(session, &total);
         self.events.emit(Event::Cancelled);
         bail!("run cancelled");
@@ -213,9 +214,9 @@ impl<P: ChatProvider> Agent<P> {
         return Ok(final_text);
       }
 
-      for call in calls {
+      for (index, call) in calls.iter().enumerate() {
         self.events.emit(Event::ToolStart { call: call.clone() });
-        let execution = self.run_tool(&call, &options, session.id);
+        let execution = self.run_tool(call, &options, session.id);
         tokio::pin!(execution);
         let (output, error) = loop {
           if let Some(receiver) = inbox.as_deref_mut()
@@ -225,6 +226,7 @@ impl<P: ChatProvider> Agent<P> {
               result = &mut execution => break result,
               signal = receiver.receive() => {
                 if self.handle_signal(signal, &mut steering) {
+                  self.cancel_calls(session, &calls[index..]);
                   record_usage(session, &total);
                   self.events.emit(Event::Cancelled);
                   bail!("run cancelled");
@@ -256,6 +258,18 @@ impl<P: ChatProvider> Agent<P> {
     }
     record_usage(session, &total);
     bail!("agent exceeded the {} step limit", options.max_steps)
+  }
+
+  fn cancel_calls(&self, session: &mut Session, calls: &[ToolCall]) {
+    for call in calls {
+      let output = "tool call cancelled; any partial effects may already have occurred".to_string();
+      session.append(Message::tool(call.id.clone(), output.clone()));
+      self.events.emit(Event::ToolEnd {
+        id: call.id.clone(),
+        output,
+        error: true,
+      });
+    }
   }
 
   fn handle_signal(&self, signal: Option<RunSignal>, steering: &mut Vec<String>) -> bool {
@@ -336,10 +350,22 @@ impl<P: ChatProvider> Agent<P> {
     let Some(tool) = self.tools.get(&call.name) else {
       return (format!("unknown tool: {}", call.name), true);
     };
+    if let Err(error) = tool.validate(&call.arguments) {
+      return (format!("invalid arguments: {error:#}"), true);
+    }
+    let subject = match crate::permission::subject(&self.workspace, call).await {
+      Ok(subject) => subject,
+      Err(error) => return (format!("{error:#}"), true),
+    };
     let risk = tool.risk(&call.arguments);
     // a standing rule answers before anyone is asked, in every mode: it is the same decision,
     // made once already
-    let ruled = options.rules.decide(&call.name, subject(&call.arguments));
+    let rules =
+      match crate::permission::normalize(&options.rules, &self.workspace, &call.name).await {
+        Ok(rules) => rules,
+        Err(error) => return (format!("invalid permission rule: {error:#}"), true),
+      };
+    let ruled = rules.decide(&call.name, subject.as_deref());
     let allowed = match (ruled, options.permissions) {
       (Some(decided), _) => decided,
       (None, PermissionMode::Auto) => true,

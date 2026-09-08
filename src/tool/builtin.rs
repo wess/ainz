@@ -6,9 +6,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
   fs,
-  io::{AsyncBufReadExt, BufReader},
+  io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
   process::Command,
-  sync::mpsc,
   time::timeout,
 };
 
@@ -101,6 +100,28 @@ impl Tool for Builtin {
     }
   }
 
+  fn validate(&self, arguments: &Value) -> Result<()> {
+    match self.name {
+      "read" | "list" => {
+        let _: PathArgs = serde_json::from_value(arguments.clone())?;
+      }
+      "search" => {
+        let _: SearchArgs = serde_json::from_value(arguments.clone())?;
+      }
+      "write" => {
+        let _: WriteArgs = serde_json::from_value(arguments.clone())?;
+      }
+      "edit" => {
+        let _: EditArgs = serde_json::from_value(arguments.clone())?;
+      }
+      "shell" => {
+        let _: super::shell::ShellArgs = serde_json::from_value(arguments.clone())?;
+      }
+      _ => unreachable!(),
+    }
+    Ok(())
+  }
+
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {
     match self.name {
       "read" => read(context, arguments).await,
@@ -108,7 +129,7 @@ impl Tool for Builtin {
       "search" => search(context, arguments).await,
       "write" => write(context, arguments).await,
       "edit" => edit(context, arguments).await,
-      "shell" => shell(context, arguments).await,
+      "shell" => super::shell::execute(context, arguments).await,
       _ => unreachable!(),
     }
   }
@@ -123,6 +144,7 @@ fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PathArgs {
   #[serde(default = "dot")]
   path: String,
@@ -138,20 +160,34 @@ fn dot() -> String {
 async fn read(context: &ToolContext, value: Value) -> Result<String> {
   let args: PathArgs = serde_json::from_value(value)?;
   let path = workspace::existing(&context.workspace, &args.path).await?;
-  let file = fs::File::open(&path)
+  let file = workspace::open(&context.workspace, &args.path, false, false)
     .await
     .with_context(|| format!("read {}", path.display()))?;
-  let mut lines = BufReader::new(file).lines();
+  let mut reader = BufReader::new(file);
   let offset = args.offset.unwrap_or(1).saturating_sub(1);
   let limit = args.limit.unwrap_or(2_000);
   let mut output = String::new();
   let mut index = 0;
   let mut taken = 0;
-  while let Some(line) = lines
-    .next_line()
-    .await
-    .with_context(|| format!("read {}", path.display()))?
-  {
+  loop {
+    let mut line = String::new();
+    let read = (&mut reader)
+      .take(
+        context
+          .max_output_bytes
+          .min(16 * 1024 * 1024)
+          .saturating_add(1) as u64,
+      )
+      .read_line(&mut line)
+      .await
+      .with_context(|| format!("read {}", path.display()))?;
+    if read == 0 {
+      break;
+    }
+    if !line.ends_with('\n') && read > context.max_output_bytes.min(16 * 1024 * 1024) {
+      bail!("line exceeds the read transfer limit");
+    }
+    let line = line.trim_end_matches(['\r', '\n']);
     if index >= offset {
       if taken == limit || output.len() > context.max_output_bytes {
         break;
@@ -159,7 +195,7 @@ async fn read(context: &ToolContext, value: Value) -> Result<String> {
       if taken > 0 {
         output.push('\n');
       }
-      output.push_str(&line);
+      output.push_str(line);
       taken += 1;
     }
     index += 1;
@@ -174,19 +210,32 @@ async fn list(context: &ToolContext, value: Value) -> Result<String> {
     .await
     .with_context(|| format!("list {}", path.display()))?;
   let mut names = Vec::new();
+  let mut size = 0;
+  let mut truncated = false;
   while let Some(entry) = entries.next_entry().await? {
     let suffix = if entry.file_type().await?.is_dir() {
       "/"
     } else {
       ""
     };
-    names.push(format!("{}{suffix}", entry.file_name().to_string_lossy()));
+    let name = format!("{}{suffix}", entry.file_name().to_string_lossy());
+    size += name.len() + 1;
+    if size > context.max_output_bytes {
+      truncated = true;
+      break;
+    }
+    names.push(name);
   }
   names.sort();
-  Ok(truncate(names.join("\n"), context.max_output_bytes))
+  let mut text = names.join("\n");
+  if truncated {
+    text.push_str("\n[output truncated]");
+  }
+  Ok(text)
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
   query: String,
   #[serde(default = "dot")]
@@ -202,28 +251,45 @@ fn default_results() -> usize {
 async fn search(context: &ToolContext, value: Value) -> Result<String> {
   let args: SearchArgs = serde_json::from_value(value)?;
   let path = workspace::existing(&context.workspace, &args.path).await?;
-  let max_results = args.max_results.to_string();
+  let max_results = args.max_results.clamp(1, 500).to_string();
   // NB: the query goes through -e and the path after -- so neither can be read as an rg flag
-  let output = Command::new("rg")
+  let mut child = Command::new("rg")
     .args(["--line-number", "--color", "never", "--max-count"])
     .arg(&max_results)
     .args(["-e", &args.query, "--"])
     .arg(path)
     .current_dir(&context.workspace)
     .stdin(Stdio::null())
-    .output()
-    .await
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .process_group(0)
+    .spawn()
     .context("run rg (ripgrep must be installed)")?;
-  if !output.status.success() && output.status.code() != Some(1) {
-    bail!("rg failed: {}", String::from_utf8_lossy(&output.stderr));
+  let _guard = GroupGuard::new(child.id());
+  let stdout = child.stdout.take().context("search stdout unavailable")?;
+  let stderr = child.stderr.take().context("search stderr unavailable")?;
+  let (status, output, error) = timeout(Duration::from_secs(30), async {
+    tokio::try_join!(
+      child.wait(),
+      crate::output::capture(stdout, context.max_output_bytes),
+      crate::output::capture(stderr, context.max_output_bytes)
+    )
+  })
+  .await
+  .context("search timed out")??;
+  if !status.success() && status.code() != Some(1) {
+    bail!("rg failed: {}", String::from_utf8_lossy(&error.bytes));
   }
-  Ok(truncate(
-    String::from_utf8_lossy(&output.stdout).into_owned(),
-    context.max_output_bytes,
-  ))
+  let mut text = String::from_utf8_lossy(&output.bytes).into_owned();
+  if output.truncated {
+    text.push_str("\n[output truncated]");
+  }
+  Ok(text)
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WriteArgs {
   path: String,
   content: String,
@@ -231,13 +297,7 @@ struct WriteArgs {
 
 async fn write(context: &ToolContext, value: Value) -> Result<String> {
   let args: WriteArgs = serde_json::from_value(value)?;
-  let path = workspace::writable(&context.workspace, &args.path).await?;
-  if let Some(parent) = path.parent() {
-    fs::create_dir_all(parent).await?;
-  }
-  fs::write(&path, args.content.as_bytes())
-    .await
-    .with_context(|| format!("write {}", args.path))?;
+  workspace::write(&context.workspace, &args.path, args.content.as_bytes()).await?;
   Ok(format!(
     "wrote {} bytes to {}",
     args.content.len(),
@@ -246,6 +306,7 @@ async fn write(context: &ToolContext, value: Value) -> Result<String> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditArgs {
   path: String,
   old: String,
@@ -257,97 +318,24 @@ async fn edit(context: &ToolContext, value: Value) -> Result<String> {
   if args.old.is_empty() {
     bail!("old text must not be empty");
   }
-  let path = workspace::existing(&context.workspace, &args.path).await?;
-  let text = fs::read_to_string(&path)
-    .await
-    .with_context(|| format!("read {}", args.path))?;
+  let mut file = workspace::open(&context.workspace, &args.path, true, false).await?;
+  let mut text = String::new();
+  (&mut file)
+    .take(16 * 1024 * 1024 + 1)
+    .read_to_string(&mut text)
+    .await?;
+  if text.len() > 16 * 1024 * 1024 {
+    bail!("file exceeds the edit transfer limit");
+  }
   let count = text.matches(&args.old).count();
   if count != 1 {
     bail!("expected one match in {}, found {count}", args.path);
   }
-  fs::write(&path, text.replacen(&args.old, &args.new, 1))
+  file.rewind().await?;
+  file.set_len(0).await?;
+  file
+    .write_all(text.replacen(&args.old, &args.new, 1).as_bytes())
     .await
     .with_context(|| format!("write {}", args.path))?;
   Ok(format!("edited {}", args.path))
-}
-
-#[derive(Deserialize)]
-struct ShellArgs {
-  command: String,
-  #[serde(default = "default_timeout")]
-  timeout_ms: u64,
-}
-
-fn default_timeout() -> u64 {
-  30_000
-}
-
-async fn shell(context: &ToolContext, value: Value) -> Result<String> {
-  let args: ShellArgs = serde_json::from_value(value)?;
-  let mut child = Command::new("sh")
-    .args(["-c", &args.command])
-    .current_dir(&context.workspace)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true)
-    .process_group(0)
-    .spawn()
-    .context("start shell")?;
-  let guard = GroupGuard::new(child.id());
-  let (sender, mut lines) = mpsc::unbounded_channel();
-  // both pipes are read as they fill, which is what makes a long command visible while it
-  // runs; the cost is that stderr lands where it happened rather than after all of stdout
-  for pipe in [
-    child.stdout.take().map(Pipe::Out),
-    child.stderr.take().map(Pipe::Err),
-  ]
-  .into_iter()
-  .flatten()
-  {
-    let sender = sender.clone();
-    tokio::spawn(async move {
-      match pipe {
-        Pipe::Out(pipe) => forward(BufReader::new(pipe).lines(), sender).await,
-        Pipe::Err(pipe) => forward(BufReader::new(pipe).lines(), sender).await,
-      }
-    });
-  }
-  drop(sender);
-  let drain = async {
-    let mut text = String::new();
-    while let Some(line) = lines.recv().await {
-      context.report(&format!("{line}\n"));
-      text.push_str(&line);
-      text.push('\n');
-    }
-    text
-  };
-  let Ok((status, mut text)) = timeout(Duration::from_millis(args.timeout_ms), async {
-    tokio::join!(child.wait(), drain)
-  })
-  .await
-  else {
-    bail!("command timed out after {} ms", args.timeout_ms);
-  };
-  let status = status.context("wait for shell")?;
-  guard.disarm();
-  text.push_str(&format!("[exit {}]", status.code().unwrap_or(-1)));
-  Ok(truncate(text, context.max_output_bytes))
-}
-
-enum Pipe {
-  Out(tokio::process::ChildStdout),
-  Err(tokio::process::ChildStderr),
-}
-
-async fn forward<R: tokio::io::AsyncBufRead + Unpin>(
-  mut lines: tokio::io::Lines<R>,
-  sender: mpsc::UnboundedSender<String>,
-) {
-  while let Ok(Some(line)) = lines.next_line().await {
-    if sender.send(line).is_err() {
-      break;
-    }
-  }
 }

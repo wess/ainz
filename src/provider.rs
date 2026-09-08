@@ -20,9 +20,12 @@ use tokio::{
 use crate::{
   config::{PermissionMode, ProcessOutput},
   event::{Event, EventSink},
+  process::GroupGuard,
   protocol::{Message, Role, ToolSpec, Usage},
   sse::SseDecoder,
 };
+
+const MAX_TRANSFER: usize = 16 * 1024 * 1024;
 
 mod stream;
 mod wire;
@@ -185,20 +188,24 @@ impl HttpProvider {
         tokio::time::sleep(wait).await;
         continue;
       }
-      let text = response.text().await.unwrap_or_default();
+      let text = String::from_utf8_lossy(
+        &crate::output::response(response, 2048)
+          .await
+          .unwrap_or_default(),
+      )
+      .into_owned();
       if attempt == 1 {
         bail!("model discovery failed ({status}): {text}");
       }
       bail!("model discovery failed ({status}) after {attempt} attempts: {text}");
     };
-    let mut models: Vec<_> = response
-      .json::<ModelList>()
-      .await
-      .context("invalid model list")?
-      .data
-      .into_iter()
-      .map(|model| model.id)
-      .collect();
+    let mut models: Vec<_> =
+      serde_json::from_slice::<ModelList>(&crate::output::response(response, MAX_TRANSFER).await?)
+        .context("invalid model list")?
+        .data
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
     models.sort();
     models.dedup();
     Ok(models)
@@ -278,7 +285,12 @@ impl ChatProvider for HttpProvider {
         tokio::time::sleep(wait).await;
         continue;
       }
-      let text = response.text().await.unwrap_or_default();
+      let text = String::from_utf8_lossy(
+        &crate::output::response(response, 2048)
+          .await
+          .unwrap_or_default(),
+      )
+      .into_owned();
       if attempt == 1 {
         bail!("model request failed ({status}): {text}");
       }
@@ -292,7 +304,8 @@ impl ChatProvider for HttpProvider {
       .is_some_and(|value| value.contains("text/event-stream"));
     if !streaming {
       return parse_response(
-        response.json().await.context("invalid model response")?,
+        serde_json::from_slice(&crate::output::response(response, MAX_TRANSFER).await?)
+          .context("invalid model response")?,
         events,
       );
     }
@@ -302,15 +315,32 @@ impl ChatProvider for HttpProvider {
     let mut content = String::new();
     let mut calls: BTreeMap<usize, PartialCall> = BTreeMap::new();
     let mut usage = Usage::default();
-    while let Some(chunk) = stream.next().await {
-      for data in decoder.push(&chunk.context("read model stream")?) {
-        parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
+    let mut finished = false;
+    let mut done = false;
+    let mut received = 0;
+    'stream: while let Some(chunk) = stream.next().await {
+      let chunk = chunk.context("read model stream")?;
+      received += chunk.len();
+      if received > MAX_TRANSFER {
+        bail!("model stream exceeds the transfer limit");
+      }
+      for data in decoder.push(&chunk) {
+        finished |= parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
+        if data.trim() == "[DONE]" {
+          done = true;
+          break 'stream;
+        }
       }
     }
-    for data in decoder.finish() {
-      parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
+    if !done {
+      for data in decoder.finish() {
+        finished |= parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
+      }
     }
 
+    if !finished {
+      bail!("model stream ended before completion");
+    }
     let tool_calls = calls
       .into_values()
       .map(PartialCall::finish)
@@ -396,8 +426,10 @@ impl ChatProvider for ProcessProvider {
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .kill_on_drop(true)
+      .process_group(0)
       .spawn()
       .with_context(|| format!("start provider command {}", self.command))?;
+    let _guard = GroupGuard::new(child.id());
     let mut stdin = child
       .stdin
       .take()
@@ -418,33 +450,46 @@ impl ChatProvider for ProcessProvider {
       drop(stdin.shutdown().await);
     };
     // stderr drains on its own task for the same reason the prompt is fed on one
-    let errors = tokio::spawn(async move {
-      let mut text = String::new();
-      drop(BufReader::new(stderr).read_to_string(&mut text).await);
-      text
-    });
+    let errors = tokio::spawn(async move { crate::output::capture(stderr, MAX_TRANSFER).await });
     let mut stream = StreamState::default();
     let read = async {
       let mut reader = BufReader::new(stdout);
       let mut buffered = String::new();
       if self.output == ProcessOutput::StreamJson {
-        let mut lines = reader.lines();
-        while let Some(line) = lines.next_line().await.context("read provider output")? {
+        let mut received = 0;
+        loop {
+          let mut line = String::new();
+          let read = (&mut reader)
+            .take((MAX_TRANSFER - received + 1) as u64)
+            .read_line(&mut line)
+            .await
+            .context("read provider output")?;
+          if read == 0 {
+            break;
+          }
+          received += read;
+          if received > MAX_TRANSFER {
+            bail!("provider output exceeds the transfer limit");
+          }
           stream.push(&line, events);
         }
       } else {
         // the other modes want the whole of stdout, so read it in one piece
-        reader
-          .read_to_string(&mut buffered)
+        let captured = crate::output::capture(reader, MAX_TRANSFER)
           .await
           .context("read provider output")?;
+        if captured.truncated {
+          bail!("provider output exceeds the transfer limit");
+        }
+        buffered = String::from_utf8(captured.bytes).context("provider output was not UTF-8")?;
       }
       anyhow::Ok(buffered)
     };
     let (_, buffered) = tokio::join!(feed, read);
     let buffered = buffered?;
     let status = child.wait().await.context("wait for provider command")?;
-    let errors = errors.await.unwrap_or_default();
+    let errors = errors.await.context("read provider stderr")??;
+    let errors = String::from_utf8_lossy(&errors.bytes);
     if !status.success() {
       // a command that dies early may explain itself on either pipe
       let detail = match errors.trim() {

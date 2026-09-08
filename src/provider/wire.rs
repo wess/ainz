@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -64,6 +64,9 @@ pub(super) struct PartialCall {
 
 impl PartialCall {
   pub(super) fn finish(self) -> Result<ToolCall> {
+    if self.id.is_empty() || self.name.is_empty() {
+      bail!("model returned an incomplete tool call");
+    }
     Ok(ToolCall {
       id: self.id,
       name: self.name,
@@ -86,6 +89,7 @@ struct StreamChunk {
 #[derive(Deserialize)]
 struct Choice {
   delta: Delta,
+  finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -194,10 +198,10 @@ pub(super) fn parse_data(
   calls: &mut BTreeMap<usize, PartialCall>,
   usage: &mut Usage,
   events: &EventSink,
-) -> Result<()> {
+) -> Result<bool> {
   let data = data.trim();
   if data == "[DONE]" {
-    return Ok(());
+    return Ok(true);
   }
   let chunk: StreamChunk = serde_json::from_str(data)
     .with_context(|| format!("invalid stream event: {}", excerpt(data)))?;
@@ -205,7 +209,13 @@ pub(super) fn parse_data(
     usage.input_tokens = wire.prompt_tokens;
     usage.output_tokens = wire.completion_tokens;
   }
+  let mut finished = false;
   for choice in chunk.choices {
+    match choice.finish_reason.as_deref() {
+      Some("stop" | "tool_calls") => finished = true,
+      Some(reason) => bail!("model stream ended with {reason}"),
+      None => {}
+    }
     if let Some(text) = choice.delta.content {
       content.push_str(&text);
       events.emit(Event::TextDelta { text });
@@ -225,7 +235,7 @@ pub(super) fn parse_data(
       }
     }
   }
-  Ok(())
+  Ok(finished)
 }
 
 fn excerpt(data: &str) -> String {

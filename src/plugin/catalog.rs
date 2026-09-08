@@ -14,6 +14,7 @@ use super::{
   MAX_MEMORY_BYTES, MAX_TIMEOUT_MS, PluginFormat, PluginManifest, PluginMeta, PluginRuntime,
   RuntimeKind,
   component::{ComponentRuntime, ComponentTool},
+  lua::{LuaRuntime, LuaTool},
   process::ProcessTool,
 };
 use crate::mcp::{McpProfile, McpServerConfig, McpTransport};
@@ -42,7 +43,7 @@ impl DiscoveredPlugin {
   pub fn artifact(&self) -> Option<PathBuf> {
     match self.manifest.runtime.kind {
       RuntimeKind::Process => self.manifest.runtime.command.first().map(PathBuf::from),
-      RuntimeKind::Component => self.manifest.runtime.path.clone(),
+      RuntimeKind::Component | RuntimeKind::Lua => self.manifest.runtime.path.clone(),
     }
   }
 }
@@ -120,6 +121,18 @@ impl PluginCatalog {
               plugin.artifact_digest.clone(),
               definition.clone(),
             )?) as Arc<dyn Tool>);
+          }
+        }
+        RuntimeKind::Lua => {
+          let runtime = Arc::new(
+            LuaRuntime::new(&plugin.manifest, plugin.root(), &plugin.artifact_digest).await?,
+          );
+          for definition in &plugin.manifest.tools {
+            tools.push(Arc::new(LuaTool::new(
+              runtime.clone(),
+              plugin.manifest.plugin.name.clone(),
+              definition.clone(),
+            )) as Arc<dyn Tool>);
           }
         }
         RuntimeKind::Component => {
@@ -340,13 +353,13 @@ fn validate(manifest: &PluginManifest) -> Result<()> {
     RuntimeKind::Process if runtime.command.is_empty() => {
       bail!("process runtime.command cannot be empty");
     }
-    RuntimeKind::Component if runtime.path.is_none() => {
-      bail!("component runtime.path is required");
+    RuntimeKind::Component | RuntimeKind::Lua if runtime.path.is_none() => {
+      bail!("runtime.path is required");
     }
-    RuntimeKind::Component if runtime.memory_bytes == 0 || runtime.fuel == 0 => {
+    RuntimeKind::Component | RuntimeKind::Lua if runtime.memory_bytes == 0 || runtime.fuel == 0 => {
       bail!("runtime memory_bytes and fuel must be greater than zero");
     }
-    RuntimeKind::Component if runtime.memory_bytes > MAX_MEMORY_BYTES => {
+    RuntimeKind::Component | RuntimeKind::Lua if runtime.memory_bytes > MAX_MEMORY_BYTES => {
       bail!("runtime memory_bytes may not exceed {MAX_MEMORY_BYTES}");
     }
     _ => {}
@@ -393,7 +406,7 @@ async fn fingerprint(
 ) -> Result<(String, String)> {
   let artifact = match manifest.runtime.kind {
     RuntimeKind::Process => manifest.runtime.command.first().map(PathBuf::from),
-    RuntimeKind::Component => manifest.runtime.path.clone(),
+    RuntimeKind::Component | RuntimeKind::Lua => manifest.runtime.path.clone(),
   }
   .context("runtime artifact is missing")?;
   let artifact = if artifact.is_relative() {
@@ -401,7 +414,19 @@ async fn fingerprint(
   } else {
     artifact
   };
-  let artifact_digest = file_digest(&artifact).await?;
+  let artifact_digest = if manifest.runtime.kind == RuntimeKind::Lua {
+    super::lua::digest(
+      root,
+      manifest
+        .runtime
+        .path
+        .as_deref()
+        .context("Lua path missing")?,
+    )
+    .await?
+  } else {
+    file_digest(&artifact).await?
+  };
   let mut hash = Sha256::new();
   hash.update(data);
   hash.update([0]);
