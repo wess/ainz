@@ -6,6 +6,7 @@ pub mod control;
 pub mod credential;
 pub mod event;
 mod frontmatter;
+#[cfg(feature = "cli")]
 pub mod header;
 pub mod hook;
 pub mod import;
@@ -27,6 +28,8 @@ pub mod skill;
 mod sse;
 pub mod subagent;
 pub mod synapse;
+#[cfg(feature = "cli")]
+pub mod theme;
 pub mod todo;
 pub mod tool;
 mod workspace;
@@ -39,6 +42,7 @@ pub use config::{
 pub use control::{RunController, RunInbox, run_control};
 pub use credential::Credential;
 pub use event::{Event, EventSink};
+#[cfg(feature = "cli")]
 pub use header::{HeaderArt, HeaderCatalog};
 pub use hook::{HookEvent, HookRunner};
 pub use import::{Candidate, ImportKind};

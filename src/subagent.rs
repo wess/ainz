@@ -109,7 +109,18 @@ impl SubagentRegistry {
       .tasks()
       .remove(name)
       .with_context(|| format!("no background subagent named {name} is waiting to be collected"))?;
-    task.await.context("subagent task failed")?
+    let mut pending = Collection {
+      registry: self,
+      name: name.into(),
+      task: Some(task),
+    };
+    let result = pending
+      .task
+      .as_mut()
+      .expect("collection owns its task")
+      .await;
+    pending.task = None;
+    result.context("subagent task failed")?
   }
 
   pub fn running(&self) -> Vec<(String, bool)> {
@@ -118,6 +129,39 @@ impl SubagentRegistry {
       .iter()
       .map(|(name, task)| (name.clone(), task.is_finished()))
       .collect()
+  }
+}
+
+struct Collection<'a> {
+  registry: &'a SubagentRegistry,
+  name: String,
+  task: Option<JoinHandle<Result<SubagentResult>>>,
+}
+
+impl Drop for Collection<'_> {
+  fn drop(&mut self) {
+    if let Some(task) = self.task.take() {
+      // a cancelled wait returns ownership to the registry; dropping a join handle detaches it
+      match self.registry.tasks().entry(self.name.clone()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+          entry.insert(task);
+        }
+        std::collections::btree_map::Entry::Occupied(_) => task.abort(),
+      }
+    }
+  }
+}
+
+impl Drop for SubagentRegistry {
+  fn drop(&mut self) {
+    for task in self
+      .running
+      .get_mut()
+      .unwrap_or_else(PoisonError::into_inner)
+      .values()
+    {
+      task.abort();
+    }
   }
 }
 

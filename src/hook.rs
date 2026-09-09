@@ -2,24 +2,21 @@
 // editor runs a linter on save. session_start and session_end bookend a run, pre_tool and
 // post_tool bracket a tool call.
 
-use std::{collections::BTreeMap, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use uuid::Uuid;
 
 use crate::{
   config::HookDef,
   event::{Event, EventSink},
-  process::GroupGuard,
   protocol::ToolCall,
 };
 
-// a hook is someone else's script, not part of ainz's own control flow, so one that hangs
-// (waits on input, loops, calls out to something slow) must not be able to hang the session
-const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+mod process;
+use process::run_hook;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -135,7 +132,7 @@ impl HookRunner {
         None,
         None,
       );
-      let reason = match run_hook(def, &payload).await {
+      let reason = match run_hook(def, &payload, workspace).await {
         Ok(outcome) if outcome.success => continue,
         Ok(outcome) if outcome.stderr.trim().is_empty() => {
           "(hook wrote nothing to stderr)".to_string()
@@ -172,7 +169,7 @@ impl HookRunner {
         continue;
       }
       let payload = payload(event, workspace, session_id, tool, output, error);
-      let outcome = match run_hook(def, &payload).await {
+      let outcome = match run_hook(def, &payload, workspace).await {
         Ok(outcome) if outcome.success => continue,
         Ok(outcome) => outcome.stderr,
         Err(error) => format!("{error:#}"),
@@ -253,41 +250,4 @@ fn payload(
     map.insert("error".into(), json!(error));
   }
   value
-}
-
-struct HookOutcome {
-  success: bool,
-  stderr: String,
-}
-
-async fn run_hook(def: &HookDef, payload: &Value) -> Result<HookOutcome> {
-  let Some((program, args)) = def.command.split_first() else {
-    bail!("hook command is empty");
-  };
-  let mut child = Command::new(program)
-    .args(args)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true)
-    .process_group(0)
-    .spawn()
-    .with_context(|| format!("start hook {program}"))?;
-  let guard = GroupGuard::new(child.id());
-  let mut stdin = child.stdin.take().expect("stdin was piped");
-  let bytes = serde_json::to_vec(payload).context("encode hook payload")?;
-  let run = async {
-    stdin.write_all(&bytes).await.context("write hook stdin")?;
-    drop(stdin);
-    child.wait_with_output().await.context("wait for hook")
-  };
-  let Ok(output) = timeout(HOOK_TIMEOUT, run).await else {
-    bail!("hook {program} timed out after {HOOK_TIMEOUT:?}");
-  };
-  let output = output?;
-  guard.disarm();
-  Ok(HookOutcome {
-    success: output.status.success(),
-    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-  })
 }

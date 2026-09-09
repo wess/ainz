@@ -1,3 +1,5 @@
+#![cfg(all(feature = "cli", feature = "lua"))]
+
 use std::{path::Path, time::Duration};
 
 use serde_json::{Value, json};

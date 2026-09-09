@@ -29,6 +29,8 @@ one, it runs only when the tool's name contains it (`"write"` matches `write` an
 matches it as a glob if the pattern has a `*` (`"shell*"` matches `shell` but not `background_shell`).
 `session_start` and `session_end` ignore `matcher` — there is no tool to match against.
 
+Commands run in the selected workspace, so relative script paths resolve there.
+
 An old config with no `[hooks]` table loads exactly as before; the section is empty by default.
 
 ## The payload
@@ -59,6 +61,15 @@ reported and the session carries on, the same way a slow linter does not stop a 
 A hook gets ten seconds. Past that it is killed and treated as a failure — blocking for
 `pre_tool`, reported for everything else — because a hook that never returns must never be able
 to hang the session waiting for it.
+
+Stdout is drained and discarded. Stderr is drained concurrently with stdin and retained up to
+64 KiB, followed by a truncation marker when needed. A noisy hook cannot block payload delivery
+by filling its output pipes or cause unbounded output retention.
+
+Cancellation interrupts any hook phase and kills its process group. Remaining hooks, including
+an end hook that has not started, are skipped. A tool's result is recorded before its post-tool
+hook starts, so cancelling that hook preserves the result and any completed effects. The
+`turn_end` event is emitted only after end hooks return; cancelled runs emit `cancelled` instead.
 
 ## Example: keep writes inside the sanctioned directories
 

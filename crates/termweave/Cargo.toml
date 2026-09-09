@@ -1,0 +1,22 @@
+[package]
+name = "termweave"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Streaming Markdown rendered as styled, width-aware terminal lines"
+readme = "readme.md"
+repository = "https://github.com/wess/ainz"
+keywords = ["markdown", "terminal", "ansi", "ratatui", "streaming"]
+categories = ["command-line-interface", "text-processing"]
+include = ["src/**", "tests/**", "examples/**", "readme.md", "license", "Cargo.toml"]
+
+[features]
+default = []
+ratatui = ["dep:ratatui-core"]
+
+[dependencies]
+pulldown-cmark = { version = "0.13.4", default-features = false }
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
+ratatui-core = { version = "0.1.2", optional = true, default-features = false }

@@ -17,6 +17,8 @@ use crate::{
   tool::{Risk, Tool, ToolContext, truncate},
 };
 
+mod write;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionNode {
   pub id: Uuid,
@@ -312,16 +314,6 @@ impl SessionStore {
       root: Self::default_path()?,
       legacy_root: Some(base.join("agentx/sessions")),
     })
-  }
-
-  pub async fn save(&self, session: &Session) -> Result<()> {
-    fs::create_dir_all(&self.root).await?;
-    let path = self.path(session.id);
-    let temp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(session)?;
-    fs::write(&temp, data).await?;
-    fs::rename(&temp, &path).await?;
-    Ok(())
   }
 
   pub async fn load(&self, id: Uuid) -> Result<Session> {

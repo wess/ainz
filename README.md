@@ -30,7 +30,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 Release downloads cover Intel and Apple Silicon macOS and x86_64 and arm64 Linux. The
 `search` tool shells out to [ripgrep](https://github.com/BurntSushi/ripgrep), so install `rg`
 as well. See [`docs/install.md`](docs/install.md) for pinned versions, custom install
-directories, Cargo, and uninstalling. The project site has a
+directories, Cargo, and uninstalling. The [documentation index](docs/readme.md) lists every guide. The project site has a
 [tutorial](https://wess.io/ainz/tutorial/) and [reference manual](https://wess.io/ainz/docs/).
 
 Ainz was previously called AgentX. On first launch it carries forward the configuration and MCP
@@ -45,6 +45,19 @@ cargo build --release
 # or install the CLI from this checkout
 cargo install --path .
 ```
+
+## Embed the core
+
+Use `ainz` with `default-features = false` to embed the agent loop without the CLI, Lua, or
+WebAssembly engines. The host supplies tools, providers, approvals, events, and persistence.
+The default CLI build still includes every runtime.
+
+```sh
+cargo run --no-default-features --example embedded
+```
+
+See [embedding](docs/embedding.md) for the public API and feature choices, and
+[quality targets](docs/quality.md) for the reliability and resource benchmarks.
 
 ## Configure
 
@@ -140,22 +153,27 @@ ends it early. It runs code you have not vetted, which is what the
 name is for.
 
 In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts
-that show the tool's arguments, tool activity, and a subagent roster. Type `/` to open the
+that show the tool's arguments, tool activity, and a subagent roster on the right. Type `/` to open the
 command palette and fuzzy-search commands and prompt templates, and `@` to complete a path in
 the workspace.
+
+The title follows the selected agent like an IRC channel topic: a short task excerpt, plus
+the current tool while it runs. Finished agents keep their task title until the next prompt.
 
 The prompt is a readline: `Up` and `Down` walk earlier prompts and come back to the line being
 written, `Left`/`Right` and `Alt+←`/`Alt+→` move by character and word, `Ctrl+A`/`Ctrl+E` reach
 its ends, `Ctrl+U`/`Ctrl+K`/`Ctrl+W` cut, and `Shift+Enter` — or a trailing backslash — adds a
 newline. `Esc` twice steps back to the last prompt and puts it in the line to be changed, taking
 the session from there. `/vim` turns on modal editing. The wheel, `Shift+↑`/`Shift+↓` and
-`PageUp`/`PageDown` scroll the transcript; `Ctrl+O` expands what tools returned in full. The
-mouse selects a field or a menu row in the setup screens, and holding `Shift` while dragging
+`PageUp`/`PageDown` scroll the transcript. Reading earlier output holds your place while new
+text arrives; `Ctrl+End` returns to the latest output. `Ctrl+O` expands captured tool output,
+including while a tool is running. The mouse selects a field or a menu row in the setup screens, and holding `Shift` while dragging
 selects text the way it normally would.
 
 `/inline` draws the prompt at the bottom of the terminal's own scroll instead of taking the
 whole screen, so finished output stays in the scrollback the terminal already keeps — at the
-cost of the roster. It applies at the next launch.
+cost of the roster. Expand tools while they run; output already in terminal scrollback keeps
+its formatting. It applies at the next launch.
 
 The tools a session has, and what each one takes, are in [`docs/tools.md`](docs/tools.md); what
 may run without asking is in [`docs/permissions.md`](docs/permissions.md).
@@ -176,10 +194,18 @@ on, and what it cost — rather than as a function call somebody spoke:
 
 ```
  15:31  ▸ shell   cargo build --release
-            Compiling ainz v0.8.0
+           Compiling ainz
  15:31  ▪ shell   cargo build --release · 41.2s · 12 lines
  15:32  ✗ edit    src/main.rs · 8ms · no such file
 ```
+
+The buffer keeps the compact IRC layout: `15:31 <you> message` and `15:31 <Ainz> reply`,
+with wrapped lines aligned under the message. Answers render Markdown using terminal styling
+for headings, bold text, inline code, and fenced code blocks. A dedicated row above the prompt
+shows Working, Responding, Running tools, or Waiting for approval, with elapsed time. When the run ends,
+it shows Completed, Cancelled, or Failed and leaves a matching marker in the transcript.
+The result stays visible until the next run begins. Completion follows end hooks; cancellation
+also works during compaction, approvals, tools, and hooks.
 
 A long command reports itself while it runs rather than after: the call grows a line showing the
 last thing it wrote, and `Ctrl+O` opens the whole of it. A run of more than
@@ -193,17 +219,29 @@ that speaks the kitty keyboard protocol, and `/agent N` works everywhere. `Ctrl+
 active run, and a second `Ctrl+C` abandons a run whose provider ignores the cancel. `/settings`
 opens the settings screen, `/memory` and `/remember` reach memory, and `/synapse` shows the
 integration state. Text
-entered during a run is queued as steering for the next safe turn boundary. Redirected input
+entered during a run is queued as steering for the next safe turn boundary. Rejected steering
+keeps the draft and reports the reason. Redirected input
 keeps a plain line interface.
 
-An empty transcript shows one of ten built-in mastheads. Paint your own in the
-[masthead studio](https://wess.io/ainz/masthead/), or bring UTF-8 ASCII or ANSI-SGR art, and
-drop it in the config directory's `headers/` folder or a project's `.ainz/headers/`.
-`/headers` lists them and `/header NAME` selects one; see [`docs/headers.md`](docs/headers.md).
+`/header mascot` selects the pixel mascot, with separate compact and tiny drawings for small
+terminals. `/header mascotascii` selects plain ASCII. `/header builtin` rotates among bundled
+art, and `/header random` includes custom headers. A named choice previews immediately without
+clearing the conversation and is remembered for future empty buffers.
+
+The [masthead studio](https://wess.io/ainz/masthead/) starts from the mascot, a wordmark, a blank
+canvas, or an existing ANSI drawing. Edit, undo, preview, and copy a command that installs the
+exact artwork for all your projects or just one. Then use the matching `/header NAME` command;
+new files are discovered without a restart. ANSI download and manual installation remain available.
+See [headers](docs/headers.md) and the complete [interface guide](docs/interface.md).
+
+The [Theme Designer](https://wess.io/ainz/theme/) previews chat palettes and exports a small TOML
+file with the same one-command installation flow. `/themes` lists installed themes; `/theme NAME`
+applies or reloads a palette immediately, and `/theme default` restores the built-in colors.
+Artwork keeps its original colors. See [themes](docs/themes.md) for roles, paths, and limits.
 
 The unit tests cover the model behind the prompt; what a keystroke actually draws needs a
 terminal, so `scripts/tui-check.py` drives a real one. It opens a pty of its own, builds a
-throwaway workspace with a fake provider, and checks 44 things — history, the cursor keys, `@`
+throwaway workspace with a fake provider, and checks history, the cursor keys, `@`
 completion, the rewind, the mouse, vim mode, and both ways of drawing, including what happens
 when the terminal will not say where the cursor is. It needs `pyte` and never touches the
 terminal it is run from.
@@ -211,7 +249,17 @@ terminal it is run from.
 ```sh
 pip install pyte
 cargo build && python3 scripts/tui-check.py
+python3 tests/tui/output.py
+python3 tests/tui/mascot.py
+python3 tests/tui/themes.py
+bun test tests/site
 ```
+
+## Terminal rendering library
+
+The buffer uses [termweave](crates/termweave/readme.md), a standalone Markdown renderer with
+streaming snapshots, Unicode-aware wrapping, hanging indents, ANSI output, and an optional
+Ratatui adapter. The library owns text rendering; Ainz supplies the IRC labels and run state.
 
 ## Hooks
 

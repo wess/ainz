@@ -17,7 +17,10 @@ Ainz keeps the orchestration core independent from transports and user interface
    finishes reports it as a `ToolDelta`, not just a start and an end. The terminal, NDJSON
    output, and JSON-RPC mode consume the same events.
 5. `RunController` queues steering at safe conversation boundaries and cancels provider
-   or tool futures without adding UI state to the agent.
+   calls, compaction, approvals, tools, and hooks without adding UI state to the agent.
+   Steering has a bounded queue; cancellation has a separate signal. Closing steering at
+   the final reply is atomic with taking the last batch, so an accepted message cannot fall
+   between the last turn and the end hooks. Those hooks remain cancellable.
 
 The terminal multiplexer is a view and control plane over those primitives. Panes subscribe
 to `EventSink`; they never own provider processes, session history, or subagent lifetime.
@@ -45,3 +48,21 @@ Subagents are named and tracked by a registry that the delegation tool owns, whi
 one run in the background and be collected by name later. With the mesh on, each child registers
 its own client rather than sharing its parent's, so identity on the mesh is per agent and a
 failure to register costs that child its seat and nothing else.
+
+Cancelling a collection returns the task to that registry, where it remains addressable.
+Dropping the registry aborts the tasks it still owns; hosts should keep it alive for the lifetime
+of their background work. Aborting a task remains cooperative at async yield points.
+
+The TUI keeps IRC labels, activity state, topics, and roster placement in its presentation layer.
+[termweave](../crates/termweave/readme.md) handles Markdown and Unicode line layout. Header files
+are parsed as text and SGR styles; they cannot execute cursor controls or scripts. The browser
+studio exports the same ANSI format, and the mascot generator also produces its shared SVG
+preview and editable starter so the site and terminal use the same artwork.
+
+See [embedding](embedding.md) for the feature boundary and host responsibilities, and
+[quality](quality.md) for limits that remain, including the unbounded convenience event queue.
+
+Named themes live in the optional CLI layer. The catalog reads bounded TOML files and the chat
+renderer maps palette roles over the visible terminal buffer. It does not traverse conversation
+history or allocate a second runtime. Header regions retain their source colors. See
+[themes](themes.md) for the supported roles and surfaces.

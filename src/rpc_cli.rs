@@ -139,10 +139,10 @@ fn handle_active(line: &str, controller: &ainz::RunController) {
     "steer" => {
       let message = request.params.get("message").and_then(Value::as_str);
       match message {
-        Some(message) if controller.steer(message) => {
-          respond(request.id, json!({"queued": true}));
-        }
-        Some(_) => respond_error(request.id, -32002, "run control is closed"),
+        Some(message) => match controller.try_steer(message) {
+          Ok(()) => respond(request.id, json!({"queued": true})),
+          Err(reason) => respond_error(request.id, -32002, reason),
+        },
         None => respond_error(request.id, -32602, "message is required"),
       }
     }

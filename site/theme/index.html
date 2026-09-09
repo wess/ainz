@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Design and install an Ainz terminal theme. Preview colors in an IRC-style buffer, export a small TOML file, and switch with /theme.">
+  <title>Ainz Theme Designer</title>
+  <link rel="canonical" href="https://wess.io/ainz/theme/">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">skip to content</a>
+<div class="shell">
+  <div class="topline"><strong>AINZ :: THEMES</strong><nav aria-label="Main navigation"><a href="../">Home</a><a href="../tutorial/">Tutorial</a><a href="../docs/">Docs</a><a href="../masthead/">Masthead</a><a aria-current="page" href="./">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+  <main id="main" class="content studio-page">
+    <header class="studio-heading"><div><h1>Your colors. Your buffer.</h1><p class="lede">Tune the palette. Preview a session. Install your theme.</p></div></header>
+    <p class="studio-intro">An IRC-style interface should feel like yours. Start from a palette below or open a theme you've saved. For artwork, use the <a href="../masthead/">Masthead Studio</a>.</p>
+    <noscript><p class="callout">Enable JavaScript to preview and export a theme, or follow the <a href="../docs/#themes">manual setup</a>.</p></noscript>
+    <div class="studio theme-studio">
+      <div class="studio-editor">
+        <div class="section-line"><h2>1. Choose your colors</h2><span id="draft" role="status">Saved in this browser</span></div>
+        <div class="starter-row"><button type="button" data-preset="classic">Classic</button><button type="button" data-preset="nazarick">Nazarick</button><button type="button" data-preset="paper">Paper</button><button type="button" id="openbutton">Open .toml</button><input type="file" id="open" accept=".toml,text/plain" hidden><button type="button" id="undo" disabled>Undo</button></div>
+        <div class="theme-preview" id="terminal" role="region" aria-label="Live theme preview">
+          <div class="theme-topic"><b class="theme-info">#main ·</b> Polish the terminal buffer</div>
+          <div class="theme-body">
+            <div class="theme-buffer">
+              <p><time>15:31</time><span><b class="theme-info">&lt;you&gt;</b> Make the output easier to read.</span></p>
+              <p><time>15:31</time><span><b class="theme-success">&lt;Ainz&gt;</b> Names and messages share a line. Longer replies wrap under the text.</span></p>
+              <p><time>15:31</time><span><b class="theme-bright">Buffer polish</b><br>• Keep the <em>important details</em> visible.<br>• Render <code>Markdown</code> in the terminal.</span></p>
+              <p><time>15:32</time><span class="theme-info">▸ shell <span class="theme-text">cargo test</span></span></p>
+              <p><time>15:32</time><span class="theme-warning">*** Waiting for approval</span></p>
+              <p><time>15:32</time><span class="theme-error">*** Example error: tool unavailable</span></p>
+              <p><time>15:33</time><span class="theme-success">*** Completed · 8s</span></p>
+            </div>
+            <aside class="theme-roster" aria-label="Agent roster preview"><b class="theme-bright">Agents</b><p class="theme-selected">1 main</p><small class="theme-success">completed</small><p>2 docs</p><small class="theme-warning">working</small><img src="../assets/mascot.svg" width="56" height="56" alt="Ainz mascot; artwork colors stay unchanged"></aside>
+          </div>
+          <div class="theme-bar">[main] [ask] [2 agents]</div>
+          <div class="theme-input"><span class="theme-success">Completed · 8s</span><br><b class="theme-accent">&gt;</b> <span class="theme-muted">Your next message…</span></div>
+        </div>
+        <p class="hint">Live palette preview; terminal font and spacing vary. Artwork keeps its own colors.</p>
+        <p id="contrast" class="hint" role="status"></p>
+        <label class="terminal-default"><input type="checkbox" id="defaultbg" checked> Use my terminal's default background</label>
+        <div id="colors" class="color-fields"></div>
+        <p id="error" class="hint error" role="alert"></p>
+      </div>
+      <aside class="studio-delivery">
+        <section class="install-panel theme-install" aria-labelledby="install-title">
+          <h2 id="install-title">2. Install in Ainz</h2>
+          <label for="name">Theme name</label><input id="name" type="text" value="mytheme" maxlength="40" autocomplete="off" spellcheck="false" aria-describedby="name-help">
+          <p id="name-help" class="hint"></p>
+          <div class="install-options"><label>Platform<select id="platform"><option value="macos">macOS</option><option value="linux">Linux</option></select></label><label>Install for<select id="scope"><option value="user">All my projects</option><option value="project">This project only</option></select></label></div>
+          <button id="installcopy" class="button" type="button">Copy install command</button>
+          <p id="destination" class="hint"></p>
+          <details><summary>Inspect the command</summary><pre id="install" tabindex="0"></pre></details>
+          <p class="next-step">Then, inside Ainz:</p><div class="commandbox"><code id="selectcommand">/theme mytheme</code><button id="selectcopy" type="button">Copy</button></div>
+          <p class="hint">Applies immediately and remembers your choice. Reset with <code>/theme default</code>.</p>
+          <div class="download-actions"><button id="save" type="button">Download .toml</button><button id="copy" type="button">Copy TOML</button></div>
+          <p id="notice" role="status"></p>
+          <details id="fallback" hidden><summary>Copy text manually</summary><textarea id="copytext" readonly aria-label="Text to copy"></textarea></details>
+        </section>
+      </aside>
+    </div>
+    <section class="studio-notes"><h2>A small file you can keep editing.</h2><p>The installer writes one TOML file, refuses to overwrite an existing theme, and downloads nothing. Share the file, edit its colors, and run <code>/theme NAME</code> to reload it. Everything you draw or change stays in your browser until you copy or download it.</p><p>Themes color the chat interface, including its roster, prompt, and dialogs. Setup screens and message formats keep their existing layout. Already-flushed inline scrollback keeps its earlier colors. The importer accepts the flat <code>[colors]</code> table exported here.</p><p>Use a build with <code>/theme</code> support. If the command is missing, see <a href="../docs/#install">installation options</a>. <a href="../docs/#themes">Read the theme guide</a> for paths, roles, and manual installation.</p></section>
+  </main>
+  <div class="statusline"><span>theme designer</span><span>local draft</span><span>TOML export</span></div>
+  <footer><span>Ainz · make yourself at home</span><a href="../masthead/">Masthead Studio</a></footer>
+</div>
+<script type="module" src="../assets/theme.js"></script>
+</body>
+</html>

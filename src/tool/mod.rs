@@ -2,7 +2,11 @@ mod builtin;
 mod fetch;
 mod shell;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+  collections::{HashMap, hash_map::Entry},
+  path::PathBuf,
+  sync::Arc,
+};
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -75,10 +79,13 @@ pub struct ToolSet {
 impl ToolSet {
   pub fn insert(&mut self, tool: Arc<dyn Tool>) -> Result<()> {
     let name = tool.spec().name;
-    if self.tools.insert(name.clone(), tool).is_some() {
-      bail!("duplicate tool name: {name}");
+    match self.tools.entry(name) {
+      Entry::Occupied(entry) => bail!("duplicate tool name: {}", entry.key()),
+      Entry::Vacant(entry) => {
+        entry.insert(tool);
+        Ok(())
+      }
     }
-    Ok(())
   }
 
   // for a tool that is being rebound rather than added, such as a child's own server hub

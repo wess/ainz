@@ -1,6 +1,10 @@
+[workspace]
+members = ["crates/termweave"]
+resolver = "3"
+
 [package]
 name = "ainz"
-version = "0.9.2"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -10,28 +14,44 @@ homepage = "https://wess.io/ainz/"
 # ainz ships as a binary through GitHub releases, Homebrew, and `cargo install --git`
 publish = false
 
+[[bin]]
+name = "ainz"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "lua", "wasm"]
+cli = ["dep:clap", "dep:crossterm", "dep:ratatui", "dep:termweave"]
+lua = ["dep:mlua"]
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
 [dependencies]
+termweave = { version = "0.1.0", path = "crates/termweave", features = ["ratatui"], optional = true }
 anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.22"
 bytes = "1.10"
-clap = { version = "4.5", features = ["derive"] }
-crossterm = { version = "0.29", features = ["event-stream"] }
+clap = { version = "4.5", optional = true, features = ["derive"] }
+crossterm = { version = "0.29", optional = true, features = ["event-stream"] }
 dirs = "6.0"
 futures-util = "0.3"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30", optional = true, default-features = false, features = [
+  "crossterm",
+  "unstable-rendered-line-info",
+  "scrolling-regions",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1.47", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 toml = "0.9"
 uuid = { version = "1.18", features = ["serde", "v7"] }
-wasmtime = { version = "48.0", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "runtime", "std"] }
-wasmtime-wasi = { version = "48.0", default-features = false, features = ["p2"] }
+wasmtime = { version = "48.0", optional = true, default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "48.0", optional = true, default-features = false, features = ["p2"] }
 cap-std = "4.0.2"
-mlua = { version = "0.12.1", features = ["lua54", "vendored", "async", "send", "serde"] }
+mlua = { version = "0.12.1", optional = true, features = ["lua54", "vendored", "async", "send", "serde"] }
 url = "2.5"
 
 [dev-dependencies]

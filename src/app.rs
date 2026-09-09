@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use ainz::{
-  Agent, Approver, Config, Event, EventSink, HookRunner, HttpProvider, JobStore, McpHub,
-  McpProfile, PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog,
-  ProviderConfig, ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog,
-  SubagentHandler, SubagentRegistry, SubagentRequest, SubagentResult, TodoList,
+  Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
+  PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
+  ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
+  SubagentRegistry, SubagentRequest, SubagentResult, TodoList,
   agent::Approval,
   config::MemoryBackend,
   deny_all, instruction,
@@ -205,19 +205,12 @@ pub(crate) async fn make_agent_with(
   }
   let options = RunOptions {
     instructions,
-    permissions: config.permissions,
-    rules: config.rules.clone(),
-    max_steps: config.max_steps,
-    max_output_bytes: config.max_output_bytes,
-    context_tokens: config.context_tokens,
-    compact_at_tokens: config.compact_at_tokens,
-    preserve_messages: config.preserve_messages,
     memory_nudge: (config.memory.remember_on_compact && !memory.is_off()).then(|| {
       "The transcript above was just compacted. If anything you worked out in it is durable \
        and is not written down yet, call memory remember now, then carry on."
         .to_string()
     }),
-    hooks: HookRunner::new(config.hooks.clone()),
+    ..RunOptions::from(config)
   };
   let child_provider = provider.clone();
   let child_tools = tools.clone();
@@ -270,6 +263,7 @@ pub(crate) async fn make_agent_with(
         session_id: session.id.to_string(),
         parent_id: parent_id.to_string(),
         name: name.clone(),
+        task: prompt.clone(),
       });
       let session_id = session.id.to_string();
       let forwarded = events.clone();
@@ -707,8 +701,10 @@ async fn controlled_interactive(
             eprintln!("\n↳ cancellation requested");
           }
           Some(line) if !line.trim().is_empty() => {
-            controller.steer(line);
-            eprintln!("\n↳ steering queued");
+            match controller.try_steer(line) {
+              Ok(()) => eprintln!("\n↳ steering queued"),
+              Err(reason) => eprintln!("\n↳ steering not queued: {reason}"),
+            }
           }
           Some(_) => {}
           None => {

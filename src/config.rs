@@ -165,6 +165,7 @@ impl PermissionRules {
 pub struct UiConfig {
   pub roster_visible: bool,
   pub header: String,
+  pub theme: String,
   pub vim: bool,
   /// Ring the terminal when a long run ends, so a session left working can say it is done.
   pub bell: bool,
@@ -178,6 +179,7 @@ impl Default for UiConfig {
     Self {
       roster_visible: true,
       header: "random".into(),
+      theme: "default".into(),
       vim: false,
       bell: true,
       inline: false,

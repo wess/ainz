@@ -10,12 +10,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt};
 
+#[cfg(feature = "wasm")]
+use super::component::{ComponentRuntime, ComponentTool};
+#[cfg(feature = "lua")]
+use super::lua::{LuaRuntime, LuaTool};
 use super::{
   MAX_MEMORY_BYTES, MAX_TIMEOUT_MS, PluginFormat, PluginManifest, PluginMeta, PluginRuntime,
-  RuntimeKind,
-  component::{ComponentRuntime, ComponentTool},
-  lua::{LuaRuntime, LuaTool},
-  process::ProcessTool,
+  RuntimeKind, process::ProcessTool,
 };
 use crate::mcp::{McpProfile, McpServerConfig, McpTransport};
 use crate::tool::Tool;
@@ -113,6 +114,16 @@ impl PluginCatalog {
       .filter(|plugin| plugin.approved && plugin.manifest.plugin.enabled)
     {
       match plugin.manifest.runtime.kind {
+        #[cfg(not(feature = "lua"))]
+        RuntimeKind::Lua => bail!(
+          "plugin {} requires the lua feature",
+          plugin.manifest.plugin.name
+        ),
+        #[cfg(not(feature = "wasm"))]
+        RuntimeKind::Component => bail!(
+          "plugin {} requires the wasm feature",
+          plugin.manifest.plugin.name
+        ),
         RuntimeKind::Process => {
           for definition in &plugin.manifest.tools {
             tools.push(Arc::new(ProcessTool::new(
@@ -123,6 +134,7 @@ impl PluginCatalog {
             )?) as Arc<dyn Tool>);
           }
         }
+        #[cfg(feature = "lua")]
         RuntimeKind::Lua => {
           let runtime = Arc::new(
             LuaRuntime::new(&plugin.manifest, plugin.root(), &plugin.artifact_digest).await?,
@@ -135,6 +147,7 @@ impl PluginCatalog {
             )) as Arc<dyn Tool>);
           }
         }
+        #[cfg(feature = "wasm")]
         RuntimeKind::Component => {
           let runtime = Arc::new(
             ComponentRuntime::new(&plugin.manifest, plugin.root(), &plugin.artifact_digest).await?,
@@ -415,7 +428,7 @@ async fn fingerprint(
     artifact
   };
   let artifact_digest = if manifest.runtime.kind == RuntimeKind::Lua {
-    super::lua::digest(
+    super::bundle::load(
       root,
       manifest
         .runtime
@@ -424,6 +437,7 @@ async fn fingerprint(
         .context("Lua path missing")?,
     )
     .await?
+    .digest
   } else {
     file_digest(&artifact).await?
   };

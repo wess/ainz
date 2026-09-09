@@ -17,18 +17,13 @@ use mlua::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::{PluginManifest, PluginTool, host::Host};
+use super::{PluginManifest, PluginTool, bundle, host::Host};
 use crate::{
   protocol::ToolSpec,
   tool::{Risk, Tool, ToolContext, truncate},
 };
 
 mod bindings;
-mod bundle;
-
-pub(super) async fn digest(root: &Path, entry: &Path) -> Result<String> {
-  Ok(bundle::load(root, entry).await?.digest)
-}
 
 pub(super) struct LuaRuntime {
   bundle: Arc<bundle::Bundle>,

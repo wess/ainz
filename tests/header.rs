@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 use ainz::HeaderCatalog;
 use ratatui::{
   style::{Color, Modifier},
@@ -122,6 +124,28 @@ async fn only_ansi_and_text_extensions_are_loaded() {
   let mut names: Vec<_> = catalog.headers.iter().map(|art| art.name.clone()).collect();
   names.sort();
 
-  assert_eq!(names, ["keep", "keep2", "keep3"]);
+  assert_eq!(names, ["keep", "keep2", "keep3", "mascot", "mascotascii"]);
   assert!(catalog.issues.is_empty());
+}
+
+#[tokio::test]
+async fn mascot_remains_a_mascot_in_small_viewports() {
+  let temp = tempfile::tempdir().unwrap();
+  let catalog = HeaderCatalog::discover(temp.path()).await.unwrap();
+  let mascot = catalog.get("mascot").unwrap();
+  assert_eq!(catalog.get("ainz").unwrap().name, "mascot");
+  for (width, height) in [(80, 32), (54, 17), (26, 12), (9, 4), (5, 1)] {
+    let lines = mascot.fitted_lines(width, height).unwrap();
+    assert!(!lines.is_empty());
+    assert!(lines.len() <= height);
+    assert!(lines.iter().all(|line| line.width() <= width));
+    if height >= 12 {
+      assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
+        span.style.fg == Some(Color::Rgb(222, 48, 64))
+          || span.style.bg == Some(Color::Rgb(222, 48, 64))
+      }));
+    } else {
+      assert!(lines.iter().any(|line| line.to_string().contains('o')));
+    }
+  }
 }

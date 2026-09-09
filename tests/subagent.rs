@@ -135,3 +135,78 @@ fn guardian_names_cover_every_floor_then_repeat_with_a_suffix() {
   assert_eq!(ainz::subagent::guardian(10), "shalltear-2");
   assert_eq!(ainz::subagent::guardian(21), "gargantua-3");
 }
+
+#[tokio::test]
+async fn cancelling_collection_keeps_the_child_addressable() {
+  let release = Arc::new(tokio::sync::Notify::new());
+  let ready = release.clone();
+  let registry = SubagentRegistry::new(Arc::new(move |request| {
+    let ready = ready.clone();
+    Box::pin(async move {
+      ready.notified().await;
+      Ok(SubagentResult {
+        session_id: uuid::Uuid::now_v7(),
+        name: request.name,
+        output: "retained".into(),
+        usage: Usage::default(),
+      })
+    })
+  }));
+  let name = registry.start(SubagentRequest {
+    parent_id: uuid::Uuid::nil(),
+    name: "worker".into(),
+    prompt: "work".into(),
+    role: None,
+  });
+  assert!(
+    tokio::time::timeout(
+      std::time::Duration::from_millis(20),
+      registry.collect(&name)
+    )
+    .await
+    .is_err()
+  );
+  assert_eq!(registry.running(), vec![(name.clone(), false)]);
+  release.notify_one();
+  let result = tokio::time::timeout(
+    std::time::Duration::from_millis(250),
+    registry.collect(&name),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert_eq!(result.output, "retained");
+  assert!(registry.running().is_empty());
+}
+
+#[tokio::test]
+async fn dropping_the_registry_aborts_the_tasks_it_owns() {
+  struct Dropped(Arc<tokio::sync::Notify>);
+  impl Drop for Dropped {
+    fn drop(&mut self) {
+      self.0.notify_one();
+    }
+  }
+  let started = Arc::new(tokio::sync::Notify::new());
+  let stopped = Arc::new(tokio::sync::Notify::new());
+  let (begin, end) = (started.clone(), stopped.clone());
+  let registry = SubagentRegistry::new(Arc::new(move |_| {
+    let (begin, end) = (begin.clone(), end.clone());
+    Box::pin(async move {
+      let _guard = Dropped(end);
+      begin.notify_one();
+      std::future::pending().await
+    })
+  }));
+  registry.start(SubagentRequest {
+    parent_id: uuid::Uuid::nil(),
+    name: "worker".into(),
+    prompt: "work".into(),
+    role: None,
+  });
+  started.notified().await;
+  drop(registry);
+  tokio::time::timeout(std::time::Duration::from_millis(250), stopped.notified())
+    .await
+    .unwrap();
+}

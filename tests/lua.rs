@@ -1,3 +1,5 @@
+#![cfg(feature = "lua")]
+
 use std::{sync::Arc, time::Duration};
 
 use ainz::{

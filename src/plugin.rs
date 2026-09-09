@@ -6,9 +6,13 @@ use serde_json::Value;
 
 use crate::{protocol::ToolSpec, tool::Risk};
 
+mod bundle;
 mod catalog;
+#[cfg(feature = "wasm")]
 mod component;
+#[cfg(any(feature = "lua", feature = "wasm"))]
 mod host;
+#[cfg(feature = "lua")]
 mod lua;
 mod process;
 

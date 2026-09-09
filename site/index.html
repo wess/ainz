@@ -11,17 +11,17 @@
 <body>
   <a class="skip" href="#main">skip to content</a>
   <div class="shell">
-    <div class="topline"><strong>AINZ 0.9.2</strong><nav aria-label="Main navigation"><a aria-current="page" href="./">Home</a><a href="tutorial/">Tutorial</a><a href="docs/">Docs</a><a href="masthead/">Masthead</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+    <div class="topline"><strong>AINZ 0.10.0</strong><nav aria-label="Main navigation"><a aria-current="page" href="./">Home</a><a href="tutorial/">Tutorial</a><a href="docs/">Docs</a><a href="masthead/">Masthead</a><a href="theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
     <main id="main">
       <section class="hero">
         <div class="mainpane">
-<pre class="masthead" role="img" aria-label="Ainz">
+<div class="brand-art"><img src="assets/mascot.svg" width="96" height="96" alt="Ainz pixel mascot"><pre class="masthead" role="img" aria-label="Ainz">
  █████╗  ██╗ ███╗   ██╗ ███████╗
 ██╔══██╗ ██║ ████╗  ██║ ╚══███╔╝
 ███████║ ██║ ██╔██╗ ██║   ███╔╝ 
 ██╔══██║ ██║ ██║╚██╗██║  ███╔╝  
 ██║  ██║ ██║ ██║ ╚████║ ███████╗
-╚═╝  ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚══════╝</pre>
+╚═╝  ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚══════╝</pre></div>
           <div class="prompt">ainz</div>
           <h1>Your agents.<br>Your terminal.<br>Your rules.</h1>
           <p class="lede">A local-first agent harness and session multiplexer. Run Ollama, LiteLLM, Codex, Claude Code, custom endpoints, tools, plugins, and subagents from one terminal-native workspace — with memory that survives the session.</p>
@@ -29,8 +29,8 @@
           <div class="commandbox"><code>brew install wess/packages/ainz</code><button type="button" data-copy aria-label="Copy install command">copy</button></div>
         </div>
         <aside class="sidepane" aria-label="Agent roster preview">
-          <h2>Agents :: 3 active</h2>
-          <div class="agent"><div><b>1 main</b>ready · 12.4k tok</div></div>
+          <h2>Agents :: 3 sessions</h2>
+          <div class="agent"><div><b>1 main</b>completed · 12.4k tok</div></div>
           <div class="agent busy"><div><b>2 release</b>running tests</div></div>
           <div class="agent"><div><b>3 docs</b>complete</div></div>
           <hr class="side-rule">
@@ -40,16 +40,26 @@
           <p><code>Ctrl+L</code> roster<br><code>Ctrl+1..9</code> agents<br><code>Ctrl+=/-</code> cycle<br><code>/</code> commands</p>
         </aside>
       </section>
-      <div class="statusline"><span>main</span><span>12.4k tokens</span><span>ask</span><span>3 agents</span><span>ready</span></div>
+      <div class="statusline"><span>main</span><span>12.4k tokens</span><span>ask</span><span>3 agents</span><span>completed</span></div>
       <section class="content">
-        <p class="eyebrow">One harness. Every workflow.</p>
+        <h2>A buffer you can follow.</h2>
+        <p>Inspired by irssi and BitchX: messages share a line with their nick, agents live in the right-hand roster, and the channel topic says what the selected agent is doing. Markdown renders in the terminal.</p>
+        <div class="buffer-example"><p class="buffer-topic">#main · Improve the output</p><pre>15:31 &lt;you&gt; Make the buffer easier to read.
+15:31 &lt;Ainz&gt; Keep names beside their messages. Longer replies
+             wrap under the text, with room for code and lists.
+15:32      ▸ shell  cargo test</pre><p class="buffer-result">*** Completed · 8s</p></div>
+        <p>Working, Responding, Running tools, and Waiting for approval tell you when a run is active. Completed, Cancelled, or Failed stays above the prompt after it ends, with a matching marker in the buffer. Completion includes end hooks.</p>
+        <h2>Make yourself at home.</h2>
+        <p>Choose <code>/header mascot</code> for the built-in mascot. Draw your own artwork or tune the interface colors in the designers, then copy one install command and select your creation inside Ainz.</p>
+        <div class="actions"><a class="button" href="masthead/">Masthead Studio</a><a class="button secondary" href="theme/">Theme Designer</a></div>
+        <p><a href="docs/#headers">Artwork guide</a> · <a href="docs/#themes">Theme guide</a> · <a href="docs/#interface">Buffer and completion states</a></p>
         <div class="grid">
           <article class="card"><span class="index" aria-hidden="true">01</span><h2>Bring your model</h2><p>Use Ollama locally, authenticated coding CLIs in headless mode, OpenAI-compatible endpoints, or your own process adapter.</p></article>
           <article class="card"><span class="index" aria-hidden="true">02</span><h2>Keep the context</h2><p>Resume branching sessions, preserve token totals, compact long histories, steer a run at safe turn boundaries, and export any branch to Markdown.</p></article>
           <article class="card"><span class="index" aria-hidden="true">03</span><h2>Remember the work</h2><p>Durable memory recalled when a session opens, search across earlier sessions, and skills a session writes for the next one — kept locally, or in Synapse.</p></article>
           <article class="card"><span class="index" aria-hidden="true">04</span><h2>Multiply yourself</h2><p>Delegate durable subagent runs, leave them working in the background, and switch among their transcripts without leaving the main terminal.</p></article>
           <article class="card"><span class="index" aria-hidden="true">05</span><h2>Extend carefully</h2><p>Import the tool servers your other tools already have, then add skills, prompts, and capability-scoped plugins with content-pinned approval.</p></article>
-          <article class="card"><span class="index" aria-hidden="true">06</span><h2>Work your way</h2><p>Interactive TUI, one-shot prompts, JSON event streams, and persistent JSON-RPC all share the same engine.</p></article>
+          <article class="card"><span class="index" aria-hidden="true">06</span><h2>Embed the engine</h2><p>Interactive TUI, one-shot prompts, JSON streams, JSON-RPC, or your own Rust host. The core runs without the terminal and lets you choose which plugin runtimes to include. <a href="docs/#embedding">Embedding guide</a>.</p></article>
           <article class="card"><span class="index" aria-hidden="true">07</span><h2>Edit like a shell</h2><p>Walk earlier prompts with Up and Down, edit by word or line, and add a newline with Shift+Enter. @ completes a path, and Esc Esc rewinds to the last one.</p></article>
           <article class="card"><span class="index" aria-hidden="true">08</span><h2>Decide once</h2><p>A permission prompt shows a diff for an edit, or the command for a shell call, and takes y, n, or a to keep the decision for the rest of the run.</p></article>
           <article class="card"><span class="index" aria-hidden="true">09</span><h2>Hook the session</h2><p>A command can run at a session's start, before or after any tool call, and when it ends — a pre_tool hook can block the call outright.</p></article>
@@ -58,7 +68,7 @@
         <div class="callout">No model configured? Just run <code>ainz</code>. The setup screen lists providers and pulls their models straight from each endpoint — no config file, no typing a model name by hand.</div>
       </section>
     </main>
-    <footer><span>Ainz 0.9.2 · MIT licensed</span><span><a href="https://github.com/wess/ainz/releases">downloads</a> · <a href="docs/#security">security</a></span></footer>
+    <footer><span>Ainz 0.10.0 · MIT licensed</span><span><a href="https://github.com/wess/ainz/releases">downloads</a> · <a href="docs/#security">security</a></span></footer>
   </div>
   <script src="assets/site.js"></script>
 </body>

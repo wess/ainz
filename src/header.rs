@@ -14,9 +14,12 @@ const MAX_BYTES: u64 = 128 * 1024;
 const MAX_LINES: usize = 80;
 const MAX_WIDTH: usize = 240;
 
+mod mascot;
+
 #[derive(Clone, Debug)]
 pub struct HeaderArt {
   pub name: String,
+  /// Empty for artwork bundled into the binary.
   pub path: PathBuf,
   pub lines: Vec<Line<'static>>,
   pub width: usize,
@@ -43,6 +46,21 @@ impl HeaderCatalog {
     }
 
     let mut headers = BTreeMap::new();
+    for (name, text) in [
+      ("mascot", include_str!("../assets/mascot/ainz.ans")),
+      ("mascotascii", include_str!("../assets/mascot/ainz.txt")),
+    ] {
+      let lines = parse_ansi(text)?;
+      headers.insert(
+        name.into(),
+        HeaderArt {
+          name: name.into(),
+          path: PathBuf::new(),
+          width: lines.iter().map(Line::width).max().unwrap_or_default(),
+          lines,
+        },
+      );
+    }
     let mut issues = Vec::new();
     for root in roots {
       discover_root(&root, &mut headers, &mut issues).await?;
@@ -54,6 +72,11 @@ impl HeaderCatalog {
   }
 
   pub fn get(&self, name: &str) -> Option<&HeaderArt> {
+    let name = match name {
+      "ainz" => "mascot",
+      "ainzascii" => "mascotascii",
+      name => name,
+    };
     self.headers.iter().find(|header| header.name == name)
   }
 }

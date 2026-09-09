@@ -67,11 +67,23 @@ pub fn builtins() -> Vec<SlashCommand> {
     ),
     (
       "header",
-      "/header <NAME|random|builtin>",
-      "Choose and remember the empty-screen header",
+      "/header <mascot|NAME|random|builtin>",
+      "Preview and remember the empty-screen header",
       "view",
     ),
     ("headers", "/headers", "List custom header artwork", "view"),
+    (
+      "theme",
+      "/theme <NAME|default>",
+      "Apply and remember a chat color theme",
+      "view",
+    ),
+    (
+      "themes",
+      "/themes",
+      "List color themes and validation errors",
+      "view",
+    ),
     (
       "history",
       "/history",

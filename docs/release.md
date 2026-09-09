@@ -23,3 +23,18 @@ formula both depend on that naming. The formula lives at `wess/homebrew-packages
 and declares `ripgrep`, which the `search` tool shells out to. After the assets are public, update
 the formula with their exact checksums and validate an installation from the tap. Never publish a
 formula whose URL does not yet exist.
+
+## Website
+
+The static site lives in `site/`; no build or package installation is required. Both designers
+use browser modules, with reusable format and installation code under `site/assets/`. Run
+`bun test tests/site` to check exports, installation commands, and internal links. Preview with
+`python3 -m http.server 8765 --directory site`, then visit `http://localhost:8765/`.
+
+`scripts/mascot.py` regenerates the terminal artwork and the shared website mascot assets.
+Keep both outputs together when changing the mascot. Check Masthead Studio and Theme Designer
+at desktop and narrow widths, including editing, reload, copy, download, and invalid input.
+
+`.github/workflows/pages.yml` uploads `site/` to GitHub Pages after relevant changes reach `main`.
+A manual dispatch deploys the checked-out branch contents; it cannot publish local uncommitted
+files. Confirm the Pages workflow succeeds and check the live designer pages after publishing.

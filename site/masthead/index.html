@@ -1,30 +1,60 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Paint a custom Ainz masthead on a half-block pixel grid and save it as an ANSI file."><title>Ainz masthead studio</title><link rel="canonical" href="https://wess.io/ainz/masthead/"><link rel="stylesheet" href="../assets/site.css"></head>
-<body><a class="skip" href="#main">skip to content</a><div class="shell">
-<div class="topline"><strong>AINZ :: STUDIO</strong><nav aria-label="Main navigation"><a href="../">Home</a><a href="../tutorial/">Tutorial</a><a href="../docs/">Docs</a><a aria-current="page" href="./">Masthead</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
-<main id="main" class="content"><header><p class="eyebrow">Masthead studio</p><h1>Paint your own masthead.</h1><p class="lede">Every pixel is half a terminal cell. Save the result as an <code>.ans</code> file, drop it in <code>.ainz/headers/</code>, and Ainz renders it on the empty transcript exactly as the preview shows.</p></header>
-<div class="studio">
-<div class="toolbar">
-<label>name <input id="name" type="text" maxlength="40" spellcheck="false" autocomplete="off"></label>
-<label>width <input id="width" type="number" min="1" max="240"></label>
-<label>height <input id="height" type="number" min="2" max="160" step="2"></label>
-<label>zoom <select id="zoom"><option value="6">6</option><option value="8">8</option><option value="10" selected>10</option><option value="14">14</option></select></label>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Draw, preview, and install a custom Ainz terminal header. Start with the mascot or a wordmark and copy one installation command.">
+  <title>Ainz masthead studio</title>
+  <link rel="canonical" href="https://wess.io/ainz/masthead/">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">skip to content</a>
+<div class="shell">
+  <div class="topline"><strong>AINZ :: STUDIO</strong><nav aria-label="Main navigation"><a href="../">Home</a><a href="../tutorial/">Tutorial</a><a href="../docs/">Docs</a><a aria-current="page" href="./">Masthead</a><a href="../theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+  <main id="main" class="content studio-page">
+    <header class="studio-heading"><div><h1>Make it yours.</h1><p class="lede">Draw a header. Copy one install command. See it in Ainz.</p></div><a href="../docs/#headers">Header guide</a></header>
+    <p class="studio-intro">Just want the mascot? Run <code>/header mascot</code> in Ainz. To make your own, start here. Your drawing stays in this browser.</p>
+    <noscript><p class="callout">The editor needs JavaScript. You can still <a href="../assets/mascot.ans" download="myainz.ans">download the mascot artwork</a> and follow the <a href="../docs/#headers">manual installation guide</a>.</p></noscript>
+    <div class="studio">
+      <section class="studio-editor" aria-labelledby="draw-title">
+        <div class="section-line"><h2 id="draw-title">1. Draw your header</h2><span id="draft" role="status">Loading drawing…</span></div>
+        <div class="starter-row" aria-label="Starting artwork"><button type="button" data-starter="mascot">Mascot</button><button type="button" data-starter="wordmark">Wordmark</button><button type="button" data-starter="blank">Blank</button><button type="button" id="openbutton">Open artwork…</button><input id="open" type="file" accept=".ans,.ansi,text/plain" hidden></div>
+        <div class="toolbar">
+          <div class="tools" role="group" aria-label="Drawing tool"><button type="button" class="selected" data-tool="paint" aria-pressed="true">Paint</button><button type="button" data-tool="erase" aria-pressed="false">Erase</button><button type="button" data-tool="fill" aria-pressed="false">Fill</button><button type="button" data-tool="pick" aria-pressed="false">Pick color</button><button type="button" data-tool="text" aria-pressed="false">Text</button></div>
+          <label>Color <input id="color" type="color" value="#e2be30"></label>
+        </div>
+        <div id="palette" class="palette" aria-label="Color palette"></div>
+        <div class="toolbar"><label>Text <input id="text" type="text" value="AINZ" maxlength="24" spellcheck="false"></label><label>Text size <select id="scale"><option value="1">1×</option><option value="2" selected>2×</option><option value="3">3×</option></select></label><button type="button" id="undo" disabled>Undo</button><button type="button" id="redo" disabled>Redo</button></div>
+        <div class="gridwrap"><canvas id="grid" tabindex="0" role="application" aria-label="Pixel editor. Arrow keys move the cursor; Space applies the selected tool." aria-describedby="drawing-help"></canvas></div>
+        <p class="hint" id="drawing-help">Drag to paint; right-click to erase. For text, choose Text and click to place it. Keyboard: focus the canvas, move with arrows, and press Space to draw.</p>
+        <div class="toolbar"><label>Columns <input id="width" type="number" min="1" max="240"></label><label>Pixel rows <input id="height" type="number" min="2" max="160" step="2"></label><label>Zoom <select id="zoom"><option value="6">6×</option><option value="8">8×</option><option value="10" selected>10×</option><option value="14">14×</option></select></label><button type="button" id="clear">Clear canvas</button></div>
+        <p class="hint">Two pixel rows become one terminal row. Resizing crops or adds canvas; it never shrinks the drawing. Undo restores cropped pixels.</p>
+        <p id="error" class="hint error" role="alert"></p>
+      </section>
+      <aside class="studio-delivery" aria-label="Preview and installation">
+        <section aria-labelledby="preview-title"><h2 id="preview-title">2. Check the preview</h2><div class="preview-topic">#main · your header</div><div class="studio-preview"><canvas id="preview" role="img" aria-label="Terminal proportions preview"></canvas></div><p id="stats" class="hint"></p><p id="fit" class="hint"></p></section>
+        <section class="install-panel" aria-labelledby="install-title">
+          <h2 id="install-title">3. Add it to Ainz</h2>
+          <label for="name">Header name</label><input id="name" type="text" maxlength="40" spellcheck="false" autocomplete="off" aria-describedby="name-help">
+          <p id="name-help" class="hint">This becomes the filename and your /header command.</p>
+          <div class="install-options"><label>System <select id="platform"><option value="macos">macOS</option><option value="linux">Linux</option></select></label><label>Available in <select id="scope"><option value="user">All my projects</option><option value="project">This project only</option></select></label></div>
+          <button type="button" class="button" id="installcopy">Copy install command</button>
+          <p id="destination" class="hint"></p><p class="hint">Paste it into your shell. It writes this drawing directly; no download or file moving needed. Existing headers are kept.</p>
+          <details><summary>Inspect the install command</summary><pre id="install" tabindex="0"></pre></details>
+          <p class="next-step">Then, inside Ainz:</p><div class="commandbox"><code id="selectcommand">/header myainz</code><button type="button" id="selectcopy">Copy</button></div>
+          <p class="hint">The header previews immediately. Any key returns to your conversation.</p>
+          <div class="download-actions"><button type="button" id="save">Download .ans instead</button><button type="button" id="copy">Copy ANSI</button></div>
+          <p id="notice" role="status" aria-live="polite"></p>
+          <details id="fallback" hidden><summary>Copy text manually</summary><textarea id="copytext" readonly aria-label="Text to copy"></textarea></details>
+        </section>
+      </aside>
+    </div>
+    <section class="studio-notes"><h2>A header you can keep.</h2><p>The export is ordinary ANSI art. Share the <code>.ans</code> file, reopen it here to add to it, or use it in another terminal art editor. The canvas accepts half-block pixel artwork; plain ASCII headers still work in Ainz itself. <a href="../docs/#headers">Read about formats, sizes, and manual installation.</a></p><p>Custom headers change the artwork. Use the <a href="../theme/">Theme Designer</a> for buffer colors. Message layout stays the same.</p></section>
+  </main>
+  <div class="statusline"><span>masthead studio</span><span>local draft</span><span>no account</span></div>
+  <footer><span>Ainz masthead studio</span><span><a href="../docs/#headers">header reference</a></span></footer>
 </div>
-<div class="toolbar">
-<span class="tools"><button type="button" class="selected" data-tool="paint">paint</button><button type="button" data-tool="erase">erase</button><button type="button" data-tool="fill">fill</button><button type="button" data-tool="pick">pick</button><button type="button" data-tool="text">text</button></span>
-<label>text <input id="text" type="text" value="AINZ" maxlength="24" spellcheck="false"></label>
-<label>size <select id="scale"><option value="1">1×</option><option value="2" selected>2×</option><option value="3">3×</option></select></label>
-<label>color <input id="color" type="color" value="#e2be30"></label>
-</div>
-<div id="palette" class="palette" aria-label="Palette"></div>
-<div class="gridwrap"><canvas id="grid" aria-label="Pixel grid"></canvas></div>
-<p class="hint">Left button paints with the selected tool, right button erases. Text places the typed word at the click. The magenta line marks 72 columns, the widest masthead that still fits beside the agent roster.</p>
-<h2>Preview</h2>
-<div class="studio-preview"><canvas id="preview" role="img" aria-label="Masthead preview"></canvas></div>
-<p id="stats" class="hint"></p>
-<div class="actions"><button type="button" class="button" id="save">Download .ans</button><button type="button" class="button secondary" id="copy">copy the file</button><label class="button secondary">Open .ans<input id="open" type="file" accept=".ans,.ansi,.txt,text/plain" hidden></label><button type="button" class="button secondary" id="clear">Clear</button></div>
-<p id="error" class="hint error"></p>
-<h2>Install</h2>
-<pre><code id="install"></code></pre>
-<p class="hint">The file is ordinary ANSI art: one half-block character per terminal cell, coloured with truecolor SGR. Other ANSI editors and <code>less -R</code> open it, and this studio reopens any half-block art, including files it did not write. The format and its limits are described in <a href="https://github.com/wess/ainz/blob/main/docs/headers.md">docs/headers.md</a>. Work in progress stays in this browser until you clear it.</p>
-</div></main><div class="statusline"><span>studio</span><span>half-block</span><span>ready</span></div><footer><span>Ainz masthead studio</span><span><a href="../docs/#extensions">custom headers</a></span></footer></div>
-<script src="../assets/masthead.js"></script></body></html>
+<script type="module" src="../assets/masthead.js"></script>
+</body>
+</html>

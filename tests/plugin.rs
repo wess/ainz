@@ -2,6 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use ainz::{McpProfile, PluginCatalog, PluginFormat, SkillCatalog, tool::ToolContext};
 use serde_json::json;
+#[cfg(feature = "wasm")]
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
   net::TcpListener,
@@ -177,6 +178,7 @@ async fn agent_plugins_load_portable_skills_and_mcp_configuration() {
   );
 }
 
+#[cfg(feature = "wasm")]
 #[tokio::test]
 async fn component_plugins_run_in_the_sandbox() {
   let temp = tempfile::tempdir().unwrap();

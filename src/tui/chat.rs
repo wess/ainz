@@ -40,6 +40,14 @@ use super::{
 };
 use crate::app::{expand_prompt, make_agent_with};
 
+mod activity;
+mod themes;
+mod title;
+mod transcript;
+
+use activity::RunStatus;
+use transcript::entry_lines;
+
 type RunOutput = (Agent<RuntimeProvider>, Session, Result<String>);
 type RunTask = JoinHandle<RunOutput>;
 
@@ -91,11 +99,14 @@ enum EntryKind {
   System,
   Tool,
   Error,
+  Completed,
+  Cancelled,
 }
 
 struct Entry {
   kind: EntryKind,
   text: String,
+  stream: Option<termweave::Stream>,
   // the whole of what a tool returned, kept for ctrl+o rather than shown by default
   detail: Option<String>,
   // set for a tool call, which is drawn as a command rather than as somebody speaking
@@ -108,6 +119,7 @@ enum ToolState {
   Running,
   Done,
   Failed,
+  Stopped,
 }
 
 impl ToolState {
@@ -116,6 +128,7 @@ impl ToolState {
       Self::Running => ("▸", YELLOW),
       Self::Done => ("▪", ACTIVE),
       Self::Failed => ("✗", RED),
+      Self::Stopped => ("■", YELLOW),
     }
   }
 }
@@ -136,6 +149,7 @@ impl Entry {
     Self {
       kind,
       text,
+      stream: None,
       detail: None,
       tool: None,
       at: clock(),
@@ -170,6 +184,7 @@ struct AgentView {
   live: BTreeMap<String, (usize, String)>,
   // the guardian this subagent was named for; empty for the primary transcript
   name: String,
+  topic: String,
   entries: Vec<Entry>,
   tools: BTreeMap<String, String>,
   assistant: Option<usize>,
@@ -177,11 +192,18 @@ struct AgentView {
 }
 
 impl AgentView {
+  fn finish_message(&mut self) {
+    if let Some(index) = self.assistant.take() {
+      self.entries[index].stream = None;
+    }
+  }
+
   fn new(state: AgentState) -> Self {
     Self {
       state,
       live: BTreeMap::new(),
       name: String::new(),
+      topic: String::new(),
       entries: Vec::new(),
       tools: BTreeMap::new(),
       assistant: None,
@@ -196,7 +218,8 @@ struct ChatState {
   agents: BTreeMap<String, AgentView>,
   active: Option<String>,
   roster: bool,
-  scroll: u16,
+  scroll: Cell<u16>,
+  outcome: Option<(RunStatus, Duration)>,
   // when the running turn started, so a quiet provider still shows it is alive; None when idle
   started: Option<Instant>,
   // set by the first ctrl+c of a run; the second abandons the run
@@ -205,6 +228,9 @@ struct ChatState {
   command_selected: usize,
   splash_style: usize,
   custom_header: Option<HeaderArt>,
+  header_preview: bool,
+  theme: ainz::theme::Theme,
+  art_area: Cell<Option<Rect>>,
   // the splash is thousands of cell puts that depend only on size and choice; paint it once
   splash_cache: RefCell<Option<(usize, usize, Vec<Line<'static>>)>>,
   // how far back the transcript actually reaches, and where the prompt and its menu were
@@ -235,13 +261,17 @@ impl Default for ChatState {
       agents: BTreeMap::new(),
       active: None,
       roster: true,
-      scroll: 0,
+      scroll: Cell::new(0),
+      outcome: None,
       started: None,
       cancelled: false,
       approval: None,
       command_selected: 0,
       splash_style: 0,
       custom_header: None,
+      header_preview: false,
+      theme: ainz::theme::Theme::default(),
+      art_area: Cell::new(None),
       splash_cache: RefCell::new(None),
       reach: Cell::new(0),
       prompt_area: Cell::new(Rect::ZERO),
@@ -277,11 +307,17 @@ impl ChatState {
 
   // scrolling stops where the transcript does, so coming back down takes as long as going up did
   fn scroll_back(&mut self, lines: u16) {
-    self.scroll = self.scroll.saturating_add(lines).min(self.reach.get());
+    self.scroll.set(
+      self
+        .scroll
+        .get()
+        .saturating_add(lines)
+        .min(self.reach.get()),
+    );
   }
 
   fn scroll_forward(&mut self, lines: u16) {
-    self.scroll = self.scroll.saturating_sub(lines);
+    self.scroll.set(self.scroll.get().saturating_sub(lines));
   }
 
   fn select_header(&mut self, preference: &str, catalog: &HeaderCatalog) {
@@ -332,7 +368,7 @@ impl ChatState {
     } else {
       self.agents.keys().nth(slot - 1).cloned()
     };
-    self.scroll = 0;
+    self.scroll.set(0);
   }
 
   fn cycle_agent(&mut self, forward: bool) {
@@ -354,7 +390,7 @@ impl ChatState {
     } else {
       Some(ids[next - 1].clone())
     };
-    self.scroll = 0;
+    self.scroll.set(0);
   }
 
   fn channel(&self) -> String {
@@ -411,21 +447,25 @@ const INLINE_ROWS: u16 = 8;
 fn flush_scrollback(terminal: &mut Term, state: &mut ChatState) -> Result<()> {
   let width = terminal.size()?.width.max(1);
   // whatever is still being written stays in the viewport until it is done
-  let live = match state.primary.assistant {
-    Some(index) if state.busy() => index,
-    _ => state.primary.entries.len(),
-  };
+  let live = state
+    .primary
+    .assistant
+    .into_iter()
+    .chain(state.primary.live.values().map(|(index, _)| *index))
+    .min()
+    .unwrap_or(state.primary.entries.len());
   state.flushed = state.flushed.min(state.primary.entries.len());
   while state.flushed < live {
-    let lines = entry_lines(&state.primary.entries[state.flushed], state.expanded);
-    let height: u16 = lines
-      .iter()
-      .map(|line| (line.width().max(1) as u16).div_ceil(width))
-      .sum();
+    let lines = entry_lines(
+      &state.primary.entries[state.flushed],
+      state.expanded,
+      width as usize,
+    );
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let height = paragraph.line_count(width).min(u16::MAX as usize) as u16;
     terminal.insert_before(height.max(1), |buffer| {
-      Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .render(buffer.area, buffer);
+      paragraph.render(buffer.area, buffer);
+      state.theme.apply(buffer, None);
     })?;
     state.flushed += 1;
   }
@@ -492,7 +532,7 @@ async fn run_chat_inner(
   let store = SessionStore::default_store()?;
   let plugin_catalog = PluginCatalog::discover(&workspace).await?;
   let header_catalog = HeaderCatalog::discover(&workspace).await?;
-  let command_data = CommandData {
+  let mut command_data = CommandData {
     skills: SkillCatalog::discover_with_roots(&workspace, &plugin_catalog.approved_skill_roots())
       .await?
       .skills
@@ -567,6 +607,8 @@ async fn run_chat_inner(
     custom_header,
     ..ChatState::default()
   };
+  state.primary.refresh_topic();
+  themes::initialize(&mut state, config).await?;
   if let Some(notice) = notice {
     state
       .primary
@@ -588,7 +630,7 @@ async fn run_chat_inner(
     let (run_controller, mut inbox) = run_control();
     controller = Some(run_controller);
     let run_options = options.clone();
-    state.started = Some(Instant::now());
+    state.begin_run();
     task = Some(tokio::spawn(async move {
       let result = local_agent
         .run_controlled(&mut local_session, expanded, run_options, &mut inbox)
@@ -605,7 +647,11 @@ async fn run_chat_inner(
     if state.inline {
       flush_scrollback(terminal, &mut state)?;
     }
-    terminal.draw(|frame| render(frame, &state, config, current_id, &workspace, &commands))?;
+    terminal.draw(|frame| {
+      state.art_area.set(None);
+      render(frame, &state, config, current_id, &workspace, &commands);
+      state.theme.apply(frame.buffer_mut(), state.art_area.get());
+    })?;
     let wake = tokio::select! {
       message = rx.recv() => Wake::Agent(message),
       joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
@@ -641,20 +687,12 @@ async fn run_chat_inner(
           drop(std::io::Write::write_all(&mut out, b"\x07"));
           drop(std::io::Write::flush(&mut out));
         }
-        state.started = None;
-        state.cancelled = false;
-        state.primary.assistant = None;
-        state.primary.tools.clear();
-        if let Err(error) = result {
-          state
-            .primary
-            .entries
-            .push(Entry::new(EntryKind::Error, format!("{error:#}")));
-        }
+        state.finish_run(result);
         continue;
       }
       Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => key,
       Wake::Input(Some(Ok(InputEvent::Paste(text)))) => {
+        state.header_preview = false;
         if state.active.is_none() && state.approval.is_none() {
           // a terminal pastes an image as its path, which is a file to attach rather than
           // text to type; dragging one into the window arrives the same way
@@ -703,6 +741,7 @@ async fn run_chat_inner(
       Wake::Input(Some(Err(error))) => return Err(error).context("read terminal input"),
       Wake::Input(None) => anyhow::bail!("terminal input closed"),
     };
+    state.header_preview = false;
     if let Some(approval) = state.approval.take() {
       match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -750,6 +789,7 @@ async fn run_chat_inner(
           state.input.delete_word();
           state.command_selected = 0;
         }
+        KeyCode::End => state.scroll.set(0),
         KeyCode::Left => state.input.word_left(),
         KeyCode::Right => state.input.word_right(),
         KeyCode::Char('1') => state.select_slot(0),
@@ -888,6 +928,7 @@ async fn run_chat_inner(
           Some(text) => {
             state.input.set(text);
             state.primary.entries = session_entries(session.as_ref().expect("rewound session"));
+            state.primary.refresh_topic();
             state.primary.assistant = None;
             // the scrollback already holds what was said; only what comes next is new
             state.flushed = state.primary.entries.len();
@@ -939,15 +980,47 @@ async fn run_chat_inner(
             ));
             continue;
           }
-          if let Some(controller) = &controller
-            && controller.steer(input.clone())
-          {
-            state.primary.entries.push(Entry::new(
+          match controller
+            .as_ref()
+            .map_or(Err("no active run"), |controller| {
+              controller.try_steer(input.clone())
+            }) {
+            Ok(()) => state.primary.entries.push(Entry::new(
               EntryKind::System,
               format!("steering queued: {input}"),
-            ));
+            )),
+            Err(reason) => {
+              state.input.set(input);
+              state.primary.entries.push(Entry::new(
+                EntryKind::Error,
+                format!("steering not queued: {reason}; draft kept"),
+              ));
+            }
           }
           continue;
+        }
+        match themes::command(input.trim(), &mut state, config).await {
+          Ok(true) => continue,
+          Err(error) => {
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::Error, format!("{error:#}")));
+            continue;
+          }
+          Ok(false) => {}
+        }
+        if input.trim() == "/headers" || input.trim().starts_with("/header ") {
+          match HeaderCatalog::discover(&workspace).await {
+            Ok(headers) => command_data.headers = headers,
+            Err(error) => {
+              state.primary.entries.push(Entry::new(
+                EntryKind::Error,
+                format!("reload headers: {error:#}"),
+              ));
+              continue;
+            }
+          }
         }
         let command_result = match command(
           &input,
@@ -1107,7 +1180,8 @@ async fn run_chat_inner(
             config.ui.header = preference.clone();
             state.select_header(&preference, &command_data.headers);
             config.save().await?;
-            if !state.primary.entries.is_empty() {
+            state.header_preview = !state.inline;
+            if state.inline && !state.primary.entries.is_empty() {
               state.primary.entries.push(Entry::new(
                 EntryKind::System,
                 format!("header set to {preference}; it will appear on an empty transcript"),
@@ -1144,7 +1218,7 @@ async fn run_chat_inner(
             let (run_controller, mut inbox) = run_control();
             controller = Some(run_controller);
             let run_options = options.clone();
-            state.started = Some(Instant::now());
+            state.begin_run();
             task = Some(tokio::spawn(async move {
               let result = if images.is_empty() {
                 local_agent
@@ -1302,7 +1376,11 @@ fn command(
           header.name,
           header.width,
           header.lines.len(),
-          header.path.display()
+          if header.path.as_os_str().is_empty() {
+            "bundled".into()
+          } else {
+            header.path.display().to_string()
+          }
         )
       }));
       values.extend(
@@ -1349,7 +1427,8 @@ fn command(
            ctrl+a/e   line start/end         ctrl+w       delete word\n\
            ctrl+u/k   clear before/after     alt+←/→      move a word\n\
            wheel      scroll the transcript  page up/down  scroll a screen\n\
-           shift+↑/↓  scroll a line          esc          cancel a run\n\
+           ctrl+end   latest output          shift+↑/↓    scroll a line\n\
+           esc        cancel a run\n\
            ctrl+1…9   select agent           ctrl+= / ctrl+-  cycle agents\n\
            ctrl+l     roster                 ctrl+c       quit"
         ),
@@ -1359,6 +1438,10 @@ fn command(
     "/new" | "/clear" => {
       *session = Session::new(session.workspace.clone());
       state.primary.entries.clear();
+      state.primary.topic.clear();
+      state.outcome = None;
+      state.scroll.set(0);
+      state.primary.live.clear();
       state.flushed = 0;
       state.primary.tools.clear();
       state.primary.assistant = None;
@@ -1578,8 +1661,13 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         index
       });
       view.entries[index].text.push_str(&text);
+      view.entries[index]
+        .stream
+        .get_or_insert_with(termweave::Stream::default)
+        .push(&text);
     }
     Event::ToolStart { call } => {
+      state.view_mut(session_id).finish_message();
       state
         .view_mut(session_id)
         .tools
@@ -1641,7 +1729,10 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       };
     }
     Event::SubagentStart {
-      session_id, name, ..
+      session_id,
+      name,
+      task,
+      ..
     } => {
       let view = state
         .agents
@@ -1649,6 +1740,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         .or_insert_with(|| AgentView::new(AgentState::Running));
       view.state = AgentState::Running;
       view.name = name;
+      view.topic = title::excerpt(&task);
     }
     Event::SubagentEnd { session_id, error } => {
       let view = state
@@ -1660,7 +1752,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       } else {
         AgentState::Done
       };
-      view.assistant = None;
+      view.finish_message();
     }
     Event::Compaction {
       archived_messages, ..
@@ -1670,14 +1762,24 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         format!("compacted {archived_messages} messages"),
       ));
     }
-    Event::Steering { message } => state.view_mut(session_id).entries.push(Entry::new(
-      EntryKind::System,
-      format!("steering applied: {message}"),
-    )),
-    Event::Cancelled => state
-      .view_mut(session_id)
-      .entries
-      .push(Entry::new(EntryKind::System, "run cancelled".into())),
+    Event::Steering { message } => {
+      let view = state.view_mut(session_id);
+      view.topic = title::excerpt(&message);
+      view.entries.push(Entry::new(
+        EntryKind::System,
+        format!("steering applied: {message}"),
+      ));
+    }
+    Event::Cancelled => {
+      if session_id.is_none() {
+        state.cancelled = true;
+      } else {
+        state
+          .view_mut(session_id)
+          .entries
+          .push(Entry::new(EntryKind::Cancelled, "Run cancelled".into()));
+      }
+    }
     Event::Error { message } => state
       .view_mut(session_id)
       .entries
@@ -1686,7 +1788,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       let view = state.view_mut(session_id);
       view.usage.input_tokens += usage.input_tokens;
       view.usage.output_tokens += usage.output_tokens;
-      view.assistant = None;
+      view.finish_message();
     }
     Event::SessionStart { .. } => {}
   }
@@ -1746,13 +1848,15 @@ fn render(
   // the prompt grows with what is written in it, up to a few lines
   let prompt_rows = (state.input.as_str().matches('\n').count() + 1).clamp(1, 6) as u16;
   if state.inline {
-    let [body, status, input] = Layout::vertical([
+    let [body, activity, status, input] = Layout::vertical([
       Constraint::Min(1),
+      Constraint::Length(1),
       Constraint::Length(1),
       Constraint::Length(prompt_rows),
     ])
     .areas(frame.area());
     render_transcript(frame, body, state);
+    activity::render(frame, activity, state);
     render_status(frame, status, state, config);
     render_input(frame, input, state);
     render_command_palette(frame, body, status, state, commands);
@@ -1761,16 +1865,17 @@ fn render(
     }
     return;
   }
-  let [header, body, status, input] = Layout::vertical([
+  let [header, body, activity, status, input] = Layout::vertical([
     Constraint::Length(1),
     Constraint::Min(8),
+    Constraint::Length(1),
     Constraint::Length(1),
     Constraint::Length(prompt_rows),
   ])
   .areas(frame.area());
-  render_title(frame, header, state, config, session_id, workspace);
+  title::render(frame, header, state, session_id, workspace);
   let transcript = if state.roster && body.width >= 72 {
-    let [roster, transcript] = Layout::horizontal([Constraint::Length(24), Constraint::Min(30)])
+    let [transcript, roster] = Layout::horizontal([Constraint::Min(30), Constraint::Length(24)])
       .spacing(1)
       .areas(body);
     render_roster(frame, roster, state);
@@ -1779,6 +1884,7 @@ fn render(
     body
   };
   render_transcript(frame, transcript, state);
+  activity::render(frame, activity, state);
   render_status(frame, status, state, config);
   render_input(frame, input, state);
   if state.active.is_none() {
@@ -1811,6 +1917,10 @@ fn render_command_palette(
     height,
   );
   state.palette_area.set(area);
+  if let Some(mut art) = state.art_area.get() {
+    art.height = art.height.min(area.y.saturating_sub(art.y));
+    state.art_area.set(Some(art));
+  }
   let selected = state.command_selected.min(matches.len() - 1);
   let visible = height.saturating_sub(2) as usize;
   let start = selected.saturating_sub(visible.saturating_sub(1));
@@ -1866,41 +1976,25 @@ fn render_command_palette(
   );
 }
 
-fn render_title(
-  frame: &mut Frame,
-  area: Rect,
-  state: &ChatState,
-  config: &Config,
-  session: Uuid,
-  workspace: &std::path::Path,
-) {
-  let root = workspace
-    .file_name()
-    .and_then(|name| name.to_str())
-    .unwrap_or("workspace");
-  frame.render_widget(
-    Paragraph::new(Line::from(vec![
-      Span::styled(
-        " Ainz",
-        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-      ),
-      Span::styled("!", Style::default().fg(MAGENTA)),
-      Span::styled(root, Style::default().fg(INK)),
-      Span::styled("@", Style::default().fg(MUTED)),
-      Span::styled(
-        config.provider.as_deref().unwrap_or("default"),
-        Style::default().fg(ACTIVE),
-      ),
-      Span::styled(
-        format!("  {} · {} ", state.channel(), &session.to_string()[..8]),
-        Style::default().fg(MUTED),
-      ),
-    ])),
-    area,
-  );
-}
-
 fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
+  if state.header_preview {
+    let lines = state.splash(area.width.saturating_sub(1) as usize, area.height as usize);
+    state.art_area.set(Some(Rect::new(
+      area.x + 1,
+      area.y,
+      area.width.saturating_sub(1),
+      (lines.len().saturating_sub(3) as u16).min(area.height),
+    )));
+    frame.render_widget(
+      Paragraph::new(lines).block(
+        Block::default()
+          .borders(Borders::LEFT)
+          .border_style(Style::default().fg(BLUE)),
+      ),
+      area,
+    );
+    return;
+  }
   let view = state.active_view();
   let entries = if state.inline && state.active.is_none() {
     &view.entries[state.flushed.min(view.entries.len())..]
@@ -1908,29 +2002,43 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
     &view.entries[..]
   };
   let lines = if entries.is_empty() && !state.inline {
-    state.splash(area.width.saturating_sub(1) as usize, area.height as usize)
+    let lines = state.splash(area.width.saturating_sub(1) as usize, area.height as usize);
+    state.art_area.set(Some(Rect::new(
+      area.x + 1,
+      area.y,
+      area.width.saturating_sub(1),
+      (lines.len().saturating_sub(3) as u16).min(area.height),
+    )));
+    lines
   } else if entries.is_empty() {
     Vec::new()
   } else {
     entries
       .iter()
-      .flat_map(|entry| entry_lines(entry, state.expanded))
+      .flat_map(|entry| entry_lines(entry, state.expanded, area.width.saturating_sub(1) as usize))
       .collect()
   };
-  let text_width = area.width.saturating_sub(1).max(1) as usize;
-  let rendered_lines: usize = lines
-    .iter()
-    .map(|line| line.width().max(1).div_ceil(text_width))
-    .sum();
   let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
     Block::default()
       .borders(Borders::LEFT)
       .border_style(Style::default().fg(BLUE)),
   );
-  let bottom = rendered_lines.saturating_sub(area.height as usize);
-  state.reach.set(bottom.min(u16::MAX as usize) as u16);
+  let bottom = paragraph
+    .line_count(area.width)
+    .saturating_sub(area.height as usize);
+  let reach = bottom.min(u16::MAX as usize) as u16;
+  if state.scroll.get() > 0 {
+    state.scroll.set(
+      state
+        .scroll
+        .get()
+        .saturating_add(reach.saturating_sub(state.reach.get()))
+        .min(reach),
+    );
+  }
+  state.reach.set(reach);
   let scroll = bottom
-    .saturating_sub(state.scroll as usize)
+    .saturating_sub(state.scroll.get() as usize)
     .min(u16::MAX as usize) as u16;
   let paragraph = paragraph.scroll((scroll, 0));
   frame.render_widget(paragraph, area);
@@ -1943,15 +2051,7 @@ fn splash(
   height: usize,
 ) -> Vec<Line<'static>> {
   let mut lines = custom
-    .filter(|header| header.width <= width && header.lines.len().saturating_add(3) <= height)
-    .map(|header| {
-      header
-        .lines
-        .iter()
-        .cloned()
-        .map(|line| line.alignment(Alignment::Center))
-        .collect()
-    })
+    .and_then(|header| header.fitted_lines(width, height.saturating_sub(3)))
     .unwrap_or_else(|| masthead::render(width, style));
   append_splash_footer(&mut lines);
   lines
@@ -1976,7 +2076,20 @@ fn append_splash_footer(lines: &mut Vec<Line<'static>>) {
 fn selected_header(preference: &str, catalog: &HeaderCatalog) -> (usize, Option<HeaderArt>) {
   let style = masthead::select_index(masthead::VARIANTS);
   match preference {
-    "builtin" => (style, None),
+    "builtin" => {
+      let bundled: Vec<_> = catalog
+        .headers
+        .iter()
+        .filter(|header| header.path.as_os_str().is_empty())
+        .collect();
+      let choice = masthead::select_index(masthead::VARIANTS + bundled.len());
+      (
+        style,
+        choice
+          .checked_sub(masthead::VARIANTS)
+          .map(|index| bundled[index].clone()),
+      )
+    }
     "random" if !catalog.headers.is_empty() => {
       let choice = masthead::select_index(masthead::VARIANTS + catalog.headers.len());
       if choice < masthead::VARIANTS {
@@ -1990,108 +2103,6 @@ fn selected_header(preference: &str, catalog: &HeaderCatalog) -> (usize, Option<
     }
     "random" => (style, None),
     name => (style, catalog.get(name).cloned()),
-  }
-}
-
-fn entry_lines(entry: &Entry, expanded: bool) -> Vec<Line<'static>> {
-  match &entry.tool {
-    Some(tool) => call_lines(entry, tool, expanded),
-    None => said_lines(entry),
-  }
-}
-
-/// Somebody speaking: the time, who, and what they said.
-fn said_lines(entry: &Entry) -> Vec<Line<'static>> {
-  let (nick, color) = match entry.kind {
-    EntryKind::User => ("you", CYAN),
-    EntryKind::Assistant => ("Ainz", ACTIVE),
-    EntryKind::System => ("*", YELLOW),
-    EntryKind::Tool => ("tool", MAGENTA),
-    EntryKind::Error => ("error", RED),
-  };
-  // the continuation sits under the text, whatever width the nick took
-  let indent = " ".repeat(entry.at.chars().count() + nick.chars().count() + 5);
-  entry
-    .text
-    .lines()
-    .enumerate()
-    .map(|(index, text)| {
-      if index == 0 {
-        Line::from(vec![
-          Span::styled(format!(" {} ", entry.at), Style::default().fg(MUTED)),
-          Span::styled(
-            format!("<{nick}> "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-          ),
-          Span::styled(text.to_string(), Style::default().fg(INK)),
-        ])
-      } else {
-        Line::from(vec![
-          Span::raw(indent.clone()),
-          Span::styled(text.to_string(), Style::default().fg(INK)),
-        ])
-      }
-    })
-    .collect()
-}
-
-/// A tool call, drawn as the command line it is: a mark for how it went, what ran, what it ran
-/// on, and what it wrote underneath.
-fn call_lines(entry: &Entry, tool: &ToolLine, expanded: bool) -> Vec<Line<'static>> {
-  let (glyph, color) = tool.state.glyph();
-  let mut head = vec![
-    Span::styled(format!(" {}  ", entry.at), Style::default().fg(MUTED)),
-    Span::styled(
-      format!("{glyph} "),
-      Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ),
-    Span::styled(
-      format!("{:<8}", clip(&tool.name, 8)),
-      Style::default().fg(MAGENTA).add_modifier(Modifier::BOLD),
-    ),
-    Span::styled(tool.subject.clone(), Style::default().fg(INK)),
-  ];
-  if !tool.note.is_empty() {
-    head.push(Span::styled(
-      format!(" · {}", tool.note),
-      Style::default().fg(MUTED),
-    ));
-  }
-  let indent = " ".repeat(entry.at.chars().count() + 12);
-  let mut lines = vec![Line::from(head)];
-  // while it runs, the last line it wrote; once it is over, the first few, or all of them
-  let body: Vec<String> = match (&tool.live, &entry.detail, expanded) {
-    (live, _, _) if !live.is_empty() => vec![live.clone()],
-    (_, Some(detail), true) => detail.lines().map(str::to_string).collect(),
-    // one line of output is already in the note beside the call
-    (_, Some(detail), false)
-      if detail
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
-        > 1 =>
-    {
-      preview(detail)
-    }
-    (_, Some(_), false) => Vec::new(),
-    _ => Vec::new(),
-  };
-  for line in body {
-    lines.push(Line::from(vec![
-      Span::raw(indent.clone()),
-      Span::styled(clip(&line, 160), Style::default().fg(MUTED)),
-    ]));
-  }
-  lines
-}
-
-/// The first few lines of what a call wrote, and a count of what is not shown.
-fn preview(detail: &str) -> Vec<String> {
-  let mut lines = detail.lines().filter(|line| !line.trim().is_empty());
-  let shown: Vec<String> = lines.by_ref().take(3).map(str::to_string).collect();
-  match lines.count() {
-    0 => shown,
-    rest => [shown, vec![format!("… +{rest} lines")]].concat(),
   }
 }
 
@@ -2149,7 +2160,7 @@ fn render_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
     List::new(items).block(
       Block::default()
         .title(" agents ")
-        .borders(Borders::RIGHT)
+        .borders(Borders::LEFT)
         .border_style(Style::default().fg(BLUE)),
     ),
     area,
@@ -2178,30 +2189,6 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   } else {
     permission_name(config.permissions)
   };
-  let mut activity = view
-    .tools
-    .values()
-    .next()
-    .map(|tool| format!("tool:{tool}"))
-    .unwrap_or_else(|| {
-      if state.active.is_some() {
-        match view.state {
-          AgentState::Running => "working".into(),
-          AgentState::Done => "done".into(),
-          AgentState::Error => "error".into(),
-        }
-      } else if state.busy() {
-        "thinking".into()
-      } else {
-        "ready".into()
-      }
-    });
-  // a headless coding agent can work for minutes without a word; the clock says it has not wedged
-  if let Some(seconds) = state.started.map(|start| start.elapsed().as_secs())
-    && seconds > 0
-  {
-    activity = format!("{activity} {}", elapsed(seconds));
-  }
   let model = &config.model;
   // what memory this session has, since it changes what the model can be expected to know
   let memory = match (config.memory.backend, config.mesh_active()) {
@@ -2218,15 +2205,15 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   let text = if area.width >= 108 {
     format!(
       " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
-       {total}{cost} │ agents {running}/{total_agents} │ {activity} │ ^L roster "
+       {total}{cost} │ agents {running}/{total_agents} │ ^L roster "
     )
   } else if area.width >= 72 {
     format!(
       " {provider}/{model} │ {permissions} │ tok {input}↓ {output}↑ Σ{total}{cost} │ \
-       ag {running}/{total_agents} │ {activity} "
+       ag {running}/{total_agents} "
     )
   } else {
-    format!(" {} │ Σ{total} tok │ {activity} ", config.model)
+    format!(" {} │ Σ{total} tok ", config.model)
   };
   frame.render_widget(
     Paragraph::new(text).style(
@@ -2693,102 +2680,9 @@ fn clock() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-  use serde_json::json;
+#[path = "../../tests/tui/chat.rs"]
+mod tests;
 
-  use super::{Duration, Entry, entry_lines, file_fragment, fit_subject, tool_note, tool_subject};
-
-  #[test]
-  fn a_call_reads_as_the_command_it_is() {
-    assert_eq!(
-      tool_subject("shell", &json!({"command": "git status --short"})),
-      "git status --short"
-    );
-    assert_eq!(
-      tool_subject("Read", &json!({"file_path": "/tmp/notes.md"})),
-      "/tmp/notes.md"
-    );
-    // nothing recognisable to name, so the line is the tool alone rather than raw JSON
-    assert_eq!(tool_subject("TodoWrite", &json!({"todos": []})), "");
-  }
-
-  #[test]
-  fn a_long_path_keeps_the_end_that_names_the_file() {
-    let path = format!("/{}/notes.md", "deep".repeat(30));
-
-    let subject = fit_subject(&tool_subject("Read", &json!({ "file_path": path })));
-
-    assert!(subject.ends_with("deepdeep/notes.md"), "{subject}");
-    assert!(subject.starts_with('…'), "{subject}");
-  }
-
-  #[test]
-  fn what_a_call_cost_is_what_the_line_carries() {
-    let quick = Duration::from_millis(120);
-    assert_eq!(tool_note("", false, quick), "120ms");
-    assert_eq!(tool_note("only this", false, quick), "120ms · only this");
-    assert_eq!(
-      tool_note("one\ntwo\nthree", false, Duration::from_secs_f64(2.5)),
-      "2.5s · 3 lines"
-    );
-    // a failure says why, since that is the part worth reading
-    assert_eq!(
-      tool_note("no such file", true, quick),
-      "120ms · no such file"
-    );
-  }
-
-  #[test]
-  fn a_finished_call_shows_a_few_lines_and_counts_the_rest() {
-    let output = (1..=6).map(|n| format!("line {n}")).collect::<Vec<_>>();
-    let mut entry = Entry::call("shell".into(), "seq 6".into());
-    entry.detail = Some(output.join("\n"));
-
-    let collapsed = rendered(&entry, false);
-    assert!(
-      collapsed.contains("line 1") && collapsed.contains("… +3 lines"),
-      "{collapsed}"
-    );
-    assert!(!collapsed.contains("line 5"), "{collapsed}");
-
-    // ctrl+o opens the whole of it
-    let expanded = rendered(&entry, true);
-    assert!(expanded.contains("line 6"), "{expanded}");
-  }
-
-  #[test]
-  fn a_running_call_shows_the_last_line_it_wrote() {
-    let mut entry = Entry::call("shell".into(), "cargo build".into());
-    entry.detail = Some("Compiling ainz\nCompiling serde\n".into());
-    if let Some(tool) = entry.tool.as_mut() {
-      tool.live = "Compiling serde".into();
-    }
-
-    let text = rendered(&entry, false);
-
-    assert!(text.contains("▸"), "{text}");
-    assert!(text.contains("Compiling serde"), "{text}");
-    // the earlier lines wait for ctrl+o rather than crowding the line
-    assert!(!text.contains("Compiling ainz"), "{text}");
-  }
-
-  fn rendered(entry: &Entry, expanded: bool) -> String {
-    entry_lines(entry, expanded)
-      .iter()
-      .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
-      .collect()
-  }
-
-  #[test]
-  fn an_at_sign_starts_a_path_completion() {
-    // the fragment is what has been typed after the @, wherever the cursor sits
-    assert_eq!(
-      file_fragment("look at @src/ma", 15),
-      Some((8, "src/ma".into()))
-    );
-    // an address is not a path completion, since the @ has no space before it
-    assert_eq!(file_fragment("mail me@wess.io", 15), None);
-    // and neither is a finished word
-    assert_eq!(file_fragment("@src/main.rs now", 16), None);
-  }
-}
+#[cfg(test)]
+#[path = "../../tests/tui/wrap.rs"]
+mod wrapping;

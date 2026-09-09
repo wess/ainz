@@ -10,7 +10,9 @@ use tokio::{fs, io::AsyncReadExt};
 const MAX_SOURCE: usize = 4 * 1024 * 1024;
 
 pub(super) struct Bundle {
+  #[cfg(feature = "lua")]
   pub entry: String,
+  #[cfg(feature = "lua")]
   pub files: BTreeMap<String, Vec<u8>>,
   pub digest: String,
 }
@@ -77,7 +79,9 @@ pub(super) async fn load(root: &Path, entry: &Path) -> Result<Bundle> {
     hash.update(source);
   }
   Ok(Bundle {
+    #[cfg(feature = "lua")]
     entry,
+    #[cfg(feature = "lua")]
     files,
     digest: format!("{:x}", hash.finalize()),
   })

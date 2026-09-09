@@ -66,13 +66,35 @@ def check(name, condition, detail=""):
         failures.append(name)
 
 
+class Screen(pyte.Screen):
+    # pyte omits CSI S/T; real terminals use these to move a scrolling region
+    def scroll_up(self, count=1):
+        row = self.cursor.y
+        self.cursor.y = self.margins.bottom if self.margins else self.lines - 1
+        for _ in range(count or 1):
+            self.index()
+        self.cursor.y = row
+
+    def scroll_down(self, count=1):
+        row = self.cursor.y
+        self.cursor.y = self.margins.top if self.margins else 0
+        for _ in range(count or 1):
+            self.reverse_index()
+        self.cursor.y = row
+
+
+class Stream(pyte.ByteStream):
+    csi = dict(pyte.ByteStream.csi, S="scroll_up", T="scroll_down")
+    events = pyte.ByteStream.events | {"scroll_up", "scroll_down"}
+
+
 class Terminal:
     """A pty with a VT model of what was drawn in it."""
 
     def __init__(self, binary, root, config, answers=True):
         self.answers = answers
-        self.screen = pyte.Screen(COLS, ROWS)
-        self.stream = pyte.ByteStream(self.screen)
+        self.screen = Screen(COLS, ROWS)
+        self.stream = Stream(self.screen)
         self.raw = bytearray()
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
@@ -233,7 +255,7 @@ def check_prompt(binary, root):
     row = next((i for i, r in enumerate(term.screen.display) if "/headers" in r), None)
     check("the command menu opens", row is not None, term.body()[-400:])
     if row is not None:
-        # the menu is over the transcript, to the right of the roster
+        # the menu is over the transcript, to the left of the roster
         term.send(press(40, row + 1))
         check("clicking a suggestion takes it", term.prompt().startswith("> /head"), term.prompt())
     term.send(CTRL_U + CTRL_K)
