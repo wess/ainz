@@ -226,7 +226,7 @@ async fn empty_config_starts_the_interactive_setup() {
     .stdin
     .take()
     .unwrap()
-    .write_all(b"5\ndemo\nhttp://127.0.0.1:9999/v1\n\ntiny\n/exit\n")
+    .write_all(b"6\ndemo\nhttp://127.0.0.1:9999/v1\n\ntiny\n/exit\n")
     .await
     .unwrap();
   let output = child.wait_with_output().await.unwrap();

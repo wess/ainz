@@ -14,6 +14,7 @@ leaving the app.
 ```sh
 ainz providers list
 ainz providers add NAME --preset ollama
+ainz providers add NAME --preset ollama-cloud
 ainz providers add NAME --preset lite-llm
 ainz providers add NAME --preset codex --known-model MODEL
 ainz providers add NAME --preset claude-code --known-model MODEL
@@ -48,6 +49,15 @@ ainz providers use litellm gpt-5.6-sol
 
 Model names are whatever the proxy exposes, so its `model_list` is the source of truth. Ainz
 stores only the variable name; the key stays in the environment.
+
+## Ollama Cloud
+
+Ainz can also talk directly to Ollama Cloud's OpenAI-compatible endpoint using an API key stored in
+`OLLAMA_API_KEY`.
+
+```sh
+ainz providers add ollama-cloud --preset ollama-cloud
+```
 
 ## Credentials
 

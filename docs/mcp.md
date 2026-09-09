@@ -61,6 +61,12 @@ ainz mcp --json
 ainz mcp remove files
 ```
 
+The chat client can manage stdio servers without leaving the session. `/mcp` lists the
+configured servers; `/mcp add NAME --required -- COMMAND` adds one immediately, and `/mcp add`
+opens a small form for the name, command, and required flag. `/mcp remove NAME` removes a server
+from the profile. `/mcp import` keeps the interactive importer for servers discovered from other
+MCP-aware tools.
+
 `--mcp-config PATH` accepts the JSON launch format used by MCP-aware harnesses:
 
 ```json

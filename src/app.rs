@@ -509,18 +509,30 @@ async fn configure(
   }
   println!("\nAinz setup");
   println!("  1  Ollama");
-  println!("  2  LiteLLM proxy");
-  println!("  3  Codex CLI (headless)");
-  println!("  4  Claude Code (headless)");
-  println!("  5  Custom HTTP endpoint");
-  println!("  6  Custom process");
+  println!("  2  Ollama Cloud");
+  println!("  3  LiteLLM proxy");
+  println!("  4  Codex CLI (headless)");
+  println!("  5  Claude Code (headless)");
+  println!("  6  Custom HTTP endpoint");
+  println!("  7  Custom process");
   if !config.providers.is_empty() {
-    println!("  7  Existing provider");
+    println!("  8  Existing provider");
   }
   let choice = read_value(lines, "provider", None).await?;
   let (name, mut profile) = match choice.as_str() {
     "1" | "ollama" => ("ollama".to_string(), preset_profile(ProviderPreset::Ollama)),
-    "2" | "litellm" => {
+    "2" | "ollamacloud" | "ollama-cloud" => {
+      let mut profile = preset_profile(ProviderPreset::OllamaCloud);
+      let api_key_env = read_value(
+        lines,
+        "API key environment variable",
+        Some(profile.api_key_env.as_str()),
+      )
+      .await?;
+      profile.api_key_env = api_key_env;
+      ("ollama-cloud".to_string(), profile)
+    }
+    "3" | "litellm" => {
       let name = read_value(lines, "name", Some("litellm")).await?;
       let endpoint = read_value(lines, "endpoint", Some("http://127.0.0.1:4000/v1")).await?;
       let api_key_env = read_value(
@@ -531,19 +543,19 @@ async fn configure(
       .await?;
       (name, ProviderConfig::http(endpoint, api_key_env))
     }
-    "3" | "codex" => ("codex".to_string(), preset_profile(ProviderPreset::Codex)),
-    "4" | "claude" | "claude-code" => {
+    "4" | "codex" => ("codex".to_string(), preset_profile(ProviderPreset::Codex)),
+    "5" | "claude" | "claude-code" => {
       let mut profile = preset_profile(ProviderPreset::ClaudeCode);
       profile.models = vec!["fable".into(), "opus".into(), "sonnet".into()];
       ("claude".to_string(), profile)
     }
-    "5" | "http" => {
+    "6" | "http" => {
       let name = read_value(lines, "name", Some("http")).await?;
       let endpoint = read_value(lines, "endpoint", Some("http://127.0.0.1:11434/v1")).await?;
       let api_key_env = read_value(lines, "API key environment variable", Some("")).await?;
       (name, ProviderConfig::http(endpoint, api_key_env))
     }
-    "6" | "process" => {
+    "7" | "process" => {
       let name = read_value(lines, "name", Some("process")).await?;
       let command = read_value(lines, "command", None).await?;
       let args = read_value(lines, "arguments", Some("")).await?;
@@ -561,7 +573,7 @@ async fn configure(
         ),
       )
     }
-    "7" if !config.providers.is_empty() => choose_existing(config, lines).await?,
+    "8" | "existing" if !config.providers.is_empty() => choose_existing(config, lines).await?,
     _ => anyhow::bail!("unknown provider selection {choice}"),
   };
 

@@ -51,6 +51,7 @@ pub enum PluginCommand {
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ProviderPreset {
   Ollama,
+  OllamaCloud,
   LiteLlm,
   Codex,
   ClaudeCode,
@@ -61,6 +62,7 @@ pub enum ProviderPreset {
 pub(crate) fn preset_profile(preset: ProviderPreset) -> ProviderConfig {
   match preset {
     ProviderPreset::Ollama => ProviderConfig::ollama(),
+    ProviderPreset::OllamaCloud => ProviderConfig::ollama_cloud(),
     ProviderPreset::LiteLlm => ProviderConfig::lite_llm(),
     ProviderPreset::Codex => ProviderConfig::codex(),
     ProviderPreset::ClaudeCode => ProviderConfig::claude_code(),

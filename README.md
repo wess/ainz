@@ -66,6 +66,7 @@ adds or switches providers without restarting, and the same operations are scrip
 
 ```sh
 ainz providers add ollama --preset ollama
+ainz providers add ollama-cloud --preset ollama-cloud
 ainz models list ollama --refresh
 ainz providers use ollama qwen3:8b
 

@@ -41,6 +41,7 @@ use super::{
 use crate::app::{expand_prompt, make_agent_with};
 
 mod activity;
+mod mcp;
 mod themes;
 mod title;
 mod transcript;
@@ -573,9 +574,13 @@ async fn run_chat_inner(
   let mut agent = Some(built_agent);
   let mut session = Some(initial_session);
   let session_id = session.as_ref().unwrap().id;
+  let previous_prompts =
+    store.list().await?.into_iter().find_map(|saved| {
+      (saved.workspace == workspace && saved.id != session_id).then_some(saved.id)
+    });
   let (splash_style, custom_header) = selected_header(&config.ui.header, &command_data.headers);
   // what was asked before in this session, so the walk back through prompts survives a resume
-  let history = session
+  let mut history: Vec<String> = session
     .as_ref()
     .map(|session| {
       session
@@ -586,6 +591,18 @@ async fn run_chat_inner(
         .collect()
     })
     .unwrap_or_default();
+  if history.is_empty() {
+    if let Some(id) = previous_prompts
+      && let Ok(previous) = store.load(id).await
+    {
+      history = previous
+        .nodes
+        .iter()
+        .filter(|node| node.message.role == ainz::protocol::Role::User)
+        .filter_map(|node| node.message.content.clone())
+        .collect();
+    }
+  }
   let files = {
     let root = workspace.clone();
     tokio::task::spawn_blocking(move || workspace_files(&root))
@@ -1000,6 +1017,17 @@ async fn run_chat_inner(
           continue;
         }
         match themes::command(input.trim(), &mut state, config).await {
+          Ok(true) => continue,
+          Err(error) => {
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::Error, format!("{error:#}")));
+            continue;
+          }
+          Ok(false) => {}
+        }
+        match mcp::command(terminal, input.trim(), &mut state, &mut command_data).await {
           Ok(true) => continue,
           Err(error) => {
             state
@@ -2443,6 +2471,42 @@ fn clip_start(text: &str, width: usize) -> String {
     .collect()
 }
 
+fn output_is_json(value: &str) -> bool {
+  let value = value.trim();
+  if value.is_empty() {
+    return false;
+  }
+  value
+    .chars()
+    .next()
+    .is_some_and(|ch| matches!(ch, '{' | '['))
+    && serde_json::from_str::<serde_json::Value>(value).is_ok()
+}
+
+fn output_summary(value: &str) -> &'static str {
+  if !output_is_json(value) {
+    return "";
+  }
+  match serde_json::from_str::<serde_json::Value>(value.trim()) {
+    Ok(serde_json::Value::Array(values)) => {
+      if values.is_empty() {
+        "JSON array (empty)"
+      } else {
+        "JSON array"
+      }
+    }
+    Ok(serde_json::Value::Object(values)) => {
+      if values.is_empty() {
+        "JSON object (empty)"
+      } else {
+        "JSON object"
+      }
+    }
+    Ok(_) => "JSON value",
+    Err(_) => "JSON-like output",
+  }
+}
+
 /// What the call cost, once it is over: how long it took, and how much it wrote or why it did
 /// not. That is the part worth reading when the output itself is not.
 fn tool_note(output: &str, error: bool, took: Duration) -> String {
@@ -2453,11 +2517,17 @@ fn tool_note(output: &str, error: bool, took: Duration) -> String {
     seconds => elapsed(seconds as u64),
   };
   if error {
+    if output_is_json(output) {
+      return format!("{spent} · {}", output_summary(output));
+    }
     let first = output
       .lines()
       .find(|line| !line.trim().is_empty())
       .unwrap_or("failed");
     return format!("{spent} · {}", clip(first, 80));
+  }
+  if output_is_json(output) {
+    return format!("{spent} · {}", output_summary(output));
   }
   match output
     .lines()

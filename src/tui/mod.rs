@@ -62,6 +62,7 @@ impl Choice {
   fn name(&self) -> &str {
     match self {
       Self::Preset(ProviderPreset::Ollama) => "Ollama",
+      Self::Preset(ProviderPreset::OllamaCloud) => "Ollama Cloud",
       Self::Preset(ProviderPreset::LiteLlm) => "LiteLLM",
       Self::Preset(ProviderPreset::Codex) => "Codex CLI",
       Self::Preset(ProviderPreset::ClaudeCode) => "Claude Code",
@@ -76,6 +77,10 @@ impl Choice {
       Self::Preset(ProviderPreset::Ollama) => (
         "Local models",
         "Connects to the local server and discovers installed models automatically.",
+      ),
+      Self::Preset(ProviderPreset::OllamaCloud) => (
+        "Hosted models",
+        "Uses Ollama Cloud credentials to discover and use its hosted model list.",
       ),
       Self::Preset(ProviderPreset::LiteLlm) => (
         "Proxy for every other model",
@@ -120,6 +125,7 @@ impl Choice {
   fn key(&self) -> Option<&str> {
     match self {
       Self::Preset(ProviderPreset::Ollama) => Some("ollama"),
+      Self::Preset(ProviderPreset::OllamaCloud) => Some("ollama-cloud"),
       Self::Preset(ProviderPreset::LiteLlm) => Some("litellm"),
       Self::Preset(ProviderPreset::Codex) => Some("codex"),
       Self::Preset(ProviderPreset::ClaudeCode) => Some("claude"),
@@ -618,6 +624,7 @@ async fn configure_inner(
 ) -> Result<Option<(String, ProviderConfig, String)>> {
   let mut choices = vec![
     Choice::Preset(ProviderPreset::Ollama),
+    Choice::Preset(ProviderPreset::OllamaCloud),
     Choice::Preset(ProviderPreset::LiteLlm),
     Choice::Preset(ProviderPreset::Codex),
     Choice::Preset(ProviderPreset::ClaudeCode),
@@ -645,6 +652,38 @@ async fn configure_inner(
         profile.models = models;
       }
       ("ollama".into(), profile, None)
+    }
+    Choice::Preset(ProviderPreset::OllamaCloud) => {
+      let mut profile = preset_profile(ProviderPreset::OllamaCloud);
+      terminal.draw(|frame| render_loading(frame, "Finding cloud models…"))?;
+      let Some(credential) = choose_credential(
+        terminal,
+        config,
+        "Ollama Cloud",
+        "ollama-cloud",
+        "OLLAMA_API_KEY",
+        None,
+      )
+      .await?
+      else {
+        return Ok(None);
+      };
+      profile.credential = Some(credential);
+      if let Ok(key) = config.api_key_for(&profile).await
+        && let Ok(provider) = HttpProvider::new(
+          profile
+            .endpoint
+            .clone()
+            .context("Ollama Cloud requires an endpoint")?,
+          String::new(),
+          key,
+          config.provider_retries,
+        )
+        && let Ok(models) = provider.models().await
+      {
+        profile.models = models;
+      }
+      ("ollama-cloud".into(), profile, None)
     }
     Choice::Preset(ProviderPreset::LiteLlm) => {
       let Some(endpoint) = choose_value(

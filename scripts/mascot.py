@@ -137,14 +137,15 @@ for name, grid in [("ainz", large), ("compact", small), ("tiny", tiny())]:
 web = Path("site/assets")
 web.mkdir(parents=True, exist_ok=True)
 web.joinpath("mascot.ans").write_text("\n".join(encode(small).splitlines()[:-2]) + "\n")
-paths = []
-for color, rgb in palette.items():
-  cells = " ".join(f"M{x} {y}h1v1h-1z" for y, row in enumerate(small)
-                   for x, pixel in enumerate(row) if pixel == color)
-  if cells:
-    fill = "#" + "".join(f"{value:02x}" for value in rgb)
-    paths.append(f'<path fill="{fill}" d="{cells}"/>')
-web.joinpath("mascot.svg").write_text(
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" '
-  'shape-rendering="crispEdges"><title>Ainz mascot</title>' + "".join(paths) + '</svg>\n'
-)
+for name, grid in [("mascot", small), ("favicon", tiny())]:
+  paths = []
+  for color, rgb in palette.items():
+    cells = " ".join(f"M{x} {y}h1v1h-1z" for y, row in enumerate(grid)
+                     for x, pixel in enumerate(row) if pixel == color)
+    if cells:
+      fill = "#" + "".join(f"{value:02x}" for value in rgb)
+      paths.append(f'<path fill="{fill}" d="{cells}"/>')
+  web.joinpath(f"{name}.svg").write_text(
+    f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {len(grid[0])} {len(grid)}" '
+    'shape-rendering="crispEdges"><title>Ainz mascot</title>' + "".join(paths) + '</svg>\n'
+  )

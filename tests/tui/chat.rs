@@ -61,6 +61,30 @@ fn a_finished_call_shows_a_few_lines_and_counts_the_rest() {
 }
 
 #[test]
+fn a_finished_call_shows_one_line_without_expansion() {
+  let mut entry = Entry::call("shell".into(), "cat config".into());
+  entry.detail = Some("ready".into());
+
+  let text = rendered(&entry, false);
+  assert!(text.contains("ready"), "{text}");
+}
+
+#[test]
+fn a_finished_call_does_not_show_raw_json_output() {
+  let mut entry = Entry::call("read".into(), "config.json".into());
+  entry.detail = Some(r#"{"name":"ainz","ok":true}"#.into());
+
+  let collapsed = rendered(&entry, false);
+  assert!(!collapsed.contains(r#""name""#), "{collapsed}");
+  assert!(!collapsed.contains(r#"{"name""#), "{collapsed}");
+  assert!(collapsed.contains("JSON"), "{collapsed}");
+
+  let expanded = rendered(&entry, true);
+  assert!(!expanded.contains(r#""name""#), "{expanded}");
+  assert!(expanded.contains("JSON"), "{expanded}");
+}
+
+#[test]
 fn a_running_call_shows_the_last_line_it_wrote() {
   let mut entry = Entry::call("shell".into(), "cargo build".into());
   entry.detail = Some("Compiling ainz\nCompiling serde\n".into());

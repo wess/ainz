@@ -260,6 +260,10 @@ impl ProviderConfig {
     Self::http("http://127.0.0.1:11434/v1", "")
   }
 
+  pub fn ollama_cloud() -> Self {
+    Self::http("https://api.ollama.com/v1", "OLLAMA_API_KEY")
+  }
+
   /// A LiteLLM proxy speaks the same chat-completions API for every model behind it.
   pub fn lite_llm() -> Self {
     Self::http("http://127.0.0.1:4000/v1", "LITELLM_API_KEY")

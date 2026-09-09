@@ -102,7 +102,12 @@ pub fn builtins() -> Vec<SlashCommand> {
       "Attach an image to a prompt",
       "prompt",
     ),
-    ("mcp", "/mcp", "List configured MCP servers", "extension"),
+    (
+      "mcp",
+      "/mcp [add|remove]",
+      "List or configure MCP servers",
+      "extension",
+    ),
     (
       "memory",
       "/memory [QUERY]",
