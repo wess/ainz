@@ -48,7 +48,9 @@ def main():
     term.send("/theme custom" + tui.ENTER, .7)
     tui.check("invalid reload keeps current palette", has_color(term, "123456", True))
     term.send("/themes" + tui.ENTER, .7)
-    tui.check("invalid file reported", "must be #RRGGBB" in term.body(), term.body())
+    body = term.body()
+    tui.check("invalid file reported",
+      all(part in body for part in ["invalid:", "custom.toml", "#RRGGBB"]), body)
     term.send("/header mascot" + tui.ENTER, .7)
     tui.check("mascot keeps original crimson", has_color(term, "de3040") or has_color(term, "de3040", True))
     term.send("x")

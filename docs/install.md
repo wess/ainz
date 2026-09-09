@@ -21,7 +21,7 @@ release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep
 ## Cargo
 
 ```sh
-cargo install --git https://github.com/wess/ainz --tag v0.10.1 --locked
+cargo install --git https://github.com/wess/ainz --tag v0.10.2 --locked
 ```
 
 ## Current checkout and smaller builds
