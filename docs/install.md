@@ -13,7 +13,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://raw.githubusercontent.com/wess/ainz/main/install.sh | sh
 ```
 
-The installer supports Intel and Apple Silicon macOS and x86_64 and arm64 Linux. It downloads the
+The installer supports Apple Silicon macOS and x86_64 and arm64 Linux. It downloads the
 latest release archive, verifies the published SHA-256 file, and installs `ainz` into
 `~/.local/bin`. Set `AINZ_INSTALL_DIR` to choose another destination or `AINZ_VERSION` to pin a
 release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep) on `PATH`.
@@ -21,7 +21,7 @@ release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep
 ## Cargo
 
 ```sh
-cargo install --git https://github.com/wess/ainz --tag v0.10.2 --locked
+cargo install --git https://github.com/wess/ainz --tag v0.10.3 --locked
 ```
 
 ## Current checkout and smaller builds

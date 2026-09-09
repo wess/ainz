@@ -27,7 +27,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://raw.githubusercontent.com/wess/ainz/main/install.sh | sh
 ```
 
-Release downloads cover Intel and Apple Silicon macOS and x86_64 and arm64 Linux. The
+Release downloads cover Apple Silicon macOS and x86_64 and arm64 Linux. The
 `search` tool shells out to [ripgrep](https://github.com/BurntSushi/ripgrep), so install `rg`
 as well. See [`docs/install.md`](docs/install.md) for pinned versions, custom install
 directories, Cargo, and uninstalling. The [documentation index](docs/readme.md) lists every guide. The project site has a

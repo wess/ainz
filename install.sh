@@ -26,6 +26,7 @@ case "$(uname -m)" in
 esac
 
 target="${architecture}-${platform}"
+[ "$target" != "x86_64-apple-darwin" ] || fail "macOS releases require Apple Silicon"
 if [ -n "${AINZ_VERSION:-}" ]; then
   version="${AINZ_VERSION#v}"
 else
