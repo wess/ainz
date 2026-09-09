@@ -102,7 +102,12 @@ class Terminal:
             os.execve(
                 binary,
                 ["ainz"],
-                dict(os.environ, TERM="xterm-256color", AINZ_CONFIG=os.path.join(root, config)),
+                dict(
+                    os.environ,
+                    TERM="xterm-256color",
+                    AINZ_CONFIG=os.path.join(root, config),
+                    PATH=os.path.join(root, ".fixtures") + os.pathsep + os.environ.get("PATH", ""),
+                ),
             )
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         os.set_blocking(self.fd, False)
@@ -175,6 +180,12 @@ def wheel(up, column=20, row=10):
 
 def workspace():
     root = tempfile.mkdtemp(prefix="ainz-tui-")
+    fixtures = os.path.join(root, ".fixtures")
+    os.mkdir(fixtures)
+    adapter = os.path.join(fixtures, "aider")
+    with open(adapter, "w") as file:
+        file.write("#!/bin/sh\nexit 99\n")
+    os.chmod(adapter, 0o755)
     open(os.path.join(root, "alpha.txt"), "w").write("alpha\n")
     open(os.path.join(root, "beta.txt"), "w").write("beta\n")
     os.mkdir(os.path.join(root, "src"))
@@ -321,8 +332,8 @@ def check_setup(binary, root):
     check("the process adapter is reachable", "Executable adapter" in term.body(), term.body()[:600])
     term.send(ENTER, settle=1.2)
     check(
-        "its command list holds the agents on this machine",
-        "claude" in term.body() or "codex" in term.body(),
+        "its command list discovers the fixture adapter",
+        "aider" in term.body(),
         term.body()[:800],
     )
     check("and offers to type another", "Type another" in term.body(), term.body()[:800])
@@ -370,8 +381,9 @@ def check_model_list(binary, root):
     # the name, then where the key comes from
     term.send(ENTER, settle=0.8)
     check(
-        "the credential chooser offers a typed token",
-        "Type a token" in term.body(),
+        "typed tokens are offered only with a keychain backend",
+        ("Type a token" in term.body())
+        == (sys.platform == "darwin" or shutil.which("secret-tool") is not None),
         term.body()[:800],
     )
     check(

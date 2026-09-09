@@ -72,4 +72,3 @@ export const stamp = (x, y) => {
     cursor += 6 * state.scale;
   }
 };
-
