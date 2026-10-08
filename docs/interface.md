@@ -18,6 +18,15 @@ The design takes its cues from irssi and BitchX.
 Answers render terminal Markdown: headings, emphasis, lists, links, tables, inline code, and
 fenced code. Formatting adapts to the available width. The renderer is
 [termweave](../crates/termweave/readme.md), a separate crate with ANSI and Ratatui output.
+A call that overruns the buffer hangs under its own text the way a message does.
+
+What a tool returns is not trusted: a fetched page, a file in someone else's repository, or a
+command's output can carry terminal escape sequences. Everything the buffer draws, messages and
+calls alike, has its control characters replaced with the pictures for them, so nothing a tool
+reports can drive the terminal.
+
+Rows are laid out once per message and kept while it is on screen, so a long buffer costs the
+same to draw as a short one. What has scrolled away keeps only its height.
 
 The title uses a short excerpt of the selected agent's task. While a tool runs, its name and
 subject appear there too. Switching agents switches the topic; a finished agent retains its task.
@@ -81,6 +90,8 @@ installation command. See [headers](headers.md) for files, paths, and limits.
 terminal's own scrollback instead of the full-screen buffer on the next launch. Inline mode
 has no agent roster or full-screen header preview. Expanded tool output already flushed into
 terminal scrollback retains its formatting.
+
+Line stamps use the clock of the machine the buffer is being read on.
 
 Use the [Theme Designer](https://wess.io/ainz/theme/) to change chat colors. `/themes` lists
 installed palettes; `/theme NAME` applies or reloads one immediately, and `/theme default` resets

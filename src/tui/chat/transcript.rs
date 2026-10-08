@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn entry_lines(entry: &Entry, expanded: bool, width: usize) -> Vec<Line<'static>> {
   match &entry.tool {
-    Some(tool) => call_lines(entry, tool, expanded),
+    Some(tool) => call_lines(entry, tool, expanded, width),
     None => said_lines(entry, width),
   }
 }
@@ -67,9 +67,13 @@ fn said_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
 
 /// A tool call, drawn as the command line it is: a mark for how it went, what ran, what it ran
 /// on, and what it wrote underneath.
-fn call_lines(entry: &Entry, tool: &ToolLine, expanded: bool) -> Vec<Line<'static>> {
+///
+/// The rows are wrapped here rather than left for the widget to fold, so a call that overruns
+/// the buffer hangs under its own text the way a message does, and so one row of this is one
+/// row of the buffer.
+fn call_lines(entry: &Entry, tool: &ToolLine, expanded: bool, width: usize) -> Vec<Line<'static>> {
   let (glyph, color) = tool.state.glyph();
-  let mut head = vec![
+  let head = Line::from(vec![
     Span::styled(format!(" {}  ", entry.at), Style::default().fg(MUTED)),
     Span::styled(
       format!("{glyph} "),
@@ -79,16 +83,18 @@ fn call_lines(entry: &Entry, tool: &ToolLine, expanded: bool) -> Vec<Line<'stati
       format!("{:<8}", clip(&tool.name, 8)),
       Style::default().fg(MAGENTA).add_modifier(Modifier::BOLD),
     ),
-    Span::styled(tool.subject.clone(), Style::default().fg(INK)),
-  ];
+  ]);
+  let mut subject = vec![termweave::Span::new(
+    tool.subject.clone(),
+    termweave::ratatui::from_style(Style::default().fg(INK)),
+  )];
   if !tool.note.is_empty() {
-    head.push(Span::styled(
+    subject.push(termweave::Span::new(
       format!(" · {}", tool.note),
-      Style::default().fg(MUTED),
+      termweave::ratatui::from_style(Style::default().fg(MUTED)),
     ));
   }
-  let indent = "           ";
-  let mut lines = vec![Line::from(head)];
+  let mut lines = wrapped(vec![termweave::Line { spans: subject }], &head, width);
   // while it runs, the last line it wrote; once it is over, the first few, or all of them
   let body: Vec<String> = match (&tool.live, &entry.detail, expanded) {
     (_, Some(detail), true) => display_output_lines(detail),
@@ -103,16 +109,34 @@ fn call_lines(entry: &Entry, tool: &ToolLine, expanded: bool) -> Vec<Line<'stati
     (_, Some(_), false) => Vec::new(),
     _ => Vec::new(),
   };
+  let indent = Line::raw("           ");
+  let muted = termweave::ratatui::from_style(Style::default().fg(MUTED));
   for line in body {
-    lines.push(Line::from(vec![
-      Span::raw(indent),
-      Span::styled(
+    lines.extend(wrapped(
+      vec![termweave::Line::styled(
         if expanded { line } else { clip(&line, 160) },
-        Style::default().fg(MUTED),
-      ),
-    ]));
+        muted,
+      )],
+      &indent,
+      width,
+    ));
   }
   lines
+}
+
+/// Lays rows out under a prefix that only the first of them carries, which is what gives the
+/// buffer its hanging wraps.
+fn wrapped(body: Vec<termweave::Line>, prefix: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+  termweave::wrap(
+    body,
+    &termweave::Options {
+      width,
+      prefix: termweave::ratatui::from_line(prefix),
+      theme: termweave::Theme::default(),
+    },
+  )
+  .ratatui()
+  .lines
 }
 
 /// The first few lines of what a call wrote, and a count of what is not shown.

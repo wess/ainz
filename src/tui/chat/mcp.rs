@@ -50,7 +50,7 @@ pub(super) async fn command(
     }
     "remove" => {
       let name = parts.next().context("usage: /mcp remove NAME")?;
-      if !parts.next().is_none() {
+      if parts.next().is_some() {
         bail!("usage: /mcp remove NAME");
       }
       remove_named(state, command_data, name).await

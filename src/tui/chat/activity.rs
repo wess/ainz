@@ -49,17 +49,20 @@ impl ChatState {
         .entries
         .push(Entry::new(EntryKind::Error, format!("{error:#}")));
     }
-    for (index, _) in self.primary.live.values() {
-      if let Some(tool) = self
-        .primary
-        .entries
-        .get_mut(*index)
-        .and_then(|entry| entry.tool.as_mut())
-      {
-        tool.state = ToolState::Stopped;
-        tool.note = "stopped before a result was returned".into();
-        tool.live.clear();
-      }
+    for index in self
+      .primary
+      .live
+      .values()
+      .map(|(index, _)| *index)
+      .collect::<Vec<_>>()
+    {
+      self.primary.edit(index, |entry| {
+        if let Some(tool) = entry.tool.as_mut() {
+          tool.state = ToolState::Stopped;
+          tool.note = "stopped before a result was returned".into();
+          tool.live.clear();
+        }
+      });
     }
     self.primary.live.clear();
     self.primary.tools.clear();

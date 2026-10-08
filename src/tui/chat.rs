@@ -2,6 +2,7 @@ use std::{
   cell::{Cell, RefCell},
   collections::BTreeMap,
   path::PathBuf,
+  rc::Rc,
   sync::Arc,
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -113,6 +114,30 @@ struct Entry {
   // set for a tool call, which is drawn as a command rather than as somebody speaking
   tool: Option<ToolLine>,
   at: String,
+  // bumped whenever anything above changes, so what was drawn for it can be kept
+  revision: u64,
+  // what this entry last laid out, and what it laid it out for. Parsing and wrapping Markdown
+  // is the expensive part of drawing a buffer, and every entry but the last one or two is the
+  // same on every frame of a run.
+  //
+  // The row count is kept for every entry, because every frame needs the height of the whole
+  // buffer to know where it is scrolled to. The rows themselves are kept only while the entry
+  // is on screen, so what a long session holds does not grow with it.
+  rows: RefCell<Option<Rendered>>,
+}
+
+struct Rendered {
+  width: usize,
+  expanded: bool,
+  revision: u64,
+  count: usize,
+  lines: Option<Rc<Vec<Line<'static>>>>,
+}
+
+impl Rendered {
+  fn covers(&self, expanded: bool, width: usize, revision: u64) -> bool {
+    (self.width, self.expanded, self.revision) == (width, expanded, revision)
+  }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,6 +159,10 @@ impl ToolState {
   }
 }
 
+/// How much of one call's output the buffer keeps in memory. The whole of it is on disk in the
+/// session; this is the part `ctrl+o` can put back on the screen.
+const MAX_TOOL_OUTPUT: usize = 256 * 1024;
+
 /// A call as the transcript shows it: what ran, what it ran on, how it went, and the last
 /// line it wrote while it was still going.
 struct ToolLine {
@@ -154,6 +183,62 @@ impl Entry {
       detail: None,
       tool: None,
       at: clock(),
+      revision: 0,
+      rows: RefCell::new(None),
+    }
+  }
+
+  /// Says the entry has changed, so the rows drawn for it are drawn again.
+  fn touch(&mut self) {
+    self.revision = self.revision.wrapping_add(1);
+  }
+
+  /// The rows this entry occupies at this width. Laid out once and kept until the entry, the
+  /// width, or what `ctrl+o` is showing changes.
+  fn lines(&self, expanded: bool, width: usize) -> Rc<Vec<Line<'static>>> {
+    let mut cache = self.rows.borrow_mut();
+    if let Some(rendered) = &*cache
+      && rendered.covers(expanded, width, self.revision)
+      && let Some(lines) = &rendered.lines
+    {
+      return lines.clone();
+    }
+    let lines = Rc::new(entry_lines(self, expanded, width));
+    *cache = Some(Rendered {
+      width,
+      expanded,
+      revision: self.revision,
+      count: lines.len(),
+      lines: Some(lines.clone()),
+    });
+    lines
+  }
+
+  /// How many rows this entry occupies, without keeping the rows themselves. An entry that has
+  /// been drawn before answers from what it remembers.
+  fn height(&self, expanded: bool, width: usize) -> usize {
+    if let Some(rendered) = &*self.rows.borrow()
+      && rendered.covers(expanded, width, self.revision)
+    {
+      return rendered.count;
+    }
+    let lines = entry_lines(self, expanded, width);
+    let count = lines.len();
+    *self.rows.borrow_mut() = Some(Rendered {
+      width,
+      expanded,
+      revision: self.revision,
+      count,
+      lines: None,
+    });
+    count
+  }
+
+  /// Lets go of the rows while remembering how many there were, for an entry that has scrolled
+  /// off the screen.
+  fn release(&self) {
+    if let Some(rendered) = &mut *self.rows.borrow_mut() {
+      rendered.lines = None;
     }
   }
 
@@ -195,8 +280,19 @@ struct AgentView {
 impl AgentView {
   fn finish_message(&mut self) {
     if let Some(index) = self.assistant.take() {
-      self.entries[index].stream = None;
+      self.edit(index, |entry| entry.stream = None);
     }
+  }
+
+  /// Changes an entry and says so, so the rows drawn for it are laid out again. Every mutation
+  /// of a drawn entry goes through here; one that does not would keep showing what it used to
+  /// say.
+  fn edit(&mut self, index: usize, change: impl FnOnce(&mut Entry)) {
+    let Some(entry) = self.entries.get_mut(index) else {
+      return;
+    };
+    change(entry);
+    entry.touch();
   }
 
   fn new(state: AgentState) -> Self {
@@ -444,9 +540,18 @@ pub(crate) async fn run_chat(
 /// Status, prompt, and room for the reply being written, when drawing inline.
 const INLINE_ROWS: u16 = 8;
 
+/// How often the screen may be repainted. Catching up at about fifty frames a second costs a
+/// fraction of what painting per token does and looks the same to a reader.
+const FRAME: Duration = Duration::from_millis(20);
+
 /// Moves finished transcript into the terminal's scrollback, where its own scroll can reach it.
 fn flush_scrollback(terminal: &mut Term, state: &mut ChatState) -> Result<()> {
-  let width = terminal.size()?.width.max(1);
+  if !state.inline {
+    return Ok(());
+  }
+  // the same width the buffer draws at, so what leaves for the scrollback is wrapped the way
+  // it was on screen rather than one column wider
+  let width = terminal.size()?.width.max(1).saturating_sub(1).max(1);
   // whatever is still being written stays in the viewport until it is done
   let live = state
     .primary
@@ -591,17 +696,16 @@ async fn run_chat_inner(
         .collect()
     })
     .unwrap_or_default();
-  if history.is_empty() {
-    if let Some(id) = previous_prompts
-      && let Ok(previous) = store.load(id).await
-    {
-      history = previous
-        .nodes
-        .iter()
-        .filter(|node| node.message.role == ainz::protocol::Role::User)
-        .filter_map(|node| node.message.content.clone())
-        .collect();
-    }
+  if history.is_empty()
+    && let Some(id) = previous_prompts
+    && let Ok(previous) = store.load(id).await
+  {
+    history = previous
+      .nodes
+      .iter()
+      .filter(|node| node.message.role == ainz::protocol::Role::User)
+      .filter_map(|node| node.message.content.clone())
+      .collect();
   }
   let files = {
     let root = workspace.clone();
@@ -657,41 +761,113 @@ async fn run_chat_inner(
   }
 
   let mut input = EventStream::new();
+  // a provider writing quickly can wake this loop hundreds of times a second, and repainting
+  // for each of them spends the whole budget on frames nobody can read. Deltas are applied as
+  // they arrive and the screen is caught up at a rate a person can see; a keystroke never waits
+  // behind that, because a key always leaves a frame owed and the wait is only what is left of
+  // one.
+  let mut painted = Instant::now() - FRAME;
+  let mut dirty = true;
   loop {
     while let Ok(message) = rx.try_recv() {
       apply_event(&mut state, message);
+      dirty = true;
     }
-    if state.inline {
-      flush_scrollback(terminal, &mut state)?;
+    // a running turn always owes a frame: the clock on it moves on its own
+    if (dirty || state.busy()) && painted.elapsed() >= FRAME {
+      let drawn = flush_scrollback(terminal, &mut state).and_then(|()| {
+        terminal.draw(|frame| {
+          state.art_area.set(None);
+          render(frame, &state, config, current_id, &workspace, &commands);
+          state.theme.apply(frame.buffer_mut(), state.art_area.get());
+        })?;
+        Ok(())
+      });
+      // a terminal that will not take a frame is gone; the conversation is not, and the caller
+      // saves whatever it is handed
+      if drawn.is_err() {
+        return Ok(ChatOutcome {
+          session: match session.take() {
+            Some(session) => session,
+            None => store
+              .load(current_id)
+              .await
+              .unwrap_or(Session::new(workspace.clone())),
+          },
+          next: ChatNext::Quit,
+        });
+      }
+      painted = Instant::now();
+      dirty = false;
     }
-    terminal.draw(|frame| {
-      state.art_area.set(None);
-      render(frame, &state, config, current_id, &workspace, &commands);
-      state.theme.apply(frame.buffer_mut(), state.art_area.get());
-    })?;
+    // when a frame is owed, the wait is only as long as what is left of one
+    let idle = match dirty || state.busy() {
+      true => FRAME
+        .saturating_sub(painted.elapsed())
+        .max(Duration::from_millis(1)),
+      false => Duration::from_secs(3600),
+    };
     let wake = tokio::select! {
       message = rx.recv() => Wake::Agent(message),
       joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
       event = input.next() => Wake::Input(event),
-      () = tokio::time::sleep(Duration::from_secs(1)), if state.busy() => Wake::Tick,
+      () = tokio::time::sleep(idle) => Wake::Tick,
     };
     let key = match wake {
       Wake::Agent(Some(message)) => {
         apply_event(&mut state, message);
+        dirty = true;
         continue;
       }
+      // the wait ran out, or the sink closed; a running turn repaints on the way round
       Wake::Agent(None) | Wake::Tick => continue,
       Wake::Finished(joined) => {
         task = None;
+        dirty = true;
         // events emitted just before the run returned are still queued; show them first
         while let Ok(message) = rx.try_recv() {
           apply_event(&mut state, message);
         }
-        let (returned_agent, returned_session, result) = (*joined)?;
+        // a run that never returned took the agent and the session with it. The last save is
+        // what is left of the conversation, and a rebuilt agent can carry on from it; losing
+        // the session as well would only make it worse.
+        let (returned_agent, returned_session, result) = match *joined {
+          Ok(returned) => returned,
+          Err(error) => {
+            session = Some(match store.load(current_id).await {
+              Ok(session) => session,
+              Err(_) => Session::new(workspace.clone()),
+            });
+            controller = None;
+            match make_agent_with(&workspace, config, events.clone(), approver.clone()).await {
+              Ok((rebuilt, rebuilt_options)) => {
+                agent = Some(rebuilt);
+                options = rebuilt_options;
+              }
+              // nothing left to run with, but the conversation is reloaded and /config can
+              // still fix whatever the provider is now refusing
+              Err(rebuild) => state.primary.entries.push(Entry::new(
+                EntryKind::Error,
+                format!("no provider to continue with: {rebuild:#}; try /config"),
+              )),
+            }
+            state.finish_run(Err(anyhow::anyhow!(
+              "the run did not return ({error:#}); reloaded the last saved session"
+            )));
+            continue;
+          }
+        };
         agent = Some(returned_agent);
         current_id = returned_session.id;
         state.primary.usage = returned_session.usage.clone();
-        store.save(&returned_session).await?;
+        // the turn is held before it is written down: a disk that will not take it is worth
+        // saying so about, not worth losing the turn over
+        if let Err(error) = store.save(&returned_session).await {
+          state.primary.entries.push(Entry::new(
+            EntryKind::Error,
+            format!("could not save the session: {error:#}"),
+          ));
+        }
         session = Some(returned_session);
         controller = None;
         // a run long enough to walk away from says so when it is done
@@ -707,8 +883,12 @@ async fn run_chat_inner(
         state.finish_run(result);
         continue;
       }
-      Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => key,
+      Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => {
+        dirty = true;
+        key
+      }
       Wake::Input(Some(Ok(InputEvent::Paste(text)))) => {
+        dirty = true;
         state.header_preview = false;
         if state.active.is_none() && state.approval.is_none() {
           // a terminal pastes an image as its path, which is a file to attach rather than
@@ -721,13 +901,15 @@ async fn run_chat_inner(
               ));
               state.pending_image = Some(path);
             }
-            None => state.input.insert_str(&super::flatten_paste(&text)),
+            // a paste keeps its line breaks; the prompt grows to hold them
+            None => state.input.insert_str(text.trim_end_matches('\n')),
           }
           state.command_selected = 0;
         }
         continue;
       }
       Wake::Input(Some(Ok(InputEvent::Mouse(mouse)))) => {
+        dirty = true;
         match mouse.kind {
           MouseEventKind::ScrollUp => state.scroll_back(3),
           MouseEventKind::ScrollDown => state.scroll_forward(3),
@@ -756,7 +938,19 @@ async fn run_chat_inner(
       }
       Wake::Input(Some(Ok(_))) => continue,
       Wake::Input(Some(Err(error))) => return Err(error).context("read terminal input"),
-      Wake::Input(None) => anyhow::bail!("terminal input closed"),
+      // the terminal went away; the conversation did not
+      Wake::Input(None) => {
+        return Ok(ChatOutcome {
+          session: match session.take() {
+            Some(session) => session,
+            None => store
+              .load(current_id)
+              .await
+              .unwrap_or(Session::new(workspace.clone())),
+          },
+          next: ChatNext::Quit,
+        });
+      }
     };
     state.header_preview = false;
     if let Some(approval) = state.approval.take() {
@@ -778,7 +972,7 @@ async fn run_chat_inner(
           config.rules.allow.push(rule.clone());
           config.rules.allow.sort();
           config.rules.allow.dedup();
-          config.save().await?;
+          remember(&mut state, config).await;
           state.primary.entries.push(Entry::new(
             EntryKind::System,
             format!("always allowing {rule}; /permissions rules lists them"),
@@ -1134,10 +1328,19 @@ async fn run_chat_inner(
           CommandResult::Yeet => {
             config.permissions = PermissionMode::Auto;
             config.yeet = true;
-            let (new_agent, new_options) =
-              make_agent_with(&workspace, config, events.clone(), approver.clone()).await?;
-            agent = Some(new_agent);
-            options = new_options;
+            match make_agent_with(&workspace, config, events.clone(), approver.clone()).await {
+              Ok((new_agent, new_options)) => {
+                agent = Some(new_agent);
+                options = new_options;
+              }
+              Err(error) => {
+                state.primary.entries.push(Entry::new(
+                  EntryKind::Error,
+                  format!("kept the previous setup: {error:#}"),
+                ));
+                continue;
+              }
+            }
             state.primary.entries.push(Entry::new(
               EntryKind::System,
               "yeet: for the rest of this session every tool call runs without asking, \
@@ -1150,11 +1353,20 @@ async fn run_chat_inner(
             config.permissions = mode;
             // choosing a mode is taking the wheel back, so it also ends yeet's plugin trust
             config.yeet = false;
-            config.save().await?;
-            let (new_agent, new_options) =
-              make_agent_with(&workspace, config, events.clone(), approver.clone()).await?;
-            agent = Some(new_agent);
-            options = new_options;
+            remember(&mut state, config).await;
+            match make_agent_with(&workspace, config, events.clone(), approver.clone()).await {
+              Ok((new_agent, new_options)) => {
+                agent = Some(new_agent);
+                options = new_options;
+              }
+              Err(error) => {
+                state.primary.entries.push(Entry::new(
+                  EntryKind::Error,
+                  format!("kept the previous setup: {error:#}"),
+                ));
+                continue;
+              }
+            }
             state.primary.entries.push(Entry::new(
               EntryKind::System,
               format!("permissions set to {}", permission_name(mode)),
@@ -1163,7 +1375,7 @@ async fn run_chat_inner(
           }
           CommandResult::SetVim(on) => {
             config.ui.vim = on;
-            config.save().await?;
+            remember(&mut state, config).await;
             state.input.set_mode(input::Mode::Insert);
             state.primary.entries.push(Entry::new(
               EntryKind::System,
@@ -1181,7 +1393,7 @@ async fn run_chat_inner(
               live.allow.clear();
               live.deny.clear();
             }
-            config.save().await?;
+            remember(&mut state, config).await;
             state.primary.entries.push(Entry::new(
               EntryKind::System,
               "standing rules cleared; every call asks again".into(),
@@ -1190,7 +1402,7 @@ async fn run_chat_inner(
           }
           CommandResult::SetInline(on) => {
             config.ui.inline = on;
-            config.save().await?;
+            remember(&mut state, config).await;
             state.primary.entries.push(Entry::new(
               EntryKind::System,
               format!(
@@ -1207,7 +1419,7 @@ async fn run_chat_inner(
           CommandResult::SetHeader(preference) => {
             config.ui.header = preference.clone();
             state.select_header(&preference, &command_data.headers);
-            config.save().await?;
+            remember(&mut state, config).await;
             state.header_preview = !state.inline;
             if state.inline && !state.primary.entries.is_empty() {
               state.primary.entries.push(Entry::new(
@@ -1223,7 +1435,18 @@ async fn run_chat_inner(
           }
           CommandResult::Prompt { prompt, image } => {
             let image = image.or_else(|| state.pending_image.take());
-            let expanded = expand_prompt(&prompt, &prompts).await?;
+            let expanded = match expand_prompt(&prompt, &prompts).await {
+              Ok(expanded) => expanded,
+              // the draft goes back in the line so it can be fixed rather than retyped
+              Err(error) => {
+                state.input.set(prompt);
+                state
+                  .primary
+                  .entries
+                  .push(Entry::new(EntryKind::Error, format!("{error:#}")));
+                continue;
+              }
+            };
             state
               .primary
               .entries
@@ -1298,10 +1521,16 @@ async fn memory_for(
 async fn set_roster(state: &mut ChatState, config: &mut Config, visible: bool) {
   state.roster = visible;
   config.ui.roster_visible = visible;
+  remember(state, config).await;
+}
+
+/// Writes a setting down. A config file that will not take a change is worth reporting; it is
+/// not worth ending the session over, and the change still holds for as long as this one runs.
+async fn remember(state: &mut ChatState, config: &Config) {
   if let Err(error) = config.save().await {
     state.primary.entries.push(Entry::new(
       EntryKind::Error,
-      format!("could not remember roster setting: {error:#}"),
+      format!("the setting holds for this session; it could not be written down: {error:#}"),
     ));
   }
 }
@@ -1688,11 +1917,13 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         view.assistant = Some(index);
         index
       });
-      view.entries[index].text.push_str(&text);
-      view.entries[index]
-        .stream
-        .get_or_insert_with(termweave::Stream::default)
-        .push(&text);
+      view.edit(index, |entry| {
+        entry.text.push_str(&text);
+        entry
+          .stream
+          .get_or_insert_with(termweave::Stream::default)
+          .push(&text);
+      });
     }
     Event::ToolStart { call } => {
       state.view_mut(session_id).finish_message();
@@ -1714,21 +1945,26 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       let Some((index, _)) = view.live.get(&id).cloned() else {
         return;
       };
-      let Some(entry) = view.entries.get_mut(index) else {
-        return;
-      };
-      entry.detail.get_or_insert_with(String::new).push_str(&text);
-      let last = entry
-        .detail
-        .as_deref()
-        .unwrap_or_default()
-        .lines()
-        .rfind(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .to_string();
-      if let Some(tool) = entry.tool.as_mut() {
-        tool.live = clip(&last, 160);
-      }
+      view.edit(index, |entry| {
+        let detail = entry.detail.get_or_insert_with(String::new);
+        detail.push_str(&text);
+        // what a call writes is unbounded; what the buffer keeps for it is not
+        if detail.len() > MAX_TOOL_OUTPUT {
+          let start = detail.len() - MAX_TOOL_OUTPUT;
+          let start = (start..detail.len())
+            .find(|at| detail.is_char_boundary(*at))
+            .unwrap_or(detail.len());
+          detail.replace_range(..start, "[earlier output dropped]\n");
+        }
+        let last = detail
+          .lines()
+          .rfind(|line| !line.trim().is_empty())
+          .unwrap_or_default()
+          .to_string();
+        if let Some(tool) = entry.tool.as_mut() {
+          tool.live = clip(&last, 160);
+        }
+      });
     }
     Event::ToolEnd { id, output, error } => {
       let view = state.view_mut(session_id);
@@ -1737,24 +1973,23 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       let Some((index, _)) = view.live.remove(&id) else {
         return;
       };
-      let Some(entry) = view.entries.get_mut(index) else {
-        return;
-      };
-      if entry.detail.is_none() && !output.trim().is_empty() {
-        entry.detail = Some(output.clone());
-      }
-      if let Some(tool) = entry.tool.as_mut() {
-        tool.state = match error {
-          true => ToolState::Failed,
-          false => ToolState::Done,
+      view.edit(index, |entry| {
+        if entry.detail.is_none() && !output.trim().is_empty() {
+          entry.detail = Some(output.clone());
+        }
+        if let Some(tool) = entry.tool.as_mut() {
+          tool.state = match error {
+            true => ToolState::Failed,
+            false => ToolState::Done,
+          };
+          tool.live.clear();
+          tool.note = tool_note(&output, error, tool.started.elapsed());
+        }
+        entry.kind = match error {
+          true => EntryKind::Error,
+          false => EntryKind::Tool,
         };
-        tool.live.clear();
-        tool.note = tool_note(&output, error, tool.started.elapsed());
-      }
-      entry.kind = match error {
-        true => EntryKind::Error,
-        false => EntryKind::Tool,
-      };
+      });
     }
     Event::SubagentStart {
       session_id,
@@ -1824,13 +2059,17 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
 
 // the conversation as it stands, which after a rewind is not every node ever written
 fn active_path(session: &Session) -> Vec<&ainz::session::SessionNode> {
+  // by id rather than by scanning: a long session holds thousands of nodes, and this walks the
+  // whole of the active branch
+  let nodes: std::collections::HashMap<_, _> =
+    session.nodes.iter().map(|node| (node.id, node)).collect();
   let mut path = Vec::new();
   let mut current = session.cursor;
   while let Some(id) = current {
-    let Some(node) = session.nodes.iter().find(|node| node.id == id) else {
+    let Some(node) = nodes.get(&id) else {
       break;
     };
-    path.push(node);
+    path.push(*node);
     current = node.parent;
   }
   path.reverse();
@@ -1966,8 +2205,8 @@ fn render_command_palette(
         ),
         Suggestion::Path(path) => (
           format!("@{}", path.rsplit('/').next().unwrap_or(path)),
-          path.clone(),
-          "file".into(),
+          (*path).to_string(),
+          "file".to_string(),
         ),
       };
       ListItem::new(Line::from(vec![
@@ -2029,32 +2268,37 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
   } else {
     &view.entries[..]
   };
-  let lines = if entries.is_empty() && !state.inline {
-    let lines = state.splash(area.width.saturating_sub(1) as usize, area.height as usize);
+  let width = area.width.saturating_sub(1) as usize;
+  let block = Block::default()
+    .borders(Borders::LEFT)
+    .border_style(Style::default().fg(BLUE));
+  let inner = block.inner(area);
+  frame.render_widget(block, area);
+  if entries.is_empty() {
+    if state.inline {
+      return;
+    }
+    let lines = state.splash(width, area.height as usize);
     state.art_area.set(Some(Rect::new(
       area.x + 1,
       area.y,
       area.width.saturating_sub(1),
       (lines.len().saturating_sub(3) as u16).min(area.height),
     )));
-    lines
-  } else if entries.is_empty() {
-    Vec::new()
-  } else {
-    entries
-      .iter()
-      .flat_map(|entry| entry_lines(entry, state.expanded, area.width.saturating_sub(1) as usize))
-      .collect()
-  };
-  let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-    Block::default()
-      .borders(Borders::LEFT)
-      .border_style(Style::default().fg(BLUE)),
-  );
-  let bottom = paragraph
-    .line_count(area.width)
-    .saturating_sub(area.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
+    return;
+  }
+  // heights come from what each entry remembers, so the whole buffer can be measured every
+  // frame without laying any of it out again
+  let heights: Vec<usize> = entries
+    .iter()
+    .map(|entry| entry.height(state.expanded, width))
+    .collect();
+  let total: usize = heights.iter().sum();
+  let height = inner.height as usize;
+  let bottom = total.saturating_sub(height);
   let reach = bottom.min(u16::MAX as usize) as u16;
+  // a reader holding a position keeps it as rows arrive underneath
   if state.scroll.get() > 0 {
     state.scroll.set(
       state
@@ -2065,11 +2309,28 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
     );
   }
   state.reach.set(reach);
-  let scroll = bottom
-    .saturating_sub(state.scroll.get() as usize)
-    .min(u16::MAX as usize) as u16;
-  let paragraph = paragraph.scroll((scroll, 0));
-  frame.render_widget(paragraph, area);
+  let skip = bottom.saturating_sub(state.scroll.get() as usize);
+  // only the entries the buffer can actually show are laid out; the rest let go of their rows
+  // and keep only the height, so what a long session holds does not grow with it
+  let mut shown: Vec<Line<'static>> = Vec::with_capacity(height);
+  let mut passed = 0;
+  for (entry, rows) in entries.iter().zip(&heights) {
+    let visible = passed < skip + height && passed + rows > skip;
+    if !visible || shown.len() == height {
+      entry.release();
+      passed += rows;
+      continue;
+    }
+    let lines = entry.lines(state.expanded, width);
+    for line in lines.iter().skip(skip.saturating_sub(passed)) {
+      if shown.len() == height {
+        break;
+      }
+      shown.push(line.clone());
+    }
+    passed += rows;
+  }
+  frame.render_widget(Paragraph::new(shown), inner);
 }
 
 fn splash(
@@ -2282,9 +2543,30 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
 }
 
 /// What the prompt is offering to complete: a slash command, or a file under the workspace.
-enum Suggestion {
-  Command(SlashCommand),
-  Path(String),
+/// Borrowed rather than owned: this is rebuilt on every keystroke and again on every frame,
+/// and none of it outlives the frame it is drawn in.
+enum Suggestion<'a> {
+  Command(&'a SlashCommand),
+  Path(&'a str),
+}
+
+/// Whether a path contains what was typed, ignoring case, without folding a copy of it. The
+/// workspace listing runs to thousands of paths and this is asked of all of them on every
+/// keystroke; allocating there is what makes completion feel slow.
+fn contains_fold(haystack: &str, needle: &str) -> bool {
+  if needle.is_empty() {
+    return true;
+  }
+  let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+  let Some(last) = haystack.len().checked_sub(needle.len()) else {
+    return false;
+  };
+  (0..=last).any(|at| {
+    haystack[at..at + needle.len()]
+      .iter()
+      .zip(needle)
+      .all(|(left, right)| left.eq_ignore_ascii_case(right))
+  })
 }
 
 // the `@name` being typed, as a byte offset and the text after it, when the cursor is inside one
@@ -2305,34 +2587,30 @@ fn file_fragment(text: &str, cursor: usize) -> Option<(usize, String)> {
     .then(|| (at, fragment.to_string()))
 }
 
-fn suggestions(state: &ChatState, commands: &[SlashCommand]) -> Vec<Suggestion> {
-  if let Some((_, fragment)) = file_fragment(state.input.as_str(), state.input.cursor()) {
-    let needle = fragment.to_ascii_lowercase();
-    let mut matched: Vec<_> = state
-      .files
-      .iter()
-      .filter(|path| path.to_ascii_lowercase().contains(&needle))
-      .collect();
-    // a name that starts the way you typed comes before one that merely contains it
-    matched.sort_by_key(|path| {
-      let lower = path.to_ascii_lowercase();
-      let leading = !lower
-        .rsplit('/')
-        .next()
-        .unwrap_or(lower.as_str())
-        .starts_with(&needle);
-      (leading, path.len())
-    });
-    return matched
+fn suggestions<'a>(state: &'a ChatState, commands: &'a [SlashCommand]) -> Vec<Suggestion<'a>> {
+  let Some((_, fragment)) = file_fragment(state.input.as_str(), state.input.cursor()) else {
+    return command_matches(commands, state.input.as_str())
       .into_iter()
-      .take(20)
-      .map(|path| Suggestion::Path(path.clone()))
+      .map(Suggestion::Command)
       .collect();
-  }
-  command_matches(commands, state.input.as_str())
+  };
+  let mut matched: Vec<_> = state
+    .files
+    .iter()
+    .filter(|path| contains_fold(path, &fragment))
+    .collect();
+  // a name that starts the way you typed comes before one that merely contains it
+  matched.sort_by_key(|path| {
+    let name = path.rsplit('/').next().unwrap_or(path.as_str());
+    let leading = !name
+      .get(..fragment.len())
+      .is_some_and(|start| start.eq_ignore_ascii_case(&fragment));
+    (leading, path.len())
+  });
+  matched
     .into_iter()
-    .cloned()
-    .map(Suggestion::Command)
+    .take(20)
+    .map(|path| Suggestion::Path(path.as_str()))
     .collect()
 }
 
@@ -2540,6 +2818,28 @@ fn tool_note(output: &str, error: bool, took: Duration) -> String {
   }
 }
 
+/// How many columns a string takes up on the terminal.
+fn cells(text: &str) -> usize {
+  Line::raw(text).width()
+}
+
+/// The tail of a line past the given number of columns, so what is scrolled out of the prompt
+/// is measured the way it was drawn.
+fn skip_cells(text: &str, columns: usize) -> String {
+  if columns == 0 {
+    return text.to_string();
+  }
+  let mut used = 0;
+  text
+    .char_indices()
+    .find_map(|(at, ch)| {
+      used += cells(&ch.to_string()).max(1);
+      (used > columns).then_some(&text[at + ch.len_utf8()..])
+    })
+    .unwrap_or_default()
+    .to_string()
+}
+
 fn clip(text: &str, width: usize) -> String {
   let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
   if flat.chars().count() <= width {
@@ -2615,22 +2915,19 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
   let text = state.input.as_str();
   let before = &text[..state.input.cursor()];
   let row = before.matches('\n').count();
-  let column = before
-    .rsplit('\n')
-    .next()
-    .unwrap_or_default()
-    .chars()
-    .count();
+  // measured in the cells the terminal draws, not the characters typed, so a wide character
+  // moves the cursor by the two columns it takes up
+  let column = cells(before.rsplit('\n').next().unwrap_or_default());
   // a line longer than the box scrolls to keep the cursor in view
   let skipped = column.saturating_sub(capacity);
   let lines: Vec<Line> = text
     .split('\n')
     .enumerate()
     .map(|(index, line)| {
-      let shown: String = line
-        .chars()
-        .skip(if index == row { skipped } else { 0 })
-        .collect();
+      let shown: String = match index == row {
+        true => skip_cells(line, skipped),
+        false => line.to_string(),
+      };
       Line::from(vec![
         Span::styled(
           if index == 0 { prefix } else { "  " },
@@ -2740,13 +3037,28 @@ fn render_approval(frame: &mut Frame, approval: &Approval) {
   );
 }
 
+/// The time a line was written, on the clock the person reading it is using. A buffer stamped
+/// in UTC is wrong for everyone who is not in it, and the stamp is on every row.
 fn clock() -> String {
-  let seconds = SystemTime::now()
+  let epoch = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
-    .as_secs()
-    % 86_400;
-  format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
+    .as_secs();
+  let Ok(time) = i64::try_from(epoch) else {
+    return "--:--".into();
+  };
+  let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+  // SAFETY: localtime_r fills the tm it is given and reads the time_t; both are ours and live
+  // for the call. The _r form keeps no global state, so it is safe from any thread. The struct
+  // is only read back on the non-null return, which is what says it was filled.
+  let filled = unsafe { libc::localtime_r(&time, local.as_mut_ptr()) };
+  if filled.is_null() {
+    let seconds = epoch % 86_400;
+    return format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60);
+  }
+  // SAFETY: localtime_r returned non-null, so it filled the struct
+  let local = unsafe { local.assume_init() };
+  format!("{:02}:{:02}", local.tm_hour, local.tm_min)
 }
 
 #[cfg(test)]

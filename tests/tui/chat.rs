@@ -294,3 +294,84 @@ fn wrapped_transcript_reaches_the_end_and_stays_put_when_reading_history() {
     .unwrap();
   assert!(screen(&terminal).contains("more output"));
 }
+
+#[test]
+fn the_buffer_stamps_lines_on_the_local_clock() {
+  use super::clock;
+  let stamp = clock();
+  let local = std::process::Command::new("date")
+    .arg("+%H:%M")
+    .output()
+    .expect("date");
+  let local = String::from_utf8_lossy(&local.stdout).trim().to_string();
+  // the minute can roll between the two reads, so compare the hour
+  assert_eq!(stamp[..2], local[..2], "buffer {stamp}, shell {local}");
+}
+
+#[test]
+#[ignore = "a measurement, not an assertion; run with --ignored --nocapture"]
+fn a_long_buffer_costs_only_what_is_on_the_screen() {
+  use std::time::Instant;
+  let body = "## Heading\n\nSome **bold** text with `code` and a [link](https://example.com).\n\n\
+    - one item\n- two item\n\n```rust\nfn main() {}\n```\n";
+  let mut state = ChatState::default();
+  for index in 0..500 {
+    state.primary.entries.push(Entry::new(
+      EntryKind::Assistant,
+      format!("{body}\nentry {index}\n"),
+    ));
+  }
+  let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+  let frame = |terminal: &mut Terminal<TestBackend>| {
+    let at = Instant::now();
+    terminal
+      .draw(|frame| render_transcript(frame, frame.area(), &state))
+      .unwrap();
+    at.elapsed()
+  };
+  let first = frame(&mut terminal);
+  let warm = (0..20).map(|_| frame(&mut terminal)).min().unwrap();
+  let rows: usize = state
+    .primary
+    .entries
+    .iter()
+    .map(|entry| entry.height(false, 109))
+    .sum();
+  // and what it holds afterwards: rows for the screen, heights for the rest
+  let held = state
+    .primary
+    .entries
+    .iter()
+    .filter(|entry| {
+      entry
+        .rows
+        .borrow()
+        .as_ref()
+        .is_some_and(|rendered| rendered.lines.is_some())
+    })
+    .count();
+  println!("{rows} rows: first frame {first:?}, warm frame {warm:?}, entries holding rows {held}");
+}
+
+#[test]
+fn a_call_cannot_write_escape_sequences_to_the_terminal() {
+  // a tool reports whatever it read: a web page, a file in the repo, a command's output. None
+  // of that is trusted, and a raw escape sequence in it would be the terminal's to obey.
+  let hostile = "\u{1b}]0;pwned\u{7}\u{1b}[2Jcleared\u{7f}";
+  let mut entry = Entry::call("shell".into(), format!("cat {hostile}"));
+  entry.detail = Some(format!("first line\n{hostile}"));
+  if let Some(tool) = entry.tool.as_mut() {
+    tool.state = ToolState::Done;
+    tool.note = hostile.into();
+    tool.live = hostile.into();
+  }
+
+  for expanded in [false, true] {
+    let text = rendered(&entry, expanded);
+    assert!(!text.contains('\u{1b}'), "escape survived: {text:?}");
+    assert!(!text.contains('\u{7}'), "bell survived: {text:?}");
+    assert!(!text.contains('\u{7f}'), "delete survived: {text:?}");
+    // and what it wrote is still legible, as the pictures for those characters
+    assert!(text.contains("cleared"), "{text:?}");
+  }
+}

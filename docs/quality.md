@@ -12,7 +12,7 @@ a completed performance evaluation.
 | Area | Present | Next evidence needed |
 | --- | --- | --- |
 | Coding loop | Workspace tools, shell, permissions, provider retries, context compaction | Held-out tasks scored for correct changes, verification, retries, tokens, and elapsed time |
-| Terminal | IRC rows, terminal Markdown, streaming tools, persistent completion/cancel/failure indicators | Large histories, output floods, resize/scroll latency, keyboard responsiveness |
+| Terminal | IRC rows, terminal Markdown, streaming tools, persistent completion/cancel/failure indicators, per-message row cache with capped repaints | Output floods, resize latency, keyboard responsiveness under load |
 | Recovery | Branching sessions, atomic synced checkpoints, cancellation through compaction/approvals/tools/hooks, retained usage and completed tool results | Crash recovery during a tool, forced task-abort recovery, save failure recovery in each surface |
 | Embedding | Public provider/tool interfaces, host events and sessions, independent CLI/Lua/Wasm features | Stable lifecycle envelope, bounded event delivery, documented compatibility policy |
 | Extensions | Content-pinned plugins, lazy MCP tool catalog, skills, hooks, subagents | Hung/disconnected extension soak tests and resource accounting per child |
@@ -23,27 +23,43 @@ a completed performance evaluation.
 
 ## Work order
 
-1. **Runtime reliability and resource bounds.** Introduce a run identity and explicit lifecycle
+1. **Descendant cleanup on cancellation.** `GroupGuard` kills a cancelled child's process group
+   and `killpg` reports success, yet `cancellation_interrupts_every_hook_and_preserves_completed_tools`
+   still finds a detached grandchild finishing about 40% of runs, on all four hook phases.
+   Inserting ~15 ms before the kill makes it pass every time, so the kill is racing the shell's
+   fork of its own background job: one signal at cancel time does not guarantee the group is
+   empty. Cleanup needs to confirm the group drained rather than assume one `killpg` did it.
+
+2. **Runtime reliability and resource bounds.** Introduce a run identity and explicit lifecycle
    covering provider calls, tools, approvals, hooks, compaction, saving, and child shutdown.
    Bound event queues without losing terminal events or letting cancellation sit behind an output
    flood. Steering now has a bounded queue and a separate cancellation signal. Saves now use
    unique temporary files and sync before/after atomic replacement; concurrent updates still need
    host serialization when last-writer-wins is insufficient. Extend failure injection to process
    crashes, external task aborts, failed saves, and child shutdown.
-2. **Fast, legible terminal sessions.** Preserve timestamp + `<you>` / `<Ainz>` + text on one
-   line, hanging wraps, and an unmistakable ending. Coalesce streaming paints, measure Markdown
-   parsing cost, and render/cache only what the viewport needs. Keep full output inspectable
-   through bounded memory and on-disk history. Prioritize keyboard response under load.
-3. **Coding workflow quality.** Add diff inspection and recoverable edits, then a task evaluation
+3. **Fast, legible terminal sessions.** Timestamp + `<you>` / `<Ainz>` + text on one line,
+   hanging wraps, and an unmistakable ending are preserved. Streaming paints are now coalesced
+   to a frame budget rather than one per token; each message lays its rows out once and keeps
+   them only while it is on screen, so both the frame and what the buffer holds are bounded by
+   the terminal rather than by the session. A 500-message, 6,000-row buffer costs 18.5 ms to
+   lay out once and 78 µs per frame after that, with 4 of 500 messages holding rows
+   (`cargo test --release --bins a_long_buffer -- --ignored --nocapture`, Apple M1 Max). One
+   call's captured output is capped at 256 KiB in memory; the whole of it stays in the session
+   on disk. Tool output now goes through the same escaping as message text, so a call that
+   reports terminal escape sequences cannot drive the terminal. Still to confirm: keyboard
+   response under a sustained output flood, and resize latency with a long buffer.
+4. **Coding workflow quality.** Add diff inspection and recoverable edits, then a task evaluation
    suite. Exercise small fixes, multi-file changes, failing tests, interrupted commands, provider
    failures, and resuming work after compaction. Separate harness failures from model failures.
-4. **Unattended runtime and adapters.** Put persistence, scheduling, and reconnect in an optional
+5. **Unattended runtime and adapters.** Put persistence, scheduling, and reconnect in an optional
    host over the core. Keep the terminal a client. Add editor/language bindings and additional
    communication surfaces against that same lifecycle once it is reliable.
 
 The current foundation makes CLI and plugin runtimes optional, adds a standalone embedding
 consumer, validates host run options before side effects, and fixes duplicate tool registration
 so an error preserves the original tool. It does not complete the work above.
+
+Descendant cleanup is the exception: see the first item above.
 
 The reliability pass adds cancellation across hooks and compaction, completion after end hooks,
 usage retention on failure, completed tool-result retention during post-tool cancellation,
