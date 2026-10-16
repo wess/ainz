@@ -378,6 +378,10 @@ impl Tool for MemoryTool {
     }
   }
 
+  fn concurrent(&self, arguments: &Value) -> bool {
+    self.risk(arguments) == Risk::Read
+  }
+
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {
     let args: MemoryArgs = serde_json::from_value(arguments)?;
     let output = match args.action.as_str() {

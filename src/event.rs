@@ -3,7 +3,10 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::protocol::{ToolCall, Usage};
+use crate::{
+  protocol::{ToolCall, Usage},
+  todo::Todo,
+};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -30,6 +33,10 @@ pub enum Event {
   TurnEnd {
     usage: Usage,
   },
+  // the whole plan, each time the model changes it
+  Todos {
+    items: Vec<Todo>,
+  },
   Compaction {
     archived_messages: usize,
     summary: String,
@@ -38,6 +45,11 @@ pub enum Event {
     message: String,
   },
   Cancelled,
+  // something a person should know that is neither output nor a failure, such as a run that
+  // stopped at its step limit
+  Notice {
+    message: String,
+  },
   SubagentStart {
     session_id: String,
     parent_id: String,

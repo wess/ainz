@@ -17,7 +17,7 @@ struct Provider;
 impl ChatProvider for Provider {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     _tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {

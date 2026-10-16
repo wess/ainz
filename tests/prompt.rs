@@ -75,3 +75,32 @@ async fn commands_in_the_other_harness_layout_expand_dollar_placeholders() {
     .unwrap();
   assert_eq!(output, "Inspect src with src carefully.");
 }
+
+#[tokio::test]
+async fn an_unreadable_template_is_reported_and_costs_only_itself() {
+  let temp = tempfile::tempdir().unwrap();
+  let prompts = temp.path().join(".ainz/prompts");
+  tokio::fs::create_dir_all(&prompts).await.unwrap();
+  tokio::fs::write(prompts.join("good.md"), "Do the thing.")
+    .await
+    .unwrap();
+  tokio::fs::write(prompts.join("bad.md"), [0xff, 0xfe, 0x00])
+    .await
+    .unwrap();
+  tokio::fs::write(prompts.join(".hidden.md"), "Not a command.")
+    .await
+    .unwrap();
+
+  let catalog = PromptCatalog::discover(temp.path()).await.unwrap();
+  let names: Vec<_> = catalog.prompts.iter().map(|p| p.name.as_str()).collect();
+  assert!(names.contains(&"good"), "{names:?}");
+  assert!(
+    !names.contains(&"bad") && !names.contains(&".hidden"),
+    "{names:?}"
+  );
+  assert!(
+    catalog.issues.iter().any(|issue| issue.contains("bad.md")),
+    "{:?}",
+    catalog.issues
+  );
+}

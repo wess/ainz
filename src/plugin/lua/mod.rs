@@ -6,7 +6,7 @@ use std::{
     atomic::{AtomicU64, Ordering},
   },
   task::Poll,
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -67,12 +67,23 @@ impl LuaRuntime {
     lua.set_memory_limit(self.memory)?;
     let used = Arc::new(AtomicU64::new(0));
     let counter = used.clone();
+    let (fuel, deadline) = (self.fuel, Instant::now() + self.timeout);
+    // yielding makes the deadline and cancellation observable in a pure Lua loop, but Lua
+    // cannot yield from a sort comparator, a gsub callback or a metamethod, so a loop there
+    // never comes back out to be stopped. the hook enforces both limits itself and from then on
+    // fails every instruction, so a pcall that swallows one failure meets the next at once
     lua.set_global_hook(
       HookTriggers::new().every_nth_instruction(1000),
-      move |_, _| {
-        counter.fetch_add(1000, Ordering::Relaxed);
-        // yielding makes the deadline and cancellation observable even in a pure Lua loop
-        Ok(VmState::Yield)
+      move |lua, _| {
+        let reason = match counter.fetch_add(1000, Ordering::Relaxed) + 1000 {
+          spent if spent >= fuel => "Lua instruction budget exceeded",
+          _ if Instant::now() >= deadline => "Lua tool timed out",
+          _ => return Ok(VmState::Yield),
+        };
+        lua.set_global_hook(HookTriggers::new().every_nth_instruction(1), move |_, _| {
+          Err(mlua::Error::runtime(reason))
+        })?;
+        Err(mlua::Error::runtime(reason))
       },
     )?;
     let host = Arc::new(Mutex::new(Host::new(

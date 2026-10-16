@@ -23,6 +23,17 @@ compaction, approvals, and hooks. Its acknowledgement reports the request; wait 
 response to know the run has finished. The `turn_end` notification follows the end hooks, while
 the prompt response follows session persistence.
 
+`shutdown` is also accepted while a prompt is active: it cancels the run, answers, and the
+server exits once the prompt's response is written. On exit every stdio MCP server, along with
+anything it started, is stopped, and all queued output reaches stdout first.
+
+A request without an `id` is a notification and gets no reply, so a host can send
+`{"jsonrpc":"2.0","method":"cancel"}` without tracking an answer. A line that is not valid JSON
+(including bytes that are not UTF-8) gets a `-32700` error with a `null` id and the server keeps
+reading; a line over 16 MiB is discarded the same way. A session that cannot be saved does not
+end the server: the prompt response carries a `save_error` field (or, for a failed run, the
+reason in its error message), and `save` answers with an error.
+
 The other methods are `state`, `new_session`, `save`, and `shutdown`. RPC mode never opens an
 interactive approval prompt, so a risky tool is denied unless the process was started with
 `--permissions auto` or the call matches a standing rule in `[rules] allow` — those are checked

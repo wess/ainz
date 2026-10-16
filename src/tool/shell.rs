@@ -3,9 +3,14 @@ use std::{process::Stdio, time::Duration};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::{io::AsyncReadExt, process::Command, sync::mpsc, time::timeout};
+use tokio::{
+  io::AsyncReadExt,
+  process::Command,
+  sync::{mpsc, oneshot},
+  time::timeout,
+};
 
-use super::{ToolContext, truncate};
+use super::ToolContext;
 use crate::process::GroupGuard;
 
 #[derive(Deserialize)]
@@ -53,16 +58,26 @@ pub(super) async fn execute(context: &ToolContext, value: Value) -> Result<Strin
     });
   }
   drop(sender);
+  // something the command left running in the background holds its pipes open forever, so
+  // once the shell itself exits, what is already in the pipes gets a moment and no more
+  let (exited, on_exit) = oneshot::channel::<()>();
+  let settled = async {
+    drop(on_exit.await);
+    tokio::time::sleep(SETTLE).await;
+  };
+  let limit = context.max_output_bytes;
   let drain = async {
+    tokio::pin!(settled);
     let mut text = String::new();
     let mut truncated = false;
-    while let Some(chunk) = chunks.recv().await {
+    while let Some(chunk) = tokio::select! {
+      chunk = chunks.recv() => chunk,
+      () = &mut settled => None,
+    } {
       if truncated {
         continue;
       }
-      let mut taken = chunk
-        .len()
-        .min(context.max_output_bytes.saturating_sub(text.len()));
+      let mut taken = chunk.len().min(limit.saturating_sub(text.len()));
       while !chunk.is_char_boundary(taken) {
         taken -= 1;
       }
@@ -70,7 +85,7 @@ pub(super) async fn execute(context: &ToolContext, value: Value) -> Result<Strin
         context.report(&chunk[..taken]);
         text.push_str(&chunk[..taken]);
       }
-      if taken < chunk.len() && !truncated {
+      if taken < chunk.len() {
         context.report("\n[output truncated]\n");
         truncated = true;
       }
@@ -80,8 +95,13 @@ pub(super) async fn execute(context: &ToolContext, value: Value) -> Result<Strin
     }
     text
   };
+  let wait = async {
+    let status = child.wait().await;
+    let _ = exited.send(());
+    status
+  };
   let Ok((status, mut text)) = timeout(Duration::from_millis(timeout_ms), async {
-    tokio::join!(child.wait(), drain)
+    tokio::join!(wait, drain)
   })
   .await
   else {
@@ -92,9 +112,12 @@ pub(super) async fn execute(context: &ToolContext, value: Value) -> Result<Strin
   if !text.is_empty() && !text.ends_with('\n') {
     text.push('\n');
   }
+  // the output is already bounded, so the status goes on after it and is never cut away
   text.push_str(&format!("[exit {}]", status.code().unwrap_or(-1)));
-  Ok(truncate(text, context.max_output_bytes))
+  Ok(text)
 }
+
+const SETTLE: Duration = Duration::from_millis(500);
 
 enum Pipe {
   Out(tokio::process::ChildStdout),

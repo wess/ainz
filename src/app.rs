@@ -11,7 +11,7 @@ use ainz::{
   Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
   PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
   ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
-  SubagentRegistry, SubagentRequest, SubagentResult, TodoList,
+  SubagentRegistry, SubagentRequest, SubagentResult,
   agent::Approval,
   config::MemoryBackend,
   deny_all, instruction,
@@ -67,6 +67,18 @@ pub(crate) async fn make_agent_with(
   events: EventSink,
   approver: Approver,
 ) -> Result<(Agent<RuntimeProvider>, RunOptions)> {
+  let (agent, options, _) = make_agent_parts(workspace, config, events, approver).await?;
+  Ok((agent, options))
+}
+
+// the agent along with its MCP hub, for a surface that has to end the servers itself when it
+// stops rather than leave them to however the process happens to exit
+pub(crate) async fn make_agent_parts(
+  workspace: &std::path::Path,
+  config: &Config,
+  events: EventSink,
+  approver: Approver,
+) -> Result<(Agent<RuntimeProvider>, RunOptions, Arc<McpHub>)> {
   let profile = config.active_provider()?;
   let provider = match profile.kind {
     ProviderKind::Http => RuntimeProvider::Http(HttpProvider::new(
@@ -97,7 +109,7 @@ pub(crate) async fn make_agent_with(
   tools.extend(builtins())?;
   tools.insert(JobStore::default_store()?.tool())?;
   tools.insert(SessionStore::default_store()?.tool())?;
-  tools.insert(TodoList::new().tool())?;
+  tools.insert(ainz::todo::tool())?;
   tools.insert(
     SkillCatalog::discover_with_roots(workspace, &catalog.approved_skill_roots())
       .await?
@@ -292,6 +304,7 @@ pub(crate) async fn make_agent_with(
   Ok((
     Agent::new(provider, tools, workspace.to_path_buf(), events, approver),
     options,
+    mcp,
   ))
 }
 

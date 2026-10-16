@@ -288,7 +288,7 @@ fn wrapped_transcript_reaches_the_end_and_stays_put_when_reading_history() {
     .draw(|frame| render_transcript(frame, frame.area(), &state))
     .unwrap();
   assert_eq!(screen(&terminal), before);
-  state.scroll.set(0);
+  state.follow();
   terminal
     .draw(|frame| render_transcript(frame, frame.area(), &state))
     .unwrap();
@@ -374,4 +374,33 @@ fn a_call_cannot_write_escape_sequences_to_the_terminal() {
     // and what it wrote is still legible, as the pictures for those characters
     assert!(text.contains("cleared"), "{text:?}");
   }
+}
+
+#[test]
+fn a_reader_keeps_their_rows_when_output_below_shrinks_or_grows() {
+  use super::{Scroll, settle};
+  // three entries of 10 rows on a 5-row screen, read from the second entry's fourth row
+  let at = Scroll::At { entry: 1, row: 3 };
+  assert_eq!(settle(at, 0, &[10, 10, 10], 0, 25), (13, at));
+  // the last entry shrinks, as a finished tool's live row goes away: same rows on screen
+  assert_eq!(settle(at, 0, &[10, 10, 2], 0, 17), (13, at));
+  // an entry above grows, as ctrl+o expands it: still the same rows
+  assert_eq!(settle(at, 0, &[30, 10, 10], 0, 45).1, at);
+}
+
+#[test]
+fn scrolling_back_down_to_the_end_follows_new_output_again() {
+  use super::{Scroll, settle};
+  let at = Scroll::At { entry: 2, row: 0 };
+  assert_eq!(settle(at, 50, &[10, 10, 10], 0, 25), (25, Scroll::Follow));
+  // and a transcript that fits on the screen has nothing to hold on to
+  assert_eq!(settle(Scroll::Follow, -3, &[2], 0, 0), (0, Scroll::Follow));
+}
+
+#[test]
+fn scrolling_up_from_the_end_holds_a_position() {
+  use super::{Scroll, settle};
+  let (skip, scroll) = settle(Scroll::Follow, -3, &[10, 10, 10], 0, 25);
+  assert_eq!(skip, 22);
+  assert_eq!(scroll, Scroll::At { entry: 2, row: 2 });
 }

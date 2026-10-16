@@ -14,7 +14,7 @@ impl<P: ChatProvider> Agent<P> {
     else {
       return Ok(false);
     };
-    let request = vec![
+    let request = [
       Message::text(
         Role::System,
         concat!(
@@ -27,7 +27,7 @@ impl<P: ChatProvider> Agent<P> {
     ];
     let reply = self
       .provider
-      .complete(&request, &[], &EventSink::default())
+      .complete(&[&request[0], &request[1]], &[], &EventSink::default())
       .await?;
     accumulate(total, &reply.usage);
     let summary = reply.message.content.unwrap_or_default();

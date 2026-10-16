@@ -100,6 +100,10 @@ impl Tool for Builtin {
     }
   }
 
+  fn concurrent(&self, _arguments: &Value) -> bool {
+    matches!(self.name, "read" | "list" | "search")
+  }
+
   fn validate(&self, arguments: &Value) -> Result<()> {
     match self.name {
       "read" | "list" => {

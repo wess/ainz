@@ -85,3 +85,49 @@ async fn skills_in_the_other_harness_layout_serve_their_bundled_files() {
     .unwrap_err();
   assert!(format!("{escape:#}").contains("not a file bundled with skill deploy"));
 }
+
+#[tokio::test]
+async fn one_unreadable_skill_is_reported_without_losing_the_others() {
+  let temp = tempfile::tempdir().unwrap();
+  let skills = temp.path().join(".ainz/skills");
+  let elsewhere = temp.path().join("shared/linked");
+  for directory in [skills.join("good"), skills.join("bad"), elsewhere.clone()] {
+    tokio::fs::create_dir_all(&directory).await.unwrap();
+  }
+  tokio::fs::write(skills.join("good/SKILL.md"), "# Good\n")
+    .await
+    .unwrap();
+  tokio::fs::write(skills.join("bad/SKILL.md"), [0xff, 0xfe, 0x00])
+    .await
+    .unwrap();
+  tokio::fs::write(elsewhere.join("SKILL.md"), "# Linked\n")
+    .await
+    .unwrap();
+  std::os::unix::fs::symlink(&elsewhere, skills.join("linked")).unwrap();
+  // stray files where a skill directory would be, the way Finder leaves one
+  tokio::fs::write(skills.join(".DS_Store"), "junk")
+    .await
+    .unwrap();
+  tokio::fs::write(skills.join("notes.txt"), "junk")
+    .await
+    .unwrap();
+
+  let catalog = SkillCatalog::discover(temp.path()).await.unwrap();
+  // the user's own skills are discovered too, so only this workspace's are compared
+  let mut names: Vec<_> = catalog
+    .skills
+    .iter()
+    .filter(|skill| skill.path.starts_with(temp.path()))
+    .map(|skill| skill.name.as_str())
+    .collect();
+  names.sort_unstable();
+  assert_eq!(names, ["good", "linked"]);
+  let root = temp.path().to_string_lossy();
+  let issues: Vec<_> = catalog
+    .issues
+    .iter()
+    .filter(|issue| issue.contains(root.as_ref()))
+    .collect();
+  assert_eq!(issues.len(), 1, "{issues:?}");
+  assert!(issues[0].contains("bad"), "{issues:?}");
+}

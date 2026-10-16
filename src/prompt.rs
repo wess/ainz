@@ -22,6 +22,8 @@ const MAX_DEPTH: usize = 4;
 #[derive(Clone, Debug, Default)]
 pub struct PromptCatalog {
   pub prompts: Vec<PromptTemplate>,
+  // templates that could not be read, reported beside the rest rather than costing them
+  pub issues: Vec<String>,
 }
 
 impl PromptCatalog {
@@ -44,13 +46,15 @@ impl PromptCatalog {
     }
 
     let mut prompts = BTreeMap::new();
+    let mut issues = Vec::new();
     for root in roots {
-      for prompt in discover_root(&root).await? {
+      for prompt in discover_root(&root, &mut issues).await {
         prompts.insert(prompt.name.clone(), prompt);
       }
     }
     Ok(Self {
       prompts: prompts.into_values().collect(),
+      issues,
     })
   }
 
@@ -75,21 +79,38 @@ impl PromptCatalog {
   }
 }
 
-// subdirectories namespace their templates, so commands/review/api.md becomes /review:api
-async fn discover_root(root: &Path) -> Result<Vec<PromptTemplate>> {
+// subdirectories namespace their templates, so commands/review/api.md becomes /review:api.
+// the directories are shared with other tools, so one file that cannot be read costs only
+// itself and is reported, not every other command with it
+async fn discover_root(root: &Path, issues: &mut Vec<String>) -> Vec<PromptTemplate> {
   let mut prompts = Vec::new();
   let mut pending = vec![(root.to_path_buf(), String::new(), 0_usize)];
   while let Some((directory, prefix, depth)) = pending.pop() {
     let mut entries = match fs::read_dir(&directory).await {
       Ok(entries) => entries,
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-      Err(error) => return Err(error).with_context(|| format!("read {}", directory.display())),
+      Err(error) => {
+        issues.push(format!("{}: {error}", directory.display()));
+        continue;
+      }
     };
-    while let Some(entry) = entries.next_entry().await? {
+    loop {
+      let entry = match entries.next_entry().await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => break,
+        Err(error) => {
+          issues.push(format!("{}: {error}", directory.display()));
+          break;
+        }
+      };
+      let segment = entry.file_name().to_string_lossy().into_owned();
+      if segment.starts_with('.') {
+        continue;
+      }
       let path = entry.path();
-      if entry.file_type().await?.is_dir() {
+      // metadata follows a symlink, so a linked folder of commands still counts
+      if fs::metadata(&path).await.is_ok_and(|meta| meta.is_dir()) {
         if depth + 1 < MAX_DEPTH {
-          let segment = entry.file_name().to_string_lossy().into_owned();
           pending.push((path, format!("{prefix}{segment}:"), depth + 1));
         }
         continue;
@@ -97,7 +118,13 @@ async fn discover_root(root: &Path) -> Result<Vec<PromptTemplate>> {
       if path.extension().is_none_or(|extension| extension != "md") {
         continue;
       }
-      let text = fs::read_to_string(&path).await?;
+      let text = match fs::read_to_string(&path).await {
+        Ok(text) => text,
+        Err(error) => {
+          issues.push(format!("{}: {error}", path.display()));
+          continue;
+        }
+      };
       let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -117,5 +144,5 @@ async fn discover_root(root: &Path) -> Result<Vec<PromptTemplate>> {
       }
     }
   }
-  Ok(prompts)
+  prompts
 }

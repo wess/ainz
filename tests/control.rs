@@ -16,7 +16,7 @@ struct Pending(Arc<Notify>);
 impl ChatProvider for Pending {
   async fn complete(
     &self,
-    _: &[Message],
+    _: &[&Message],
     _: &[ToolSpec],
     _: &EventSink,
   ) -> anyhow::Result<ProviderReply> {
@@ -86,7 +86,7 @@ struct Echo;
 impl ChatProvider for Echo {
   async fn complete(
     &self,
-    _: &[Message],
+    _: &[&Message],
     _: &[ToolSpec],
     _: &EventSink,
   ) -> anyhow::Result<ProviderReply> {

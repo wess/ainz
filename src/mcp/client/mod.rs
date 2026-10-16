@@ -88,6 +88,20 @@ impl Client {
       }
   }
 
+  // the process behind a stdio server, so it can be ended without waiting on a call in flight
+  pub fn pid(&self) -> Option<u32> {
+    match &self.transport {
+      Transport::Stdio(transport) => transport.pid(),
+      Transport::Http(_) => None,
+    }
+  }
+
+  fn stop(&self) {
+    if let Transport::Stdio(transport) = &self.transport {
+      transport.stop();
+    }
+  }
+
   pub fn instructions(&self) -> Option<&str> {
     self.instructions.as_deref()
   }
@@ -129,7 +143,9 @@ impl Client {
         return Err(error);
       }
       Err(_) => {
+        // a reply arriving after this would be read as the answer to the next request
         self.broken = true;
+        self.stop();
         bail!("server request timed out");
       }
     };
@@ -149,6 +165,7 @@ impl Client {
       }
       Err(_) => {
         self.broken = true;
+        self.stop();
         bail!("server notification timed out")
       }
     }

@@ -1,6 +1,6 @@
 use std::{
   cell::{Cell, RefCell},
-  collections::BTreeMap,
+  collections::{BTreeMap, VecDeque},
   path::PathBuf,
   rc::Rc,
   sync::Arc,
@@ -82,8 +82,10 @@ enum Wake {
   Agent(Option<UiEvent>),
   Finished(Box<Result<RunOutput>>),
   Input(Option<std::io::Result<InputEvent>>),
-  // nothing happened; the run is still going and the clock on it needs redrawing
+  // the wait for an owed frame ran out
   Tick,
+  // a second passed on a running turn
+  Clock,
 }
 
 struct CommandData {
@@ -275,6 +277,8 @@ struct AgentView {
   tools: BTreeMap<String, String>,
   assistant: Option<usize>,
   usage: Usage,
+  // the plan as this agent's last todo call left it; each view has its own
+  todos: Vec<ainz::Todo>,
 }
 
 impl AgentView {
@@ -305,6 +309,7 @@ impl AgentView {
       tools: BTreeMap::new(),
       assistant: None,
       usage: Usage::default(),
+      todos: Vec::new(),
     }
   }
 }
@@ -315,13 +320,22 @@ struct ChatState {
   agents: BTreeMap<String, AgentView>,
   active: Option<String>,
   roster: bool,
-  scroll: Cell<u16>,
+  // where the reader is, and how far they have asked to move since the last frame; only a
+  // frame knows how tall everything is, so it is the frame that settles the two
+  scroll: Cell<Scroll>,
+  scroll_delta: Cell<isize>,
+  page: Cell<u16>,
   outcome: Option<(RunStatus, Duration)>,
   // when the running turn started, so a quiet provider still shows it is alive; None when idle
   started: Option<Instant>,
   // set by the first ctrl+c of a run; the second abandons the run
   cancelled: bool,
   approval: Option<Approval>,
+  // requests that arrived while one was on screen; two subagents can both want to run
+  // something, and the second must not answer the first
+  waiting: VecDeque<Approval>,
+  // steering accepted but not yet taken up by the run, given back if the run ends first
+  steers: Vec<String>,
   command_selected: usize,
   splash_style: usize,
   custom_header: Option<HeaderArt>,
@@ -330,10 +344,10 @@ struct ChatState {
   art_area: Cell<Option<Rect>>,
   // the splash is thousands of cell puts that depend only on size and choice; paint it once
   splash_cache: RefCell<Option<(usize, usize, Vec<Line<'static>>)>>,
-  // how far back the transcript actually reaches, and where the prompt and its menu were
-  // drawn, all learned while drawing them
-  reach: Cell<u16>,
+  // where the prompt and its menu were drawn, learned while drawing them
   prompt_area: Cell<Rect>,
+  // the first wrapped row of the prompt on screen, once it holds more than fits
+  prompt_first: Cell<usize>,
   palette_area: Cell<Rect>,
   // ctrl+o: show what tools returned in full rather than the first few lines
   expanded: bool,
@@ -358,11 +372,15 @@ impl Default for ChatState {
       agents: BTreeMap::new(),
       active: None,
       roster: true,
-      scroll: Cell::new(0),
+      scroll: Cell::new(Scroll::Follow),
+      scroll_delta: Cell::new(0),
+      page: Cell::new(0),
       outcome: None,
       started: None,
       cancelled: false,
       approval: None,
+      waiting: VecDeque::new(),
+      steers: Vec::new(),
       command_selected: 0,
       splash_style: 0,
       custom_header: None,
@@ -370,8 +388,8 @@ impl Default for ChatState {
       theme: ainz::theme::Theme::default(),
       art_area: Cell::new(None),
       splash_cache: RefCell::new(None),
-      reach: Cell::new(0),
       prompt_area: Cell::new(Rect::ZERO),
+      prompt_first: Cell::new(0),
       palette_area: Cell::new(Rect::ZERO),
       expanded: false,
       rewinding: false,
@@ -402,19 +420,35 @@ impl ChatState {
     self.started.is_some()
   }
 
-  // scrolling stops where the transcript does, so coming back down takes as long as going up did
-  fn scroll_back(&mut self, lines: u16) {
-    self.scroll.set(
-      self
-        .scroll
-        .get()
-        .saturating_add(lines)
-        .min(self.reach.get()),
-    );
+  fn scroll_back(&self, lines: u16) {
+    self
+      .scroll_delta
+      .set(self.scroll_delta.get() - lines as isize);
   }
 
-  fn scroll_forward(&mut self, lines: u16) {
-    self.scroll.set(self.scroll.get().saturating_sub(lines));
+  fn scroll_forward(&self, lines: u16) {
+    self
+      .scroll_delta
+      .set(self.scroll_delta.get() + lines as isize);
+  }
+
+  // a screen at a time, keeping two rows of the last one for context
+  fn scroll_page(&self) -> u16 {
+    self.page.get().saturating_sub(2).max(1)
+  }
+
+  fn follow(&self) {
+    self.scroll.set(Scroll::Follow);
+    self.scroll_delta.set(0);
+  }
+
+  fn scroll_top(&self) {
+    self.scroll.set(Scroll::At { entry: 0, row: 0 });
+    self.scroll_delta.set(0);
+  }
+
+  fn reading_history(&self) -> bool {
+    self.scroll.get() != Scroll::Follow
   }
 
   fn select_header(&mut self, preference: &str, catalog: &HeaderCatalog) {
@@ -465,7 +499,7 @@ impl ChatState {
     } else {
       self.agents.keys().nth(slot - 1).cloned()
     };
-    self.scroll.set(0);
+    self.follow();
   }
 
   fn cycle_agent(&mut self, forward: bool) {
@@ -487,7 +521,7 @@ impl ChatState {
     } else {
       Some(ids[next - 1].clone())
     };
-    self.scroll.set(0);
+    self.follow();
   }
 
   fn channel(&self) -> String {
@@ -543,6 +577,29 @@ const INLINE_ROWS: u16 = 8;
 /// How often the screen may be repainted. Catching up at about fifty frames a second costs a
 /// fraction of what painting per token does and looks the same to a reader.
 const FRAME: Duration = Duration::from_millis(20);
+
+/// How often a running turn is redrawn when nothing else happens: its clock counts seconds.
+const CLOCK: Duration = Duration::from_secs(1);
+
+/// The most queued events applied before the loop looks at the keyboard and the screen again.
+const EVENT_BATCH: usize = 256;
+
+/// Lets go of entries the terminal's scrollback already holds. Drawing inline, the terminal
+/// keeps what was said; holding a second copy here would grow with the session for nothing.
+/// Only between runs, while no entry is being written to by index.
+fn release_flushed(state: &mut ChatState) {
+  let view = &mut state.primary;
+  if !state.inline || state.started.is_some() || state.flushed == 0 {
+    return;
+  }
+  if view.assistant.is_some() || !view.live.is_empty() {
+    return;
+  }
+  let flushed = state.flushed.min(view.entries.len());
+  view.entries.drain(..flushed);
+  state.flushed = 0;
+  state.follow();
+}
 
 /// Moves finished transcript into the terminal's scrollback, where its own scroll can reach it.
 fn flush_scrollback(terminal: &mut Term, state: &mut ChatState) -> Result<()> {
@@ -721,6 +778,7 @@ async fn run_chat_inner(
     primary: AgentView {
       entries: session_entries(session.as_ref().unwrap()),
       usage: session.as_ref().unwrap().usage.clone(),
+      todos: session_plan(session.as_ref().unwrap()),
       ..AgentView::new(AgentState::Running)
     },
     roster: config.ui.roster_visible,
@@ -768,13 +826,20 @@ async fn run_chat_inner(
   // one.
   let mut painted = Instant::now() - FRAME;
   let mut dirty = true;
+  // the only thing on screen that moves by itself is the seconds count on a running turn
+  let mut clock = tokio::time::interval(CLOCK);
+  clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
   loop {
-    while let Ok(message) = rx.try_recv() {
+    // a flood of events is applied in batches, so a key pressed in the middle of one is not
+    // left waiting behind the rest of it
+    for _ in 0..EVENT_BATCH {
+      let Ok(message) = rx.try_recv() else {
+        break;
+      };
       apply_event(&mut state, message);
       dirty = true;
     }
-    // a running turn always owes a frame: the clock on it moves on its own
-    if (dirty || state.busy()) && painted.elapsed() >= FRAME {
+    if dirty && painted.elapsed() >= FRAME {
       let drawn = flush_scrollback(terminal, &mut state).and_then(|()| {
         terminal.draw(|frame| {
           state.art_area.set(None);
@@ -799,18 +864,22 @@ async fn run_chat_inner(
       }
       painted = Instant::now();
       dirty = false;
+      release_flushed(&mut state);
     }
-    // when a frame is owed, the wait is only as long as what is left of one
-    let idle = match dirty || state.busy() {
+    // when a frame is owed, the wait is only as long as what is left of one; otherwise an idle
+    // session sleeps until something happens
+    let idle = match dirty {
       true => FRAME
         .saturating_sub(painted.elapsed())
         .max(Duration::from_millis(1)),
       false => Duration::from_secs(3600),
     };
+    let ticking = state.busy() && state.approval.is_none();
     let wake = tokio::select! {
       message = rx.recv() => Wake::Agent(message),
       joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
       event = input.next() => Wake::Input(event),
+      _ = clock.tick(), if ticking => Wake::Clock,
       () = tokio::time::sleep(idle) => Wake::Tick,
     };
     let key = match wake {
@@ -819,7 +888,11 @@ async fn run_chat_inner(
         dirty = true;
         continue;
       }
-      // the wait ran out, or the sink closed; a running turn repaints on the way round
+      Wake::Clock => {
+        dirty = true;
+        continue;
+      }
+      // the wait ran out, or the sink closed; an owed frame is drawn on the way round
       Wake::Agent(None) | Wake::Tick => continue,
       Wake::Finished(joined) => {
         task = None;
@@ -902,14 +975,18 @@ async fn run_chat_inner(
               state.pending_image = Some(path);
             }
             // a paste keeps its line breaks; the prompt grows to hold them
-            None => state.input.insert_str(text.trim_end_matches('\n')),
+            None => {
+              let text = text.replace("\r\n", "\n").replace('\r', "\n");
+              state.input.insert_str(text.trim_end_matches('\n'));
+            }
           }
           state.command_selected = 0;
         }
         continue;
       }
       Wake::Input(Some(Ok(InputEvent::Mouse(mouse)))) => {
-        dirty = true;
+        // a pointer moving over the window changes nothing on it
+        dirty |= !matches!(mouse.kind, MouseEventKind::Moved);
         match mouse.kind {
           MouseEventKind::ScrollUp => state.scroll_back(3),
           MouseEventKind::ScrollDown => state.scroll_forward(3),
@@ -927,13 +1004,20 @@ async fn run_chat_inner(
               accept_command(&mut state, &commands);
             } else if contains(prompt, mouse.column, mouse.row) {
               state.input.place(
-                usize::from(mouse.row - prompt.y),
+                state.prompt_first.get() + usize::from(mouse.row - prompt.y),
                 usize::from(mouse.column.saturating_sub(prompt.x + 2)),
+                prompt_width(prompt.width),
               );
             }
           }
           _ => {}
         }
+        continue;
+      }
+      // the layout depends on the size; an idle session would otherwise show a garbled screen
+      // until the next key
+      Wake::Input(Some(Ok(InputEvent::Resize(..)))) => {
+        dirty = true;
         continue;
       }
       Wake::Input(Some(Ok(_))) => continue,
@@ -985,8 +1069,12 @@ async fn run_chat_inner(
             format!("denied {} ({:?})", approval.call.name, approval.risk),
           ));
         }
-        _ => state.approval = Some(approval),
+        _ => {
+          state.approval = Some(approval);
+          continue;
+        }
       }
+      state.approval = state.waiting.pop_front();
       continue;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1000,7 +1088,8 @@ async fn run_chat_inner(
           state.input.delete_word();
           state.command_selected = 0;
         }
-        KeyCode::End => state.scroll.set(0),
+        KeyCode::End => state.follow(),
+        KeyCode::Home => state.scroll_top(),
         KeyCode::Left => state.input.word_left(),
         KeyCode::Right => state.input.word_right(),
         KeyCode::Char('1') => state.select_slot(0),
@@ -1112,6 +1201,8 @@ async fn run_chat_inner(
       KeyCode::Left => state.input.left(),
       KeyCode::Right if word => state.input.word_right(),
       KeyCode::Right => state.input.right(),
+      KeyCode::Home if key.modifiers.contains(KeyModifiers::SHIFT) => state.scroll_top(),
+      KeyCode::End if key.modifiers.contains(KeyModifiers::SHIFT) => state.follow(),
       KeyCode::Home => state.input.home(),
       KeyCode::End => state.input.end(),
       // the transcript is on the alternate screen, so it needs its own scrollback
@@ -1125,8 +1216,8 @@ async fn run_chat_inner(
         state.input.next();
         state.command_selected = 0;
       }
-      KeyCode::PageUp => state.scroll_back(8),
-      KeyCode::PageDown => state.scroll_forward(8),
+      KeyCode::PageUp => state.scroll_back(state.scroll_page()),
+      KeyCode::PageDown => state.scroll_forward(state.scroll_page()),
       KeyCode::Esc if state.busy() => {
         if let Some(controller) = &controller {
           controller.cancel();
@@ -1138,7 +1229,9 @@ async fn run_chat_inner(
         let entry = match session.as_mut().and_then(rewind) {
           Some(text) => {
             state.input.set(text);
-            state.primary.entries = session_entries(session.as_ref().expect("rewound session"));
+            let rewound = session.as_ref().expect("rewound session");
+            state.primary.entries = session_entries(rewound);
+            state.primary.todos = session_plan(rewound);
             state.primary.refresh_topic();
             state.primary.assistant = None;
             // the scrollback already holds what was said; only what comes next is new
@@ -1196,10 +1289,13 @@ async fn run_chat_inner(
             .map_or(Err("no active run"), |controller| {
               controller.try_steer(input.clone())
             }) {
-            Ok(()) => state.primary.entries.push(Entry::new(
-              EntryKind::System,
-              format!("steering queued: {input}"),
-            )),
+            Ok(()) => {
+              state.primary.entries.push(Entry::new(
+                EntryKind::System,
+                format!("steering queued: {input}"),
+              ));
+              state.steers.push(input);
+            }
             Err(reason) => {
               state.input.set(input);
               state.primary.entries.push(Entry::new(
@@ -1685,6 +1781,7 @@ fn command(
            ctrl+u/k   clear before/after     alt+←/→      move a word\n\
            wheel      scroll the transcript  page up/down  scroll a screen\n\
            ctrl+end   latest output          shift+↑/↓    scroll a line\n\
+           ctrl+home  oldest output\n\
            esc        cancel a run\n\
            ctrl+1…9   select agent           ctrl+= / ctrl+-  cycle agents\n\
            ctrl+l     roster                 ctrl+c       quit"
@@ -1697,7 +1794,7 @@ fn command(
       state.primary.entries.clear();
       state.primary.topic.clear();
       state.outcome = None;
-      state.scroll.set(0);
+      state.follow();
       state.primary.live.clear();
       state.flushed = 0;
       state.primary.tools.clear();
@@ -1897,7 +1994,10 @@ fn accept_command(state: &mut ChatState, commands: &[SlashCommand]) {
 
 fn apply_event(state: &mut ChatState, message: UiEvent) {
   match message {
-    UiEvent::Approval(approval) => state.approval = Some(approval),
+    UiEvent::Approval(approval) => match state.approval {
+      Some(_) => state.waiting.push_back(approval),
+      None => state.approval = Some(approval),
+    },
     UiEvent::Agent(event) => apply_agent_event(state, None, event),
   }
 }
@@ -1974,9 +2074,6 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         return;
       };
       view.edit(index, |entry| {
-        if entry.detail.is_none() && !output.trim().is_empty() {
-          entry.detail = Some(output.clone());
-        }
         if let Some(tool) = entry.tool.as_mut() {
           tool.state = match error {
             true => ToolState::Failed,
@@ -1984,6 +2081,9 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
           };
           tool.live.clear();
           tool.note = tool_note(&output, error, tool.started.elapsed());
+        }
+        if entry.detail.is_none() && !output.trim().is_empty() {
+          entry.detail = Some(output);
         }
         entry.kind = match error {
           true => EntryKind::Error,
@@ -2026,6 +2126,11 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       ));
     }
     Event::Steering { message } => {
+      if session_id.is_none()
+        && let Some(index) = state.steers.iter().position(|queued| *queued == message)
+      {
+        state.steers.remove(index);
+      }
       let view = state.view_mut(session_id);
       view.topic = title::excerpt(&message);
       view.entries.push(Entry::new(
@@ -2047,12 +2152,17 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       .view_mut(session_id)
       .entries
       .push(Entry::new(EntryKind::Error, message)),
+    Event::Notice { message } => state
+      .view_mut(session_id)
+      .entries
+      .push(Entry::new(EntryKind::System, message)),
     Event::TurnEnd { usage } => {
       let view = state.view_mut(session_id);
       view.usage.input_tokens += usage.input_tokens;
       view.usage.output_tokens += usage.output_tokens;
       view.finish_message();
     }
+    Event::Todos { items } => state.view_mut(session_id).todos = items,
     Event::SessionStart { .. } => {}
   }
 }
@@ -2088,6 +2198,16 @@ fn rewind(session: &mut Session) -> Option<String> {
   Some(text)
 }
 
+// the plan as the last call that set one left it, so a resumed session shows where it was
+fn session_plan(session: &Session) -> Vec<ainz::Todo> {
+  active_path(session)
+    .iter()
+    .rev()
+    .flat_map(|node| node.message.tool_calls.iter().rev())
+    .find_map(ainz::todo::planned)
+    .unwrap_or_default()
+}
+
 fn session_entries(session: &Session) -> Vec<Entry> {
   active_path(session)
     .into_iter()
@@ -2113,7 +2233,9 @@ fn render(
   commands: &[SlashCommand],
 ) {
   // the prompt grows with what is written in it, up to a few lines
-  let prompt_rows = (state.input.as_str().matches('\n').count() + 1).clamp(1, 6) as u16;
+  let prompt_rows = input::wrap(state.input.as_str(), prompt_width(frame.area().width))
+    .len()
+    .clamp(1, 6) as u16;
   if state.inline {
     let [body, activity, status, input] = Layout::vertical([
       Constraint::Min(1),
@@ -2297,19 +2419,16 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
   let total: usize = heights.iter().sum();
   let height = inner.height as usize;
   let bottom = total.saturating_sub(height);
-  let reach = bottom.min(u16::MAX as usize) as u16;
-  // a reader holding a position keeps it as rows arrive underneath
-  if state.scroll.get() > 0 {
-    state.scroll.set(
-      state
-        .scroll
-        .get()
-        .saturating_add(reach.saturating_sub(state.reach.get()))
-        .min(reach),
-    );
-  }
-  state.reach.set(reach);
-  let skip = bottom.saturating_sub(state.scroll.get() as usize);
+  state.page.set(inner.height);
+  let offset = view.entries.len() - entries.len();
+  let (skip, scroll) = settle(
+    state.scroll.get(),
+    state.scroll_delta.replace(0),
+    &heights,
+    offset,
+    bottom,
+  );
+  state.scroll.set(scroll);
   // only the entries the buffer can actually show are laid out; the rest let go of their rows
   // and keep only the height, so what a long session holds does not grow with it
   let mut shown: Vec<Line<'static>> = Vec::with_capacity(height);
@@ -2331,6 +2450,59 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &ChatState) {
     passed += rows;
   }
   frame.render_widget(Paragraph::new(shown), inner);
+}
+
+/// Where a reader is in the buffer: following the newest output, or holding the row at the top
+/// of the screen. The row is named by the entry it belongs to rather than by a count from
+/// either end, so output that grows, shrinks, re-wraps on a resize, or is expanded with ctrl+o
+/// leaves the reader looking at the same thing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Scroll {
+  #[default]
+  Follow,
+  At {
+    entry: usize,
+    row: usize,
+  },
+}
+
+/// The rows to skip this frame, and where that leaves the reader. `offset` is how many entries
+/// have already left for the terminal's own scrollback and are not in `heights`.
+fn settle(
+  scroll: Scroll,
+  delta: isize,
+  heights: &[usize],
+  offset: usize,
+  bottom: usize,
+) -> (usize, Scroll) {
+  let current = match scroll {
+    Scroll::Follow => bottom,
+    Scroll::At { entry, row } => match entry.checked_sub(offset) {
+      Some(local) if local < heights.len() => {
+        heights[..local].iter().sum::<usize>() + row.min(heights[local].saturating_sub(1))
+      }
+      _ => bottom,
+    },
+  };
+  let skip = current.saturating_add_signed(delta).min(bottom);
+  // everything fits, or the reader came back down to the end: newest output is followed again
+  if bottom == 0 || (skip == bottom && (delta > 0 || scroll == Scroll::Follow)) {
+    return (bottom, Scroll::Follow);
+  }
+  let mut passed = 0;
+  for (index, rows) in heights.iter().enumerate() {
+    if passed + rows > skip {
+      return (
+        skip,
+        Scroll::At {
+          entry: offset + index,
+          row: skip - passed,
+        },
+      );
+    }
+    passed += rows;
+  }
+  (bottom, Scroll::Follow)
 }
 
 fn splash(
@@ -2445,10 +2617,59 @@ fn render_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
       Style::default().fg(MUTED),
     )));
   }
+  // the plan of whichever transcript is on screen sits under the agents, given whatever room
+  // they leave
+  let todos = &state.active_view().todos;
+  let (agents, plan) = match todos.is_empty() {
+    true => (area, Rect::default()),
+    false => {
+      let rows = (items.len() as u16 + 2).min(area.height / 2);
+      let [agents, plan] =
+        Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(area);
+      (agents, plan)
+    }
+  };
   frame.render_widget(
     List::new(items).block(
       Block::default()
         .title(" agents ")
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(BLUE)),
+    ),
+    agents,
+  );
+  if plan.height > 1 {
+    render_plan(frame, plan, todos);
+  }
+}
+
+fn render_plan(frame: &mut Frame, area: Rect, todos: &[ainz::Todo]) {
+  let width = usize::from(area.width.saturating_sub(5));
+  let items: Vec<_> = todos
+    .iter()
+    .map(|todo| {
+      let (marker, style) = match todo.status {
+        ainz::TodoStatus::Done => ("[x] ", Style::default().fg(MUTED)),
+        ainz::TodoStatus::InProgress => (
+          "[>] ",
+          Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        ),
+        ainz::TodoStatus::Pending => ("[ ] ", Style::default().fg(INK)),
+      };
+      ListItem::new(Line::from(vec![
+        Span::styled(marker, style),
+        Span::styled(clip(&todo.text, width), style),
+      ]))
+    })
+    .collect();
+  let done = todos
+    .iter()
+    .filter(|todo| todo.status == ainz::TodoStatus::Done)
+    .count();
+  frame.render_widget(
+    List::new(items).block(
+      Block::default()
+        .title(format!(" plan {done}/{} ", todos.len()))
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(BLUE)),
     ),
@@ -2491,15 +2712,27 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
     .cost_usd
     .map(|cost| format!(" │ ${cost:.2}"))
     .unwrap_or_default();
+  // the roster shows the plan itself; this is for when it is hidden or too narrow to
+  let plan = match view.todos.len() {
+    0 => String::new(),
+    total => {
+      let done = view
+        .todos
+        .iter()
+        .filter(|todo| todo.status == ainz::TodoStatus::Done)
+        .count();
+      format!(" │ todo {done}/{total}")
+    }
+  };
   let text = if area.width >= 108 {
     format!(
       " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
-       {total}{cost} │ agents {running}/{total_agents} │ ^L roster "
+       {total}{cost} │ agents {running}/{total_agents}{plan} │ ^L roster "
     )
   } else if area.width >= 72 {
     format!(
       " {provider}/{model} │ {permissions} │ tok {input}↓ {output}↑ Σ{total}{cost} │ \
-       ag {running}/{total_agents} "
+       ag {running}/{total_agents}{plan} "
     )
   } else {
     format!(" {} │ Σ{total} tok ", config.model)
@@ -2818,28 +3051,6 @@ fn tool_note(output: &str, error: bool, took: Duration) -> String {
   }
 }
 
-/// How many columns a string takes up on the terminal.
-fn cells(text: &str) -> usize {
-  Line::raw(text).width()
-}
-
-/// The tail of a line past the given number of columns, so what is scrolled out of the prompt
-/// is measured the way it was drawn.
-fn skip_cells(text: &str, columns: usize) -> String {
-  if columns == 0 {
-    return text.to_string();
-  }
-  let mut used = 0;
-  text
-    .char_indices()
-    .find_map(|(at, ch)| {
-      used += cells(&ch.to_string()).max(1);
-      (used > columns).then_some(&text[at + ch.len_utf8()..])
-    })
-    .unwrap_or_default()
-    .to_string()
-}
-
 fn clip(text: &str, width: usize) -> String {
   let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
   if flat.chars().count() <= width {
@@ -2911,29 +3122,25 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     (false, input::Mode::Normal) => "▪ ",
     (false, input::Mode::Insert) => "> ",
   };
-  let capacity = area.width.saturating_sub(3).max(1) as usize;
+  let width = prompt_width(area.width);
   let text = state.input.as_str();
-  let before = &text[..state.input.cursor()];
-  let row = before.matches('\n').count();
-  // measured in the cells the terminal draws, not the characters typed, so a wide character
-  // moves the cursor by the two columns it takes up
-  let column = cells(before.rsplit('\n').next().unwrap_or_default());
-  // a line longer than the box scrolls to keep the cursor in view
-  let skipped = column.saturating_sub(capacity);
-  let lines: Vec<Line> = text
-    .split('\n')
+  let rows = input::wrap(text, width);
+  let (row, column) = state.input.caret(width);
+  // the prompt holds a few rows; past that it scrolls to keep the caret in view
+  let first = row.saturating_sub(usize::from(area.height.max(1)) - 1);
+  state.prompt_first.set(first);
+  let lines: Vec<Line> = rows
+    .iter()
     .enumerate()
-    .map(|(index, line)| {
-      let shown: String = match index == row {
-        true => skip_cells(line, skipped),
-        false => line.to_string(),
-      };
+    .skip(first)
+    .take(usize::from(area.height))
+    .map(|(index, range)| {
       Line::from(vec![
         Span::styled(
           if index == 0 { prefix } else { "  " },
           Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(shown, Style::default().fg(INK)),
+        Span::styled(&text[range.clone()], Style::default().fg(INK)),
       ])
     })
     .collect();
@@ -2941,13 +3148,18 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
   let x = area
     .x
     .saturating_add(2)
-    .saturating_add((column - skipped).min(u16::MAX as usize) as u16)
+    .saturating_add(column.min(u16::MAX as usize) as u16)
     .min(area.right().saturating_sub(1));
   let y = area
     .y
-    .saturating_add(row.min(u16::MAX as usize) as u16)
+    .saturating_add((row - first).min(u16::MAX as usize) as u16)
     .min(area.bottom().saturating_sub(1));
   frame.set_cursor_position((x, y));
+}
+
+// the prompt's text starts after its two-column marker and leaves a column for the caret
+fn prompt_width(width: u16) -> usize {
+  usize::from(width.saturating_sub(3).max(1))
 }
 
 // the arguments are the decision, so they are shown, clipped to what fits

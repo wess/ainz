@@ -181,6 +181,41 @@ async fn lua_instruction_budget_cannot_be_caught() {
   }
 }
 
+// the tool runs on its own thread because a Lua loop that never yields also blocks the
+// runtime driving it, and a hung test says less than a failed one
+fn error_within_seconds(source: &'static str, runtime: &'static str) -> String {
+  let (sender, receiver) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let error = tokio::runtime::Runtime::new().unwrap().block_on(async {
+      let (temp, catalog) = plugin(source, "\"compute\"", runtime).await;
+      tool(&catalog)
+        .await
+        .execute(&context(&temp), json!({}))
+        .await
+        .unwrap_err()
+    });
+    drop(sender.send(format!("{error:#}")));
+  });
+  receiver
+    .recv_timeout(Duration::from_secs(10))
+    .expect("the loop was never stopped")
+}
+
+#[test]
+fn a_loop_where_lua_cannot_yield_still_runs_out_of_fuel_and_time() {
+  // a sort comparator is not a place Lua can yield from, and the pcall inside catches the
+  // first failure; neither may keep the loop alive
+  let source = "return { run = function()
+    table.sort({3, 2, 1}, function()
+      while true do pcall(function() while true do end end) end
+    end)
+  end }";
+  let error = error_within_seconds(source, "fuel = 100000");
+  assert!(error.contains("instruction budget"), "{error}");
+  let error = error_within_seconds(source, "timeout_ms = 50\nfuel = 18446744073709551615");
+  assert!(error.contains("timed out"), "{error}");
+}
+
 #[tokio::test]
 async fn lua_memory_and_time_are_bounded() {
   let (temp, catalog) = plugin(

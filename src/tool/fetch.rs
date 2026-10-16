@@ -44,6 +44,10 @@ impl Tool for Fetch {
     Risk::Network
   }
 
+  fn concurrent(&self, _arguments: &Value) -> bool {
+    true
+  }
+
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {
     let args: FetchArgs = serde_json::from_value(arguments)?;
     let limit = args

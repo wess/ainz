@@ -59,4 +59,4 @@ pub use subagent::{
   SubagentHandler, SubagentRegistry, SubagentRequest, SubagentResult, subagent_tool,
 };
 pub use synapse::Synapse;
-pub use todo::TodoList;
+pub use todo::{Todo, TodoStatus};

@@ -5,7 +5,7 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::{Value, json};
@@ -128,42 +128,52 @@ impl Session {
   }
 
   pub fn context_messages(&self) -> Result<Vec<Message>> {
-    let nodes = self.active_nodes()?;
-    let summary = self.active_summary(&nodes);
-    let mut messages = Vec::new();
-    let start = if let Some(summary) = summary {
-      messages.push(Message::text(
-        Role::System,
-        format!("Summary of earlier session context:\n{}", summary.summary),
-      ));
-      nodes
+    let context = self.context()?;
+    Ok(
+      context
+        .summary
+        .into_iter()
+        .chain(context.messages.into_iter().cloned())
+        .collect(),
+    )
+  }
+
+  /// What the next request carries, borrowed from the session. A run asks for this on every
+  /// step, so it copies pointers to the messages rather than the messages themselves.
+  pub fn context(&self) -> Result<Context<'_>> {
+    let (nodes, summary, start) = self.since_summary()?;
+    let summary = summary.map(|summary| {
+      // Anthropic takes system text out of band and wants a user turn first, so a tail kept
+      // from the middle of a long turn is opened by the summary as that user turn
+      let opens = nodes[start..]
         .iter()
-        .position(|node| node.id == summary.cursor)
-        .map_or(0, |index| index + 1)
-    } else {
-      0
-    };
-    messages.extend(nodes[start..].iter().map(|node| node.message.clone()));
-    Ok(messages)
+        .find(|node| node.message.role != Role::System)
+        .is_none_or(|node| node.message.role == Role::User);
+      Message::text(
+        if opens { Role::System } else { Role::User },
+        format!("Summary of earlier session context:\n{}", summary.summary),
+      )
+    });
+    let messages = nodes[start..].iter().map(|node| &node.message).collect();
+    Ok(Context { summary, messages })
   }
 
   pub fn compaction_input(&self, preserve: usize) -> Result<Option<(Uuid, Vec<Message>, usize)>> {
-    let nodes = self.active_nodes()?;
-    let summary = self.active_summary(&nodes);
-    let start = summary
-      .and_then(|summary| {
-        nodes
-          .iter()
-          .position(|node| node.id == summary.cursor)
-          .map(|index| index + 1)
-      })
-      .unwrap_or(0);
+    let (nodes, summary, start) = self.since_summary()?;
     if nodes.len().saturating_sub(start) <= preserve {
       return Ok(None);
     }
 
+    // the kept tail may open at a user turn, or at an assistant reply straight after a round
+    // of tool results: a call is never kept without its result, nor a result without its call.
+    // Without the second case one prompt followed by many tool rounds never compacts at all.
+    let boundary = |index: usize| match nodes[index].message.role {
+      Role::User => true,
+      Role::Assistant => nodes[index - 1].message.role == Role::Tool,
+      Role::System | Role::Tool => false,
+    };
     let mut keep = nodes.len() - preserve;
-    while keep > start && nodes[keep].message.role != Role::User {
+    while keep > start && !boundary(keep) {
       keep -= 1;
     }
     if keep == start {
@@ -191,10 +201,40 @@ impl Session {
   }
 
   fn active_nodes(&self) -> Result<Vec<&SessionNode>> {
+    let mut active = Vec::new();
+    let Some(mut id) = self.cursor else {
+      return Ok(active);
+    };
+    // a node is always appended after its parent, so the path is found walking back through
+    // the vector; this runs on every step of a run, and a map of every node would be built
+    // and thrown away each time
+    let mut index = self.nodes.len();
+    loop {
+      let Some(found) = self.nodes[..index].iter().rposition(|node| node.id == id) else {
+        return self.active_nodes_unordered();
+      };
+      let node = &self.nodes[found];
+      active.push(node);
+      index = found;
+      match node.parent {
+        Some(parent) => id = parent,
+        None => break,
+      }
+    }
+    active.reverse();
+    Ok(active)
+  }
+
+  // a file written by something else may not keep parents first
+  fn active_nodes_unordered(&self) -> Result<Vec<&SessionNode>> {
     let nodes: HashMap<_, _> = self.nodes.iter().map(|node| (node.id, node)).collect();
     let mut cursor = self.cursor;
     let mut active = Vec::new();
     while let Some(id) = cursor {
+      // a parent chain longer than the tree is a loop, which only a damaged file can hold
+      if active.len() == self.nodes.len() {
+        bail!("session {} has a cycle at node {id}", self.id);
+      }
       let node = nodes
         .get(&id)
         .with_context(|| format!("missing session node {id}"))?;
@@ -205,12 +245,37 @@ impl Session {
     Ok(active)
   }
 
-  fn active_summary<'a>(&'a self, nodes: &[&SessionNode]) -> Option<&'a SessionSummary> {
-    self
-      .summaries
-      .iter()
-      .rev()
-      .find(|summary| nodes.iter().any(|node| node.id == summary.cursor))
+  /// The active path, the summary that covers the start of it, and where after that summary
+  /// the path picks up again.
+  fn since_summary(&self) -> Result<(Vec<&SessionNode>, Option<&SessionSummary>, usize)> {
+    let nodes = self.active_nodes()?;
+    let found = self.summaries.iter().rev().find_map(|summary| {
+      nodes
+        .iter()
+        .position(|node| node.id == summary.cursor)
+        .map(|index| (summary, index + 1))
+    });
+    let (summary, start) = found.map_or((None, 0), |(summary, start)| (Some(summary), start));
+    Ok((nodes, summary, start))
+  }
+}
+
+pub struct Context<'a> {
+  pub summary: Option<Message>,
+  pub messages: Vec<&'a Message>,
+}
+
+impl Context<'_> {
+  pub fn len(&self) -> usize {
+    usize::from(self.summary.is_some()) + self.messages.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
+  pub fn iter(&self) -> impl Iterator<Item = &Message> {
+    self.summary.iter().chain(self.messages.iter().copied())
   }
 }
 
@@ -576,6 +641,10 @@ impl Tool for SessionTool {
 
   fn risk(&self, _arguments: &Value) -> Risk {
     Risk::Read
+  }
+
+  fn concurrent(&self, _arguments: &Value) -> bool {
+    true
   }
 
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {

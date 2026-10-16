@@ -25,7 +25,7 @@ impl ChatState {
     self.primary.refresh_topic();
     self.primary.finish_message();
     self.primary.state = AgentState::Running;
-    self.scroll.set(0);
+    self.follow();
   }
 
   pub(super) fn finish_run(&mut self, result: Result<String>) {
@@ -84,6 +84,20 @@ impl ChatState {
     self.outcome = Some((status, took));
     self.cancelled = false;
     self.approval = None;
+    self.waiting.clear();
+    // steering the run never took up goes back into the prompt rather than nowhere
+    if !self.steers.is_empty() {
+      let mut kept = std::mem::take(&mut self.steers).join("\n");
+      if !self.input.as_str().is_empty() {
+        kept.push('\n');
+        kept.push_str(self.input.as_str());
+      }
+      self.input.set(kept);
+      self.primary.entries.push(Entry::new(
+        EntryKind::System,
+        "the run ended before taking up your steering; it is back in the prompt".into(),
+      ));
+    }
   }
 }
 
@@ -118,7 +132,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &ChatState) {
   };
   let hint = if state.header_preview {
     "  ·  Header preview · any key returns"
-  } else if state.scroll.get() > 0 {
+  } else if state.reading_history() {
     "  ·  History · Ctrl+End latest"
   } else if state.active.is_some() {
     "  ·  Ctrl+1 main"

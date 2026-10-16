@@ -68,6 +68,11 @@ pub trait Tool: Send + Sync {
   fn validate(&self, _arguments: &Value) -> Result<()> {
     Ok(())
   }
+  /// Whether this call may run beside its neighbours in the same reply. Only a call that
+  /// changes nothing another call could observe says yes, so the default is no.
+  fn concurrent(&self, _arguments: &Value) -> bool {
+    false
+  }
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String>;
 }
 

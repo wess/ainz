@@ -104,19 +104,29 @@ impl Input {
   }
 
   /// Puts the cursor where the pointer was, counting rows and characters as drawn.
-  pub fn place(&mut self, row: usize, column: usize) {
-    let mut offset = 0;
-    for (index, line) in self.text.split('\n').enumerate() {
-      if index == row {
-        offset += line
-          .char_indices()
-          .nth(column)
-          .map_or(line.len(), |(at, _)| at);
-        break;
-      }
-      offset += line.len() + 1;
-    }
-    self.cursor = offset.min(self.text.len());
+  /// Moves the caret to a row of the text as drawn, wrapped to `width`, and a column in it.
+  pub fn place(&mut self, row: usize, column: usize, width: usize) {
+    let rows = wrap(&self.text, width);
+    let Some(range) = rows.get(row).cloned() else {
+      self.cursor = self.text.len();
+      return;
+    };
+    let mut used = 0;
+    self.cursor = self.text[range.clone()]
+      .char_indices()
+      .find_map(|(at, character)| {
+        used += columns(character);
+        (used > column).then_some(range.start + at)
+      })
+      .unwrap_or(range.end);
+  }
+
+  /// The row and column the caret is drawn at once the text is wrapped to `width`.
+  pub fn caret(&self, width: usize) -> (usize, usize) {
+    let before = &self.text[..self.cursor];
+    let rows = wrap(before, width);
+    let last = rows[rows.len() - 1].clone();
+    (rows.len() - 1, before[last].chars().map(columns).sum())
   }
 
   pub fn home(&mut self) {
@@ -231,6 +241,44 @@ impl Input {
   }
 }
 
+/// The rows the text takes once wrapped to `width` columns, as byte ranges. A newline ends a
+/// row, so does a character that would not fit, and so does a row that is exactly full, which
+/// is why the caret after one sits at the start of the next. Columns are display columns, so a
+/// wide character takes two and the caret lands where the terminal draws it.
+pub(super) fn wrap(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
+  let width = width.max(1);
+  let mut rows = Vec::new();
+  let (mut start, mut column) = (0, 0);
+  for (index, character) in text.char_indices() {
+    if character == '\n' {
+      rows.push(start..index);
+      (start, column) = (index + 1, 0);
+      continue;
+    }
+    let wide = columns(character);
+    if column > 0 && column + wide > width {
+      rows.push(start..index);
+      (start, column) = (index, 0);
+    }
+    column += wide;
+    if column >= width {
+      let end = index + character.len_utf8();
+      rows.push(start..end);
+      (start, column) = (end, 0);
+    }
+  }
+  rows.push(start..text.len());
+  rows
+}
+
+// a control character is dropped when drawn, so it takes no room
+fn columns(character: char) -> usize {
+  match character.is_control() {
+    true => 0,
+    false => unicode_width::UnicodeWidthChar::width(character).unwrap_or(0),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::{Input, Mode};
@@ -315,5 +363,34 @@ mod tests {
     input.previous();
     assert_eq!(input.as_str(), "ls");
     assert!(!input.previous());
+  }
+
+  #[test]
+  fn a_long_line_wraps_and_the_caret_follows_it() {
+    let input = typed("abcdefghij");
+    assert_eq!(super::wrap(input.as_str(), 4), [0..4, 4..8, 8..10]);
+    assert_eq!(input.caret(4), (2, 2));
+  }
+
+  #[test]
+  fn a_full_row_puts_the_caret_at_the_start_of_the_next() {
+    let input = typed("abcd");
+    assert_eq!(input.caret(4), (1, 0));
+  }
+
+  #[test]
+  fn a_wide_character_takes_two_columns() {
+    let input = typed("日本語");
+    assert_eq!(super::wrap(input.as_str(), 4).len(), 2);
+    assert_eq!(input.caret(10), (0, 6));
+  }
+
+  #[test]
+  fn a_click_lands_on_the_character_drawn_there_in_a_wrapped_row() {
+    let mut input = typed("abcdefghij");
+    input.place(1, 2, 4);
+    assert_eq!(input.cursor(), 6);
+    input.place(9, 0, 4);
+    assert_eq!(input.cursor(), 10);
   }
 }

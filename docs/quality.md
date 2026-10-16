@@ -29,6 +29,11 @@ a completed performance evaluation.
    Inserting ~15 ms before the kill makes it pass every time, so the kill is racing the shell's
    fork of its own background job: one signal at cancel time does not guarantee the group is
    empty. Cleanup needs to confirm the group drained rather than assume one `killpg` did it.
+   `kill_tree` now signals the group again at once and then over the next ~85 ms, which took
+   this test from 6 failures in 60 runs to none in 120. A standalone reproduction (kill
+   `sh -c '(sleep .3; …) & wait'` 30–70 ms after spawn) still sees a few percent escape on a
+   machine with an endpoint-security agent installed, so the rounds narrow the race rather
+   than close it.
 
 2. **Runtime reliability and resource bounds.** Introduce a run identity and explicit lifecycle
    covering provider calls, tools, approvals, hooks, compaction, saving, and child shutdown.

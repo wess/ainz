@@ -20,7 +20,7 @@ struct Provider(Mutex<VecDeque<Option<ProviderReply>>>);
 impl ChatProvider for Provider {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     tools: &[ToolSpec],
     _: &EventSink,
   ) -> Result<ProviderReply> {
@@ -159,12 +159,16 @@ async fn cancellation_interrupts_every_hook_and_preserves_completed_tools() {
       assert_eq!(tools.len(), 2);
       assert_eq!(tools[0].tool_call_id.as_deref(), Some("first"));
       assert_eq!(tools[1].tool_call_id.as_deref(), Some("second"));
-      if event == "post_tool" {
-        assert_eq!(tools[0].content.as_deref(), Some("read succeeded"));
-      } else {
-        assert!(tools[0].content.as_ref().unwrap().contains("cancelled"));
+      // both reads run together, so a cancel in the first one's post_tool hook still finds the
+      // second one finished, and keeps it
+      for tool in tools {
+        let content = tool.content.as_deref().unwrap();
+        if event == "post_tool" {
+          assert_eq!(content, "read succeeded");
+        } else {
+          assert!(content.contains("cancelled"));
+        }
       }
-      assert!(tools[1].content.as_ref().unwrap().contains("cancelled"));
     }
     tokio::time::sleep(Duration::from_millis(450)).await;
     assert!(

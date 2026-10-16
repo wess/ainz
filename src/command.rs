@@ -521,8 +521,11 @@ pub async fn list_skills(workspace: &Path, json: bool) -> Result<()> {
       .collect();
     println!("{}", serde_json::to_string_pretty(&rows)?);
   } else {
-    for skill in catalog.skills {
+    for skill in &catalog.skills {
       println!("{}  {}", skill.name, skill.description);
+    }
+    for issue in &catalog.issues {
+      println!("unreadable  {issue}");
     }
   }
   Ok(())
@@ -549,8 +552,11 @@ pub async fn prompts(
       .collect();
     println!("{}", serde_json::to_string_pretty(&rows)?);
   } else {
-    for prompt in catalog.prompts {
+    for prompt in &catalog.prompts {
       println!("{}  {}", prompt.name, prompt.description);
+    }
+    for issue in &catalog.issues {
+      println!("unreadable  {issue}");
     }
   }
   Ok(())
@@ -1008,8 +1014,14 @@ pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {
   let skills =
     SkillCatalog::discover_with_roots(workspace, &catalog.approved_skill_roots()).await?;
   println!("skills     {} discovered", skills.skills.len());
+  for issue in &skills.issues {
+    println!("           unreadable  {issue}");
+  }
   let prompts = PromptCatalog::discover(workspace).await?;
   println!("prompts    {} discovered", prompts.prompts.len());
+  for issue in &prompts.issues {
+    println!("           unreadable  {issue}");
+  }
   println!(
     "memory     {}{}",
     config.memory.backend.label(),

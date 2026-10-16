@@ -22,7 +22,7 @@ async fn process_provider_passes_the_transcript_over_stdin() {
 
   let reply = provider
     .complete(
-      &[Message::text(Role::User, "hello from stdin")],
+      &[&Message::text(Role::User, "hello from stdin")],
       &[],
       &EventSink::default(),
     )
@@ -86,7 +86,7 @@ async fn provider_assembles_streamed_text_and_usage() {
 
   let reply = provider
     .complete(
-      &[Message::text(Role::User, "hi")],
+      &[&Message::text(Role::User, "hi")],
       &[],
       &EventSink::default(),
     )
@@ -125,7 +125,7 @@ async fn provider_sends_multimodal_content_parts() {
   );
 
   provider
-    .complete(&[message], &[], &EventSink::default())
+    .complete(&[&message], &[], &EventSink::default())
     .await
     .unwrap();
   let request = String::from_utf8(receiver.await.unwrap()).unwrap();
@@ -194,7 +194,7 @@ async fn provider_reassembles_multibyte_text_split_across_chunks() {
 
   let reply = provider
     .complete(
-      &[Message::text(Role::User, "hi")],
+      &[&Message::text(Role::User, "hi")],
       &[],
       &EventSink::default(),
     )
@@ -234,7 +234,7 @@ async fn process_provider_reports_a_streaming_command_as_it_works() {
   let (events, mut received) = EventSink::channel();
 
   let reply = provider
-    .complete(&[Message::text(Role::User, "look around")], &[], &events)
+    .complete(&[&Message::text(Role::User, "look around")], &[], &events)
     .await
     .unwrap();
 
@@ -273,7 +273,7 @@ async fn process_provider_surfaces_a_streaming_failure() {
 
   let error = provider
     .complete(
-      &[Message::text(Role::User, "hi")],
+      &[&Message::text(Role::User, "hi")],
       &[],
       &EventSink::default(),
     )
@@ -305,7 +305,7 @@ async fn process_provider_reads_a_block_shaped_tool_result() {
   let (events, mut received) = EventSink::channel();
 
   provider
-    .complete(&[Message::text(Role::User, "look")], &[], &events)
+    .complete(&[&Message::text(Role::User, "look")], &[], &events)
     .await
     .unwrap();
 
@@ -353,7 +353,7 @@ async fn provider_retries_after_a_429_then_succeeds() {
   let (events, mut received) = EventSink::channel();
 
   let reply = provider
-    .complete(&[Message::text(Role::User, "hi")], &[], &events)
+    .complete(&[&Message::text(Role::User, "hi")], &[], &events)
     .await
     .unwrap();
 
@@ -394,7 +394,7 @@ async fn provider_retries_after_a_500_then_succeeds() {
 
   let reply = provider
     .complete(
-      &[Message::text(Role::User, "hi")],
+      &[&Message::text(Role::User, "hi")],
       &[],
       &EventSink::default(),
     )
@@ -418,7 +418,7 @@ async fn provider_does_not_retry_a_client_error() {
   let start = std::time::Instant::now();
   let error = provider
     .complete(
-      &[Message::text(Role::User, "hi")],
+      &[&Message::text(Role::User, "hi")],
       &[],
       &EventSink::default(),
     )
@@ -450,7 +450,7 @@ async fn provider_honours_retry_after_header() {
   let start = std::time::Instant::now();
   let reply = provider
     .complete(
-      &[Message::text(Role::User, "hi")],
+      &[&Message::text(Role::User, "hi")],
       &[],
       &EventSink::default(),
     )
@@ -466,7 +466,7 @@ async fn provider_honours_retry_after_header() {
 
 #[tokio::test]
 async fn provider_distinguishes_terminal_and_truncated_streams() {
-  for reason in ["stop", "length", "content_filter"] {
+  for reason in ["stop", "length", "content_filter", "end_turn"] {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -479,7 +479,96 @@ async fn provider_distinguishes_terminal_and_truncated_streams() {
     });
     let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 0).unwrap();
     let reply = provider.complete(&[], &[], &EventSink::default()).await;
-    assert_eq!(reply.is_ok(), reason == "stop", "{reason}");
+    // a cut-off reply is still what the model said and an unknown reason still ends it; only a
+    // filtered one, missing things on purpose, is refused
+    assert_eq!(reply.is_ok(), reason != "content_filter", "{reason}");
+    if let Ok(reply) = reply {
+      let content = reply.message.content.unwrap();
+      assert!(content.starts_with("text"), "{reason}: {content}");
+      assert_eq!(
+        content.contains("cut off"),
+        reason == "length",
+        "{reason}: {content}"
+      );
+    }
     server.await.unwrap();
   }
+}
+
+fn cat_provider() -> ProcessProvider {
+  ProcessProvider::new(
+    "/bin/sh".into(),
+    vec!["-c".into(), "cat".into()],
+    "test".into(),
+    std::env::current_dir().unwrap(),
+    PermissionMode::ReadOnly,
+    ProcessOutput::Text,
+  )
+}
+
+#[tokio::test]
+async fn process_provider_passes_a_fetchable_image_along() {
+  let image = Image {
+    url: "https://example.test/plot.png".into(),
+    detail: None,
+  };
+  let reply = cat_provider()
+    .complete(
+      &[&Message::user("what is in this", vec![image])],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap();
+  let content = reply.message.content.unwrap();
+  assert!(
+    content.contains("[image: https://example.test/plot.png]"),
+    "{content}"
+  );
+}
+
+#[tokio::test]
+async fn process_provider_refuses_inline_image_data_instead_of_dropping_it() {
+  let image = Image {
+    url: "data:image/png;base64,AQID".into(),
+    detail: None,
+  };
+  let error = cat_provider()
+    .complete(
+      &[&Message::user("what is in this", vec![image])],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap_err();
+  assert!(format!("{error:#}").contains("cannot be sent"), "{error:#}");
+}
+
+#[tokio::test]
+async fn provider_shows_the_sentence_from_an_error_body() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let body = r#"{"error":{"message":"model gpt-x does not exist","type":"invalid_request_error"}}"#;
+  let server = tokio::spawn(serve_responses(
+    listener,
+    vec![canned_response("404 Not Found", body, "")],
+  ));
+  let provider = HttpProvider::new(format!("http://{address}"), "test".into(), None, 3).unwrap();
+
+  let error = provider
+    .complete(
+      &[&Message::text(Role::User, "hi")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap_err();
+
+  let error = format!("{error:#}");
+  assert!(
+    error.contains("404 Not Found: model gpt-x does not exist"),
+    "{error}"
+  );
+  assert!(!error.contains("invalid_request_error"), "{error}");
+  server.await.unwrap();
 }

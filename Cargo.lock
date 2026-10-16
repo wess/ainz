@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "ainz"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -44,6 +44,7 @@ dependencies = [
  "termweave",
  "tokio",
  "toml",
+ "unicode-width",
  "url",
  "uuid",
  "wasmtime",

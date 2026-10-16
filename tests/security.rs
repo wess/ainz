@@ -32,7 +32,7 @@ struct Script(Mutex<VecDeque<ProviderReply>>);
 impl ChatProvider for Script {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     _: &[ToolSpec],
     _: &EventSink,
   ) -> anyhow::Result<ProviderReply> {

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use super::*;
 use crate::control::cancelled;
@@ -7,6 +7,12 @@ use crate::control::cancelled;
 pub(super) struct RunState {
   pub usage: Usage,
   pub pending: VecDeque<ToolCall>,
+  // results that came back before they were written to the session: a cancel that lands
+  // while a batch is running keeps the calls that did finish
+  pub finished: HashMap<String, (String, bool, bool)>,
+  // the open plan, kept honest by a reminder when the model stops updating it
+  pub planning: bool,
+  pub plan: Option<super::plan::Plan>,
   cancel: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
@@ -84,6 +90,10 @@ impl<P: ChatProvider> Agent<P> {
     // the execution future and its process guards are dropped before terminal events are sent
     accumulate(&mut session.usage, &state.usage);
     for call in state.pending {
+      if let Some((output, ..)) = state.finished.remove(&call.id) {
+        session.append(Message::tool(call.id, output));
+        continue;
+      }
       let output = "tool call cancelled; any partial effects may already have occurred".to_string();
       session.append(Message::tool(call.id.clone(), output.clone()));
       self.events.emit(Event::ToolEnd {

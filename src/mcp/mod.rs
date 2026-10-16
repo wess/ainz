@@ -4,7 +4,10 @@ mod tool;
 use std::{
   collections::BTreeMap,
   path::{Path, PathBuf},
-  sync::{Arc, Mutex as SyncMutex, PoisonError},
+  sync::{
+    Arc, Mutex as SyncMutex, PoisonError,
+    atomic::{AtomicU32, Ordering},
+  },
 };
 
 use anyhow::{Context, Result, bail};
@@ -336,6 +339,14 @@ impl McpHub {
     self.server(server)?.call(name, arguments).await
   }
 
+  // ends every stdio server and its descendants, including one stuck on a call that still
+  // holds its client; the next use of a server starts it again
+  pub fn shutdown(&self) {
+    for server in self.servers.values() {
+      server.shutdown();
+    }
+  }
+
   pub fn has(&self, server: &str) -> bool {
     self.servers.contains_key(server)
   }
@@ -377,6 +388,8 @@ struct Server {
   name: String,
   config: McpServerConfig,
   client: Mutex<Option<Client>>,
+  // outside the client's lock, so shutdown never waits on a call in flight; zero is none
+  pid: AtomicU32,
   tools: SyncMutex<ToolCache>,
 }
 
@@ -392,12 +405,23 @@ impl Server {
       name,
       config,
       client: Mutex::new(None),
+      pid: AtomicU32::new(0),
       tools: SyncMutex::new(ToolCache::Unknown),
     }
   }
 
   fn cache(&self) -> std::sync::MutexGuard<'_, ToolCache> {
     self.tools.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn shutdown(&self) {
+    let pid = self.pid.swap(0, Ordering::Relaxed);
+    if pid != 0 {
+      crate::process::kill_tree(pid);
+    }
+    if let Ok(mut client) = self.client.try_lock() {
+      *client = None;
+    }
   }
 
   fn failed(&self) -> bool {
@@ -409,7 +433,10 @@ impl Server {
     let mut guard = self.client.lock().await;
     if guard.as_mut().is_none_or(Client::broken) {
       *guard = None;
-      *guard = Some(Client::start(&self.name, &self.config).await?);
+      self.pid.store(0, Ordering::Relaxed);
+      let client = Client::start(&self.name, &self.config).await?;
+      self.pid.store(client.pid().unwrap_or(0), Ordering::Relaxed);
+      *guard = Some(client);
     }
     Ok(MutexGuard::map(guard, |client| {
       client.as_mut().expect("client was just started")

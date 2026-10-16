@@ -26,6 +26,8 @@ pub struct Skill {
 #[derive(Clone, Debug, Default)]
 pub struct SkillCatalog {
   pub skills: Vec<Skill>,
+  // skills that could not be read, reported beside the rest rather than costing them
+  pub issues: Vec<String>,
 }
 
 impl SkillCatalog {
@@ -55,13 +57,15 @@ impl SkillCatalog {
     roots.extend_from_slice(extra_roots);
 
     let mut skills = BTreeMap::new();
+    let mut issues = Vec::new();
     for root in roots {
-      for skill in discover_root(&root).await? {
+      for skill in discover_root(&root, &mut issues).await {
         skills.insert(skill.name.clone(), skill);
       }
     }
     Ok(Self {
       skills: skills.into_values().collect(),
+      issues,
     })
   }
 
@@ -72,21 +76,48 @@ impl SkillCatalog {
   }
 }
 
-async fn discover_root(root: &Path) -> Result<Vec<Skill>> {
+// a skill is a directory holding a SKILL.md. anything else in the folder (.DS_Store, a stray
+// note, a half-made directory) is someone else's business, and one skill that cannot be read
+// is reported rather than a reason to refuse the session
+async fn discover_root(root: &Path, issues: &mut Vec<String>) -> Vec<Skill> {
   let mut entries = match fs::read_dir(root).await {
     Ok(entries) => entries,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-    Err(error) => return Err(error).with_context(|| format!("read {}", root.display())),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+    Err(error) => {
+      issues.push(format!("{}: {error}", root.display()));
+      return Vec::new();
+    }
   };
   let mut skills = Vec::new();
-  while let Some(entry) = entries.next_entry().await? {
+  loop {
+    let entry = match entries.next_entry().await {
+      Ok(Some(entry)) => entry,
+      Ok(None) => break,
+      Err(error) => {
+        issues.push(format!("{}: {error}", root.display()));
+        break;
+      }
+    };
+    let fallback = entry.file_name().to_string_lossy().into_owned();
+    if fallback.starts_with('.') {
+      continue;
+    }
+    // metadata follows a symlink, so a skill linked in from elsewhere still counts
+    if !fs::metadata(entry.path())
+      .await
+      .is_ok_and(|meta| meta.is_dir())
+    {
+      continue;
+    }
     let path = entry.path().join("SKILL.md");
     let text = match fs::read_to_string(&path).await {
       Ok(text) => text,
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-      Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+      Err(error) => {
+        issues.push(format!("{}: {error}", path.display()));
+        continue;
+      }
     };
-    let fallback = entry.file_name().to_string_lossy().into_owned();
     let front = frontmatter::parse(&text);
     let name = front.field("name").unwrap_or(fallback);
     if name.trim().is_empty() {
@@ -100,7 +131,7 @@ async fn discover_root(root: &Path) -> Result<Vec<Skill>> {
       path,
     });
   }
-  Ok(skills)
+  skills
 }
 
 fn first_heading(text: &str) -> String {
@@ -190,6 +221,10 @@ impl Tool for SkillTool {
 
   fn risk(&self, _arguments: &Value) -> Risk {
     Risk::Read
+  }
+
+  fn concurrent(&self, _arguments: &Value) -> bool {
+    true
   }
 
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String> {

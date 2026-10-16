@@ -10,9 +10,9 @@ use ainz::{Config, Credential, HttpProvider, ProcessOutput, ProviderConfig, Prov
 use anyhow::{Context, Result};
 use crossterm::{
   event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as InputEvent, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event as InputEvent,
+    KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
   },
   execute,
   terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -526,6 +526,12 @@ fn choose_synapse(terminal: &mut Term) -> Result<bool> {
 static PANIC_HOOK: Once = Once::new();
 // what has to be undone on the way out, which differs when the app never left the main screen
 static INLINE: AtomicBool = AtomicBool::new(false);
+// popping flags nobody pushed pops whatever the shell underneath had set
+static ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Clicks and the wheel, in SGR encoding. crossterm's own capture also asks for every motion of
+/// the pointer, which wakes the loop for each pixel it crosses and is never used here.
+const MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
 
 /// The prompt drawn at the bottom of the terminal's own scroll, leaving finished output in the
 /// scrollback the terminal already keeps.
@@ -571,10 +577,11 @@ fn push_keyboard_enhancement(stdout: &mut Stdout) {
     crossterm::terminal::supports_keyboard_enhancement(),
     Ok(true)
   ) {
-    drop(execute!(
+    let pushed = execute!(
       stdout,
       PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    ));
+    );
+    ENHANCED.store(pushed.is_ok(), Ordering::Relaxed);
   }
 }
 
@@ -587,7 +594,7 @@ pub(super) fn enter_terminal() -> Result<Term> {
     stdout,
     EnterAlternateScreen,
     EnableBracketedPaste,
-    EnableMouseCapture
+    crossterm::style::Print(MOUSE)
   ) {
     restore_terminal();
     return Err(error.into());
@@ -610,7 +617,9 @@ pub(super) fn leave_terminal(terminal: &mut Term) -> Result<()> {
 
 fn restore_terminal() {
   let mut stdout = io::stdout();
-  drop(execute!(stdout, PopKeyboardEnhancementFlags));
+  if ENHANCED.swap(false, Ordering::Relaxed) {
+    drop(execute!(stdout, PopKeyboardEnhancementFlags));
+  }
   drop(execute!(stdout, DisableMouseCapture, DisableBracketedPaste));
   if !INLINE.load(Ordering::Relaxed) {
     drop(execute!(stdout, LeaveAlternateScreen));

@@ -402,3 +402,124 @@ async fn profiles_reject_names_that_cannot_be_addressed() {
   let error = McpProfile::load_with(Some(&path)).await.unwrap_err();
   assert!(error.to_string().contains("bad name/here"));
 }
+
+fn stdio_server(command: &std::path::Path, timeout_ms: u64) -> McpProfile {
+  McpProfile {
+    servers: BTreeMap::from([(
+      "fixture".into(),
+      McpServerConfig {
+        transport: McpTransport::Stdio,
+        command: vec![command.to_string_lossy().into_owned()],
+        url: None,
+        header_env: BTreeMap::new(),
+        headers: BTreeMap::new(),
+        env: BTreeMap::new(),
+        cwd: None,
+        enabled: true,
+        required: false,
+        timeout_ms,
+      },
+    )]),
+  }
+}
+
+// answers initialize and tools/list; what tools/call does is the part each test supplies
+async fn script(temp: &tempfile::TempDir, prelude: &str, call: &str) -> std::path::PathBuf {
+  let path = temp.path().join("server.sh");
+  let body = format!(
+    r#"#!/bin/sh
+{prelude}
+while IFS= read -r request; do
+  id=$(printf '%s' "$request" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$request" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"2025-11-25","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"fixture","version":"1"}}}}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"go","description":"Go","inputSchema":{{"type":"object"}}}}]}}}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      {call}
+      ;;
+  esac
+done
+"#
+  );
+  tokio::fs::write(&path, body).await.unwrap();
+  std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+  path
+}
+
+#[tokio::test]
+async fn a_server_that_pings_mid_call_gets_an_answer() {
+  let temp = tempfile::tempdir().unwrap();
+  let server = script(
+    &temp,
+    "",
+    r#"printf '%s\n' '{"jsonrpc":"2.0","id":"p","method":"ping"}'
+      IFS= read -r reply
+      case "$reply" in
+        *'"id":"p"'*'"result":{}'*) text=pong ;;
+        *) text=refused ;;
+      esac
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$id" "$text""#,
+  )
+  .await;
+  let tool = Arc::new(McpHub::new(stdio_server(&server, 2_000))).tool();
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
+  let output = tool
+    .execute(
+      &context,
+      json!({"command": "call", "server": "fixture", "name": "go"}),
+    )
+    .await
+    .unwrap();
+  assert_eq!(output, "pong");
+}
+
+#[tokio::test]
+async fn a_server_that_stops_answering_is_ended_with_its_children() {
+  let temp = tempfile::tempdir().unwrap();
+  let marker = temp.path().join("marker");
+  let server = script(
+    &temp,
+    &format!("(sleep 1; touch '{}') &", marker.display()),
+    "sleep 30",
+  )
+  .await;
+  let tool = Arc::new(McpHub::new(stdio_server(&server, 300))).tool();
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
+  let error = tool
+    .execute(
+      &context,
+      json!({"command": "call", "server": "fixture", "name": "go"}),
+    )
+    .await
+    .unwrap_err();
+  assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+  tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+  assert!(!marker.exists(), "a child of the server outlived it");
+}
+
+#[tokio::test]
+async fn shutting_the_hub_down_ends_each_server_tree() {
+  let temp = tempfile::tempdir().unwrap();
+  let marker = temp.path().join("marker");
+  let server = script(
+    &temp,
+    &format!("(sleep 1; touch '{}') &", marker.display()),
+    "",
+  )
+  .await;
+  let hub = Arc::new(McpHub::new(stdio_server(&server, 2_000)));
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
+  hub
+    .clone()
+    .tool()
+    .execute(&context, json!({"command": "search", "query": "go"}))
+    .await
+    .unwrap();
+  hub.shutdown();
+  tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+  assert!(!marker.exists(), "a child of the server outlived the hub");
+}

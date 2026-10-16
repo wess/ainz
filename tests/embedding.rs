@@ -14,7 +14,7 @@ struct Unreachable;
 impl ChatProvider for Unreachable {
   async fn complete(
     &self,
-    _messages: &[Message],
+    _messages: &[&Message],
     _tools: &[ToolSpec],
     _events: &EventSink,
   ) -> anyhow::Result<ProviderReply> {

@@ -58,14 +58,12 @@ connection, redirects are validated independently, and IPv6 private and mapped a
 refused. Ambient proxies are not used. `max_bytes` cannot raise the configured output limit;
 oversized bodies fail while streaming, before HTML conversion. Risk: network — the only built-in tool at that level.
 
-**`todo`** — `action` (`set`, `start`, `done`, or `list`), `items` (for `set`), `target` (for
-`start`/`done`, an item's 1-based position or its exact text). A short plan kept in memory for
-the session only; nothing here is written to disk. `set` replaces the whole list; `start` marks
-one item doing and un-starts whatever was doing before, so only one item is ever in progress;
-`done` marks one item done. Every action returns the whole rendered list. Registered alongside
-the tools above in `src/app.rs` rather than returned with them, since it is built from session
-state instead of being stateless. Risk: read — it changes state kept for this session only,
-nothing outside it.
+**`todo`** — `todos`, the whole plan: a list of `{text, status}` where `status` is `pending`,
+`in_progress`, or `done`. Every call replaces the previous plan, and at most one item may be
+`in_progress`. It returns `N/M done` and emits a `todos` event with the list, which is what the
+roster draws; the tool itself holds no state, so each agent's plan lives in its own calls and
+a resumed session shows the last one. After eight calls with an open plan and no update, the
+agent appends a reminder to the next tool result, for the model only. Risk: read.
 
 ## From other subsystems
 

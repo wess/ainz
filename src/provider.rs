@@ -9,9 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode, header::RETRY_AFTER};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, header::RETRY_AFTER};
 use serde::Deserialize;
-use serde_json::json;
 use tokio::{
   io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
   process::Command,
@@ -31,7 +30,10 @@ mod stream;
 mod wire;
 
 use stream::{Completion, StreamState};
-use wire::{PartialCall, parse_data, parse_response, wire_message};
+use wire::{
+  ChatRequest, PartialCall, StreamOptions, WireTool, parse_data, parse_response, wire_error,
+  wire_message,
+};
 
 #[derive(Clone, Debug)]
 pub struct ProviderReply {
@@ -43,7 +45,7 @@ pub struct ProviderReply {
 pub trait ChatProvider: Send + Sync {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply>;
@@ -59,7 +61,7 @@ pub enum RuntimeProvider {
 impl ChatProvider for RuntimeProvider {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
@@ -78,18 +80,34 @@ fn retryable_status(status: StatusCode) -> bool {
     || status.is_server_error()
 }
 
+// a body that names one of these is refused for who is asking, not for how busy the server is,
+// so asking again only makes the person wait longer for the same sentence
+fn permanent_error(body: &str) -> bool {
+  let body = body.to_ascii_lowercase();
+  [
+    "access_denied",
+    "permission_denied",
+    "not entitled",
+    "insufficient_quota",
+    "invalid_api_key",
+  ]
+  .iter()
+  .any(|cause| body.contains(cause))
+}
+
 // Retry-After is sometimes an HTTP-date rather than a second count; that form is left alone
-// and the exponential backoff below is used instead of trying to parse it
-fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-  response
+// and the exponential backoff below is used instead of trying to parse it. a server asking for
+// longer than a minute gets a minute: a turn that silently sleeps for an hour looks hung
+fn retry_after(response: &Response) -> Option<Duration> {
+  let seconds = response
     .headers()
     .get(RETRY_AFTER)?
     .to_str()
     .ok()?
     .trim()
     .parse::<u64>()
-    .ok()
-    .map(Duration::from_secs)
+    .ok()?;
+  Some(Duration::from_secs(seconds.min(60)))
 }
 
 // 500ms, 1s, 2s, 4s, capped at 8s, jittered by roughly a quarter so a pile of retrying clients
@@ -114,6 +132,58 @@ fn format_wait(wait: Duration) -> String {
   }
 }
 
+// sends a request, and sends it again while the reason it failed might be gone a moment later.
+// `build` is a closure rather than a cloned builder because a body is consumed by the attempt
+// that used it. retrying stops at the response: once a stream under a success status starts
+// handing text to the caller, a retry would replay output somebody has already read
+async fn send(
+  what: &str,
+  retries: usize,
+  events: Option<&EventSink>,
+  build: impl Fn() -> RequestBuilder,
+) -> Result<Response> {
+  let attempts = retries + 1;
+  let mut attempt = 0usize;
+  loop {
+    attempt += 1;
+    let tries = match attempt {
+      1 => String::new(),
+      _ => format!(" after {attempt} attempts"),
+    };
+    let (wait, reason) = match build().send().await {
+      // a request that could not be built is the same request next time
+      Err(error) if error.is_builder() || attempt == attempts => {
+        return Err(error).with_context(|| format!("{what} failed{tries}"));
+      }
+      Err(error) => (backoff(attempt), error.to_string()),
+      Ok(response) if response.status().is_success() => return Ok(response),
+      Ok(response) => {
+        let status = response.status();
+        let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
+        let body = crate::output::response(response, 65_536)
+          .await
+          .unwrap_or_default();
+        let body = String::from_utf8_lossy(&body);
+        let error = wire_error(status, &body);
+        if !retryable_status(status) || permanent_error(&body) || attempt == attempts {
+          bail!("{what} failed{tries}: {error}");
+        }
+        (wait, error)
+      }
+    };
+    if let Some(events) = events {
+      events.emit(Event::Error {
+        message: format!(
+          "{what} failed ({reason}); retrying in {} (attempt {} of {attempts})",
+          format_wait(wait),
+          attempt + 1,
+        ),
+      });
+    }
+    tokio::time::sleep(wait).await;
+  }
+}
+
 #[derive(Clone)]
 pub struct HttpProvider {
   client: Client,
@@ -130,9 +200,12 @@ impl HttpProvider {
     api_key: Option<String>,
     retries: usize,
   ) -> Result<Self> {
-    // NB: no read timeout on purpose; a local model can sit for minutes before its first token
+    // no overall timeout, because a local model can sit for minutes before its first token; a
+    // stream silent for five, though, is a connection that died under it (a laptop that slept,
+    // a gateway that dropped it) and would otherwise hang the turn for ever
     let client = Client::builder()
       .connect_timeout(Duration::from_secs(15))
+      .read_timeout(Duration::from_secs(300))
       .build()
       .context("build HTTP client")?;
     Ok(Self {
@@ -155,50 +228,13 @@ impl HttpProvider {
       id: String,
     }
 
-    let attempts = self.retries + 1;
-    let mut attempt = 0usize;
     // discovery runs during setup, before an agent (and its event sink) exists, so a retry
     // here has nothing to report through — only the eventual outcome is visible to the caller
-    let response = loop {
-      attempt += 1;
-      let mut request = self.client.get(format!("{}/models", self.endpoint));
-      if let Some(key) = &self.api_key {
-        request = request.bearer_auth(key);
-      }
-      let response = match request.send().await {
-        Ok(response) => response,
-        Err(error) => {
-          if attempt < attempts {
-            tokio::time::sleep(backoff(attempt)).await;
-            continue;
-          }
-          return if attempt == 1 {
-            Err(error).context("list provider models")
-          } else {
-            Err(error).with_context(|| format!("list provider models after {attempts} attempts"))
-          };
-        }
-      };
-      let status = response.status();
-      if status.is_success() {
-        break response;
-      }
-      if retryable_status(status) && attempt < attempts {
-        let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
-        tokio::time::sleep(wait).await;
-        continue;
-      }
-      let text = String::from_utf8_lossy(
-        &crate::output::response(response, 2048)
-          .await
-          .unwrap_or_default(),
-      )
-      .into_owned();
-      if attempt == 1 {
-        bail!("model discovery failed ({status}): {text}");
-      }
-      bail!("model discovery failed ({status}) after {attempt} attempts: {text}");
-    };
+    let url = format!("{}/models", self.endpoint);
+    let response = send("model discovery", self.retries, None, || {
+      self.authorize(self.client.get(&url))
+    })
+    .await?;
     let mut models: Vec<_> =
       serde_json::from_slice::<ModelList>(&crate::output::response(response, MAX_TRANSFER).await?)
         .context("invalid model list")?
@@ -210,92 +246,47 @@ impl HttpProvider {
     models.dedup();
     Ok(models)
   }
+
+  fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
+    match &self.api_key {
+      Some(key) => request.bearer_auth(key),
+      None => request,
+    }
+  }
 }
 
 #[async_trait]
 impl ChatProvider for HttpProvider {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
-    let mut body = json!({
-      "model": self.model,
-      "messages": messages.iter().map(wire_message).collect::<Vec<_>>(),
-      "stream": true,
-      "stream_options": {"include_usage": true},
-    });
-    // an empty tools array with tool_choice is rejected by several OpenAI-compatible servers
-    if !tools.is_empty() {
-      body["tools"] = tools
+    let request = ChatRequest {
+      model: &self.model,
+      messages: messages
         .iter()
-        .map(|tool| json!({"type": "function", "function": tool}))
-        .collect();
-      body["tool_choice"] = json!("auto");
-    }
-    let attempts = self.retries + 1;
-    let mut attempt = 0usize;
-    // retrying only covers getting a response with a success status: once the stream below
-    // starts handing text to `events`, a retry would replay output the caller already saw
-    let response = loop {
-      attempt += 1;
-      let mut request = self
-        .client
-        .post(format!("{}/chat/completions", self.endpoint))
-        .json(&body);
-      if let Some(key) = &self.api_key {
-        request = request.bearer_auth(key);
-      }
-      let response = match request.send().await {
-        Ok(response) => response,
-        Err(error) => {
-          if attempt < attempts {
-            let wait = backoff(attempt);
-            events.emit(Event::Error {
-              message: format!(
-                "model request failed ({error}); retrying in {} (attempt {} of {attempts})",
-                format_wait(wait),
-                attempt + 1,
-              ),
-            });
-            tokio::time::sleep(wait).await;
-            continue;
-          }
-          return if attempt == 1 {
-            Err(error).context("send model request")
-          } else {
-            Err(error).with_context(|| format!("send model request after {attempts} attempts"))
-          };
-        }
-      };
-      let status = response.status();
-      if status.is_success() {
-        break response;
-      }
-      if retryable_status(status) && attempt < attempts {
-        let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
-        events.emit(Event::Error {
-          message: format!(
-            "model request failed ({status}); retrying in {} (attempt {} of {attempts})",
-            format_wait(wait),
-            attempt + 1,
-          ),
-        });
-        tokio::time::sleep(wait).await;
-        continue;
-      }
-      let text = String::from_utf8_lossy(
-        &crate::output::response(response, 2048)
-          .await
-          .unwrap_or_default(),
-      )
-      .into_owned();
-      if attempt == 1 {
-        bail!("model request failed ({status}): {text}");
-      }
-      bail!("model request failed ({status}) after {attempt} attempts: {text}");
+        .map(|message| wire_message(message))
+        .collect(),
+      stream: true,
+      stream_options: StreamOptions {
+        include_usage: true,
+      },
+      tools: tools.iter().map(WireTool::new).collect(),
+      tool_choice: (!tools.is_empty()).then_some("auto"),
     };
+    // serialized once; a retry sends the same bytes again rather than encoding them anew
+    let body = bytes::Bytes::from(serde_json::to_vec(&request)?);
+    drop(request);
+    let url = format!("{}/chat/completions", self.endpoint);
+    let response = send("model request", self.retries, Some(events), || {
+      self
+        .authorize(self.client.post(&url))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.clone())
+    })
+    .await?;
 
     let streaming = response
       .headers()
@@ -304,8 +295,7 @@ impl ChatProvider for HttpProvider {
       .is_some_and(|value| value.contains("text/event-stream"));
     if !streaming {
       return parse_response(
-        serde_json::from_slice(&crate::output::response(response, MAX_TRANSFER).await?)
-          .context("invalid model response")?,
+        &crate::output::response(response, MAX_TRANSFER).await?,
         events,
       );
     }
@@ -415,10 +405,12 @@ impl ProcessProvider {
 impl ChatProvider for ProcessProvider {
   async fn complete(
     &self,
-    messages: &[Message],
+    messages: &[&Message],
     _tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
+    // built first so a turn the command cannot take fails before anything is started
+    let prompt = render_prompt(messages, &self.command)?;
     let mut child = Command::new(&self.command)
       .args(self.args())
       .current_dir(&self.workspace)
@@ -442,7 +434,6 @@ impl ChatProvider for ProcessProvider {
       .stderr
       .take()
       .context("provider command stderr was unavailable")?;
-    let prompt = render_prompt(messages);
     // the prompt is fed while output drains, so a chatty command cannot fill its pipe and stall.
     // a write error is left to the exit status: a command that quit early explains itself on stderr
     let feed = async move {
@@ -524,7 +515,10 @@ impl ChatProvider for ProcessProvider {
   }
 }
 
-fn render_prompt(messages: &[Message]) -> String {
+// an image only survives if it is something the command can fetch for itself: inline data has
+// nowhere to go in a text prompt, and dropping it silently would answer a question about a
+// picture nobody sent
+fn render_prompt(messages: &[&Message], command: &str) -> Result<String> {
   let mut prompt = String::new();
   for message in messages {
     let role = match message.role {
@@ -542,10 +536,22 @@ fn render_prompt(messages: &[Message]) -> String {
     for call in &message.tool_calls {
       prompt.push_str(&format!("tool call {}: {}\n", call.name, call.arguments));
     }
-    if !message.images.is_empty() {
-      prompt.push_str("[image content omitted by process provider]\n");
+    for image in &message.images {
+      if image.url.starts_with("data:") {
+        bail!(
+          "{command} takes a text prompt, so the image in this turn cannot be sent. Ask about \
+           it with a provider that accepts images, or give the command the file path instead."
+        );
+      }
+      prompt.push_str("[image: ");
+      prompt.push_str(&image.url);
+      prompt.push_str("]\n");
     }
     prompt.push('\n');
   }
-  prompt
+  Ok(prompt)
 }
+
+#[cfg(test)]
+#[path = "../tests/provider/retry.rs"]
+mod retrying;

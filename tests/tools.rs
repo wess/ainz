@@ -141,6 +141,43 @@ async fn shell_timeout_takes_the_whole_process_tree_down() {
 }
 
 #[tokio::test]
+async fn a_background_process_does_not_hold_the_shell_answer_hostage() {
+  let temp = tempfile::tempdir().unwrap();
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 4096);
+  let shell = builtins()
+    .into_iter()
+    .find(|tool| tool.spec().name == "shell")
+    .unwrap();
+  let started = std::time::Instant::now();
+  let output = shell
+    .execute(
+      &context,
+      json!({"command": "echo up; sleep 30 &", "timeout_ms": 20000}),
+    )
+    .await
+    .unwrap();
+  assert!(started.elapsed() < std::time::Duration::from_secs(5));
+  assert_eq!(output, "up\n[exit 0]");
+}
+
+#[tokio::test]
+async fn a_truncated_shell_output_keeps_its_exit_status() {
+  let temp = tempfile::tempdir().unwrap();
+  let context = ToolContext::new(temp.path().into(), uuid::Uuid::nil(), 1024);
+  let shell = builtins()
+    .into_iter()
+    .find(|tool| tool.spec().name == "shell")
+    .unwrap();
+  let output = shell
+    .execute(&context, json!({"command": "seq 1 100000; exit 4"}))
+    .await
+    .unwrap();
+  assert!(output.contains("[output truncated]"), "{output}");
+  assert!(output.ends_with("[exit 4]"), "{output}");
+  assert!(output.len() < 1100, "{}", output.len());
+}
+
+#[tokio::test]
 async fn read_returns_the_requested_window_of_lines() {
   let temp = tempfile::tempdir().unwrap();
   let text: String = (1..=50).map(|n| format!("line {n}\n")).collect();

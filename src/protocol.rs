@@ -97,6 +97,10 @@ impl Message {
   }
 }
 
+/// The key a provider files a call's raw arguments under when they were not valid JSON. The
+/// call is kept rather than failing the reply, so the model can be told and try again.
+pub const INVALID_ARGUMENTS: &str = "_invalid_arguments";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
   pub id: String,

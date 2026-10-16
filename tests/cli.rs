@@ -584,3 +584,83 @@ async fn sessions_export_writes_the_active_path_and_defaults_to_the_latest_sessi
   let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
   assert_eq!(rows[0]["id"], session.id.to_string());
 }
+
+#[tokio::test]
+async fn rpc_mode_survives_bad_input_ignores_notifications_and_stops_mid_run() {
+  // a provider that takes the request and never answers, so the run is still in flight when
+  // shutdown arrives
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (socket, _) = listener.accept().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    drop(socket);
+  });
+  let mut child = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .args([
+      "--model",
+      "test",
+      "--endpoint",
+      &format!("http://{address}"),
+      "rpc",
+      "--no-save",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+  let mut stdin = child.stdin.take().unwrap();
+  let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+  let mut reply = async move || loop {
+    let line = lines.next_line().await.unwrap().expect("rpc closed stdout");
+    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+    if value.get("method").is_none() {
+      return value;
+    }
+  };
+
+  stdin
+    .write_all(b"{\"id\":1,\"method\":\"\xff\"}\n")
+    .await
+    .unwrap();
+  let rejected = reply().await;
+  assert_eq!(rejected["error"]["code"], -32700, "{rejected}");
+  assert!(rejected["id"].is_null());
+
+  // a notification is not answered, so the next reply is the one to the request after it
+  stdin
+    .write_all(
+      b"{\"jsonrpc\":\"2.0\",\"method\":\"cancel\"}\n{\"id\":\"s\",\"method\":\"state\"}\n",
+    )
+    .await
+    .unwrap();
+  assert_eq!(reply().await["id"], "s");
+
+  stdin
+    .write_all(b"{\"id\":1,\"method\":\"prompt\",\"params\":{\"prompt\":\"hello\"}}\n")
+    .await
+    .unwrap();
+  tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+  stdin
+    .write_all(b"{\"id\":2,\"method\":\"shutdown\"}\n")
+    .await
+    .unwrap();
+  let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let first = reply().await;
+    let second = reply().await;
+    (first, second)
+  })
+  .await
+  .expect("shutdown did not end the run");
+  assert_eq!(stopped.0["id"], 2, "{stopped:?}");
+  assert_eq!(stopped.0["result"]["shutdown"], true, "{stopped:?}");
+  assert_eq!(stopped.1["id"], 1, "{stopped:?}");
+  let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+    .await
+    .expect("rpc did not exit after shutdown")
+    .unwrap();
+  assert!(status.success());
+  server.abort();
+}

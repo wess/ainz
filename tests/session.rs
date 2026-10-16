@@ -56,6 +56,49 @@ fn compaction_is_branch_aware() {
   assert_eq!(branch[0].role, Role::User);
 }
 
+#[test]
+fn one_prompt_with_many_tool_rounds_still_compacts() {
+  let mut session = Session::new(PathBuf::from("/workspace"));
+  session.append(Message::text(Role::User, "do the long thing"));
+  for index in 0..12 {
+    let mut call = Message::text(Role::Assistant, "");
+    call.tool_calls.push(ainz::protocol::ToolCall {
+      id: format!("call-{index}"),
+      name: "read".into(),
+      arguments: serde_json::json!({"path": "a"}),
+    });
+    session.append(call);
+    session.append(Message::tool(format!("call-{index}"), "contents"));
+  }
+  let (cursor, _, archived) = session.compaction_input(4).unwrap().unwrap();
+  assert!(archived > 2);
+  session
+    .record_summary(cursor, "what happened".into())
+    .unwrap();
+
+  // the kept tail opens with an assistant reply, so the summary has to be the user turn
+  let context = session.context_messages().unwrap();
+  assert_eq!(context[0].role, Role::User);
+  assert_eq!(context[1].role, Role::Assistant);
+  // and no tool result is ever kept without the call that asked for it
+  let first_call = context[1].tool_calls[0].id.clone();
+  assert_eq!(
+    context[2].tool_call_id.as_deref(),
+    Some(first_call.as_str())
+  );
+}
+
+#[test]
+fn a_session_whose_parents_loop_is_an_error_not_a_hang() {
+  let mut session = Session::new(PathBuf::from("/workspace"));
+  let first = session.append(Message::text(Role::User, "one"));
+  let second = session.append(Message::text(Role::Assistant, "two"));
+  // only a damaged file holds this: the first node claims the second as its parent
+  session.nodes[0].parent = Some(second);
+  session.checkout(Some(first)).unwrap();
+  assert!(session.messages().is_err());
+}
+
 #[tokio::test]
 async fn sessions_are_searchable_after_the_fact() {
   let temp = tempfile::tempdir().unwrap();

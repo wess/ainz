@@ -8,11 +8,18 @@ use tokio::{
 };
 
 use super::RpcResponse;
-use crate::mcp::McpServerConfig;
+use crate::{
+  mcp::McpServerConfig,
+  process::{GroupGuard, kill_tree},
+};
 
 const MAX_LINE: u64 = 16 * 1024 * 1024;
 
 pub(super) struct StdioTransport {
+  // a server started through npx or a shell is a tree, and dropping the transport takes all
+  // of it rather than only the process that was spawned
+  _group: GroupGuard,
+  pid: Option<u32>,
   child: Child,
   stdin: ChildStdin,
   stdout: BufReader<ChildStdout>,
@@ -31,20 +38,35 @@ impl StdioTransport {
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::null())
-      .kill_on_drop(true);
+      .kill_on_drop(true)
+      .process_group(0);
     if let Some(cwd) = &config.cwd {
       command.current_dir(cwd);
     }
     let mut child = command
       .spawn()
       .with_context(|| format!("start server {name}"))?;
+    let pid = child.id();
     let stdin = child.stdin.take().context("server stdin unavailable")?;
     let stdout = BufReader::new(child.stdout.take().context("server stdout unavailable")?);
     Ok(Self {
+      _group: GroupGuard::new(pid),
+      pid,
       child,
       stdin,
       stdout,
     })
+  }
+
+  pub fn pid(&self) -> Option<u32> {
+    self.pid
+  }
+
+  // a server that stopped answering is ended now, not whenever the hub next needs it
+  pub fn stop(&self) {
+    if let Some(pid) = self.pid {
+      kill_tree(pid);
+    }
   }
 
   // a server that quit between requests is noticed before anything is sent to it
@@ -81,13 +103,17 @@ impl StdioTransport {
       if response.answers(id) {
         return Ok(Some(response));
       }
-      if response.id.is_some() && response.method.is_some() {
-        self
-          .write(&json!({
-            "jsonrpc": "2.0", "id": response.id,
+      // a server waiting on its own request would otherwise wait for ever. ping is the one
+      // thing a client offers without a capability, so it gets a real answer
+      if let (Some(request), Some(method)) = (&response.id, &response.method) {
+        let answer = match method.as_str() {
+          "ping" => json!({"jsonrpc": "2.0", "id": request, "result": {}}),
+          _ => json!({
+            "jsonrpc": "2.0", "id": request,
             "error": {"code": -32601, "message": "client method not supported"}
-          }))
-          .await?;
+          }),
+        };
+        self.write(&answer).await?;
       }
     }
   }
