@@ -651,7 +651,7 @@ async fn merge_plugin_mcp(profile: &mut McpProfile, plugin: &DiscoveredPlugin) -
         env.insert("PLUGIN_DATA".into(), data_text.to_string());
         let cwd = server
           .cwd
-          .map(&expand)
+          .map(expand)
           .map(PathBuf::from)
           .unwrap_or_else(|| root.to_path_buf());
         if cwd.components().any(|part| part == Component::ParentDir)
