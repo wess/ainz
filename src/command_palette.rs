@@ -33,6 +33,42 @@ impl SlashCommand {
 pub fn builtins() -> Vec<SlashCommand> {
   [
     (
+      "detach",
+      "/detach",
+      "Leave this agent running and return to the shell",
+      "session",
+    ),
+    (
+      "sessions",
+      "/sessions",
+      "Search and switch live sessions",
+      "session",
+    ),
+    (
+      "attention",
+      "/attention",
+      "Visit approvals, unseen failures and completions",
+      "session",
+    ),
+    (
+      "rename",
+      "/rename <NAME>",
+      "Name this session for easy reconnection",
+      "session",
+    ),
+    (
+      "statusline",
+      "/statusline [FIELDS|reset|off]",
+      "Choose and order status bar fields",
+      "view",
+    ),
+    (
+      "statusbar",
+      "/statusbar [FIELDS|reset|off]",
+      "Choose and order status bar fields",
+      "view",
+    ),
+    (
       "agent",
       "/agent <N>",
       "Switch to an agent transcript",
@@ -55,7 +91,7 @@ pub fn builtins() -> Vec<SlashCommand> {
     (
       "config",
       "/config",
-      "Configure providers and models",
+      "Open searchable settings and shortcuts",
       "config",
     ),
     ("exit", "/exit", "Save and exit Ainz", "session"),

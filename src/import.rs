@@ -480,6 +480,8 @@ struct ClaudeProject {
 
 #[derive(Clone, Deserialize)]
 struct ExternalServer {
+  #[serde(default, rename = "type")]
+  transport: Option<String>,
   #[serde(default)]
   command: Option<String>,
   #[serde(default)]
@@ -498,7 +500,7 @@ struct ExternalServer {
 
 impl From<ExternalServer> for McpServerConfig {
   fn from(server: ExternalServer) -> Self {
-    server_config(
+    let mut config = server_config(
       server.command,
       server.args,
       server.env,
@@ -506,7 +508,11 @@ impl From<ExternalServer> for McpServerConfig {
       server.headers,
       server.cwd,
       server.disabled.map(|disabled| !disabled),
-    )
+    );
+    if server.transport.as_deref() == Some("sse") {
+      config.transport = McpTransport::Sse;
+    }
+    config
   }
 }
 
@@ -557,7 +563,6 @@ fn server_config(
   cwd: Option<PathBuf>,
   enabled: Option<bool>,
 ) -> McpServerConfig {
-  // other harnesses distinguish sse from streamable http; Ainz speaks one HTTP transport
   let transport = if command.is_some() {
     McpTransport::Stdio
   } else {

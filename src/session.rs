@@ -17,6 +17,7 @@ use crate::{
   tool::{Risk, Tool, ToolContext, truncate},
 };
 
+mod checkpoint;
 mod write;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +37,8 @@ pub struct SessionSummary {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub label: Option<String>,
   pub id: Uuid,
   #[serde(default)]
   pub parent_id: Option<Uuid>,
@@ -54,6 +57,7 @@ impl Session {
   pub fn new(workspace: PathBuf) -> Self {
     let now = now();
     Self {
+      label: None,
       id: Uuid::now_v7(),
       parent_id: None,
       workspace,
@@ -64,6 +68,21 @@ impl Session {
       summaries: Vec::new(),
       usage: Usage::default(),
     }
+  }
+
+  pub fn title(&self) -> String {
+    self.label.clone().unwrap_or_else(|| {
+      self
+        .nodes
+        .iter()
+        .find(|node| node.message.role == Role::User)
+        .and_then(|node| node.message.content.as_deref())
+        .unwrap_or("new session")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(120)
+        .collect()
+    })
   }
 
   pub fn child(workspace: PathBuf, parent_id: Uuid) -> Self {
@@ -317,6 +336,7 @@ fn export_node(node: &SessionNode) -> String {
 // what a listing needs, read without materializing every message or attachment
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionInfo {
+  pub label: Option<String>,
   pub id: Uuid,
   pub parent_id: Option<Uuid>,
   pub workspace: PathBuf,
@@ -328,6 +348,8 @@ pub struct SessionInfo {
 
 #[derive(Deserialize)]
 struct SessionHead {
+  #[serde(default)]
+  label: Option<String>,
   id: Uuid,
   #[serde(default)]
   parent_id: Option<Uuid>,
@@ -343,6 +365,7 @@ struct SessionHead {
 impl From<SessionHead> for SessionInfo {
   fn from(head: SessionHead) -> Self {
     Self {
+      label: head.label,
       id: head.id,
       parent_id: head.parent_id,
       workspace: head.workspace,

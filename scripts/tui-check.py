@@ -91,7 +91,7 @@ class Stream(pyte.ByteStream):
 class Terminal:
     """A pty with a VT model of what was drawn in it."""
 
-    def __init__(self, binary, root, config, answers=True):
+    def __init__(self, binary, root, config, answers=True, args=None, env=None):
         self.answers = answers
         self.screen = Screen(COLS, ROWS)
         self.stream = Stream(self.screen)
@@ -101,10 +101,11 @@ class Terminal:
             os.chdir(root)
             os.execve(
                 binary,
-                ["ainz"],
+                ["ainz", *(args or [])],
                 dict(
-                    os.environ,
+                    {**os.environ, **(env or {})},
                     TERM="xterm-256color",
+                    NO_COLOR="",
                     AINZ_CONFIG=os.path.join(root, config),
                     PATH=os.path.join(root, ".fixtures") + os.pathsep + os.environ.get("PATH", ""),
                 ),
@@ -322,7 +323,7 @@ def check_setup(binary, root):
     print("\nprovider setup")
     term = Terminal(binary, root, "config.toml")
     term.pump(6.0)
-    term.send("/config" + ENTER, settle=1.5)
+    term.send("/model" + ENTER, settle=1.5)
     check("the provider list opens", "Claude Code" in term.body(), term.body()[:600])
     check("and offers a custom process", "Custom process" in term.body(), term.body()[:600])
     for _ in range(12):
@@ -366,7 +367,7 @@ def check_model_list(binary, root):
 
     term = Terminal(binary, root, "config.toml")
     term.pump(6.0)
-    term.send("/config" + ENTER, settle=1.5)
+    term.send("/model" + ENTER, settle=1.5)
     for _ in range(12):
         if "Compatible endpoint" in term.body():
             break

@@ -206,6 +206,7 @@ fn render_list(frame: &mut Frame, profile: &McpProfile, names: &[String], select
     let transport = match config.transport {
       McpTransport::Stdio => "stdio",
       McpTransport::StreamableHttp => "http",
+      McpTransport::Sse => "sse",
     };
     ListItem::new(Line::from(vec![
       Span::styled(
@@ -255,6 +256,7 @@ fn render_detail(frame: &mut Frame, name: &str, config: &McpServerConfig, select
   let protocol = match config.transport {
     McpTransport::Stdio => "stdio",
     McpTransport::StreamableHttp => "streamable HTTP",
+    McpTransport::Sse => "HTTP + SSE",
   };
   let endpoint = config.url.as_deref().unwrap_or_else(|| {
     config

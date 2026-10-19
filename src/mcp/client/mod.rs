@@ -1,4 +1,5 @@
 mod http;
+mod sse;
 mod stdio;
 
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub(super) struct Client {
 enum Transport {
   Stdio(stdio::StdioTransport),
   Http(http::HttpTransport),
+  Sse(sse::SseClient),
 }
 
 impl Transport {
@@ -32,13 +34,56 @@ impl Transport {
     match self {
       Self::Stdio(transport) => transport.exchange(message, id).await,
       Self::Http(transport) => transport.exchange(message, id).await,
+      Self::Sse(transport) => transport.exchange(message, id).await,
     }
   }
 }
 
 impl Client {
   pub async fn start(name: &str, config: &McpServerConfig) -> Result<Self> {
+    let mut expanded = config.expanded()?;
+    if expanded.transport != McpTransport::Stdio
+      && !expanded
+        .headers
+        .keys()
+        .chain(expanded.header_env.keys())
+        .any(|key| key.eq_ignore_ascii_case("authorization"))
+    {
+      let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+      if let Some(bearer) = super::oauth::bearer(
+        name,
+        expanded
+          .url
+          .as_deref()
+          .context("remote MCP server requires a URL")?,
+        &http,
+      )
+      .await?
+      {
+        expanded.headers.insert("authorization".into(), bearer);
+      }
+    }
+    let config = &expanded;
     let transport = match config.transport {
+      McpTransport::Sse => {
+        let mut headers = config.headers.clone();
+        for (name, variable) in &config.header_env {
+          headers.insert(
+            name.clone(),
+            std::env::var(variable)
+              .with_context(|| format!("environment variable {variable} is required"))?,
+          );
+        }
+        Transport::Sse(
+          sse::SseClient::connect(
+            config.url.as_deref().context("SSE server requires a URL")?,
+            &headers,
+          )
+          .await?,
+        )
+      }
       McpTransport::Stdio => Transport::Stdio(stdio::StdioTransport::start(name, config)?),
       McpTransport::StreamableHttp => Transport::Http(http::HttpTransport::new(config)?),
     };
@@ -85,6 +130,7 @@ impl Client {
       || match &mut self.transport {
         Transport::Stdio(transport) => !transport.alive(),
         Transport::Http(_) => false,
+        Transport::Sse(transport) => !transport.alive(),
       }
   }
 
@@ -92,13 +138,15 @@ impl Client {
   pub fn pid(&self) -> Option<u32> {
     match &self.transport {
       Transport::Stdio(transport) => transport.pid(),
-      Transport::Http(_) => None,
+      Transport::Http(_) | Transport::Sse(_) => None,
     }
   }
 
   fn stop(&self) {
-    if let Transport::Stdio(transport) = &self.transport {
-      transport.stop();
+    match &self.transport {
+      Transport::Stdio(transport) => transport.stop(),
+      Transport::Sse(transport) => transport.shutdown(),
+      Transport::Http(_) => {}
     }
   }
 

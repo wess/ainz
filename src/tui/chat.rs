@@ -86,6 +86,9 @@ enum Wake {
   Tick,
   // a second passed on a running turn
   Clock,
+  Redraw(Option<crate::live::Control>),
+  Live(Vec<crate::live::Info>),
+  Branch(Option<String>),
 }
 
 struct CommandData {
@@ -315,6 +318,10 @@ impl AgentView {
 }
 
 struct ChatState {
+  live_hint: Option<String>,
+  attention: (usize, usize, usize),
+  branch: Option<String>,
+  session_name: Option<String>,
   input: Input,
   primary: AgentView,
   agents: BTreeMap<String, AgentView>,
@@ -375,6 +382,10 @@ impl Default for ChatState {
       scroll: Cell::new(Scroll::Follow),
       scroll_delta: Cell::new(0),
       page: Cell::new(0),
+      live_hint: None,
+      attention: (0, 0, 0),
+      branch: None,
+      session_name: None,
       outcome: None,
       started: None,
       cancelled: false,
@@ -540,10 +551,11 @@ pub(crate) async fn run_chat(
   config: &mut Config,
   initial_session: Session,
   initial_prompt: Option<String>,
+  link: &mut Option<crate::live::Link>,
 ) -> Result<ChatOutcome> {
   // inline keeps the terminal's own scrollback; the full screen keeps the roster beside the talk
   let mut notice = None;
-  let (mut terminal, inline) = match config.ui.inline {
+  let (mut terminal, inline) = match config.ui.inline && link.is_none() {
     // the inline viewport has to ask the terminal where the cursor is; not every terminal, pipe
     // or multiplexer answers, and a session that cannot start is worse than one drawn the old way
     true => match enter_inline_terminal(INLINE_ROWS) {
@@ -563,8 +575,8 @@ pub(crate) async fn run_chat(
     config,
     initial_session,
     initial_prompt,
-    inline,
-    notice,
+    (inline, notice),
+    link,
   )
   .await;
   leave_terminal(&mut terminal)?;
@@ -641,9 +653,10 @@ async fn run_chat_inner(
   config: &mut Config,
   initial_session: Session,
   initial_prompt: Option<String>,
-  inline: bool,
-  notice: Option<String>,
+  viewport: (bool, Option<String>),
+  link: &mut Option<crate::live::Link>,
 ) -> Result<ChatOutcome> {
+  let (inline, notice) = viewport;
   let (tx, mut rx) = mpsc::unbounded_channel();
   let events_tx = tx.clone();
   let events = EventSink::new(move |event| drop(events_tx.send(UiEvent::Agent(event))));
@@ -734,6 +747,8 @@ async fn run_chat_inner(
     headers: header_catalog,
   };
   let mut agent = Some(built_agent);
+  let mut live_title = initial_session.title();
+  let mut live_label = initial_session.label.clone();
   let mut session = Some(initial_session);
   let session_id = session.as_ref().unwrap().id;
   let previous_prompts =
@@ -771,6 +786,13 @@ async fn run_chat_inner(
       .unwrap_or_default()
   };
   let mut state = ChatState {
+    live_hint: link.as_ref().map(|_| {
+      format!(
+        "  ·  {} detach  ·  {} sessions",
+        ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Detach),
+        ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Sessions)
+      )
+    }),
     input: Input::with_history(history),
     inline,
     files,
@@ -826,6 +848,10 @@ async fn run_chat_inner(
   // one.
   let mut painted = Instant::now() - FRAME;
   let mut dirty = true;
+  let mut stopping = false;
+  let mut resolver = ainz::keybind::Resolver::default();
+  let mut monitor = crate::live::attention::monitor().await.ok();
+  let mut branch = super::context::branch(&workspace).await;
   // the only thing on screen that moves by itself is the seconds count on a running turn
   let mut clock = tokio::time::interval(CLOCK);
   clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -838,6 +864,31 @@ async fn run_chat_inner(
       };
       apply_event(&mut state, message);
       dirty = true;
+    }
+    if let Some(session) = &session {
+      live_title = session.title();
+      live_label = session.label.clone();
+      state.session_name = Some(live_title.clone());
+    }
+    if let Some(link) = link.as_mut() {
+      let phase = if state.approval.is_some() {
+        "needs approval"
+      } else if state.busy() {
+        "running"
+      } else if matches!(state.outcome, Some((RunStatus::Failed, _))) {
+        "failed run"
+      } else if state.outcome.is_some() {
+        "finished run"
+      } else {
+        "ready"
+      };
+      link.state(
+        current_id,
+        live_title.clone(),
+        live_label.clone(),
+        phase,
+        &config.ui,
+      );
     }
     if dirty && painted.elapsed() >= FRAME {
       let drawn = flush_scrollback(terminal, &mut state).and_then(|()| {
@@ -879,10 +930,53 @@ async fn run_chat_inner(
       message = rx.recv() => Wake::Agent(message),
       joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
       event = input.next() => Wake::Input(event),
+      redraw = async { match link.as_mut() { Some(link) => link.redraw.recv().await, None => std::future::pending().await } }, if link.is_some() => Wake::Redraw(redraw),
+      infos = async { match monitor.as_mut() { Some(monitor) => monitor.updates.recv().await, None => std::future::pending().await } }, if monitor.is_some() => Wake::Live(infos.unwrap_or_default()),
+      name = async { match branch.as_mut() { Some(branch) => branch.updates.recv().await, None => std::future::pending().await } }, if branch.is_some() => Wake::Branch(name.flatten()),
       _ = clock.tick(), if ticking => Wake::Clock,
       () = tokio::time::sleep(idle) => Wake::Tick,
     };
-    let key = match wake {
+    let mut key = match wake {
+      Wake::Live(infos) => {
+        state.attention = crate::live::attention::counts(
+          &infos,
+          link.as_ref().map(|link| link.id).unwrap_or(Uuid::nil()),
+        );
+        dirty = true;
+        continue;
+      }
+      Wake::Branch(name) => {
+        state.branch = name;
+        dirty = true;
+        continue;
+      }
+      Wake::Redraw(Some(crate::live::Control::Stop)) => {
+        if let Some(controller) = &controller {
+          stopping = true;
+          state.cancelled = true;
+          controller.cancel();
+          continue;
+        }
+        return Ok(ChatOutcome {
+          session: session.take().context("session unavailable")?,
+          next: ChatNext::Quit,
+        });
+      }
+      Wake::Redraw(request) => {
+        if request.is_none() {
+          anyhow::bail!("background host disconnected");
+        }
+        terminal.swap_buffers();
+        terminal.swap_buffers();
+        crossterm::execute!(
+          terminal.backend_mut(),
+          crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+          crossterm::event::EnableBracketedPaste,
+          crossterm::event::EnableMouseCapture
+        )?;
+        dirty = true;
+        continue;
+      }
       Wake::Agent(Some(message)) => {
         apply_event(&mut state, message);
         dirty = true;
@@ -954,6 +1048,12 @@ async fn run_chat_inner(
           drop(std::io::Write::flush(&mut out));
         }
         state.finish_run(result);
+        if stopping {
+          return Ok(ChatOutcome {
+            session: session.take().context("session unavailable")?,
+            next: ChatNext::Quit,
+          });
+        }
         continue;
       }
       Wake::Input(Some(Ok(InputEvent::Key(key)))) if key.kind != KeyEventKind::Release => {
@@ -1037,6 +1137,87 @@ async fn run_chat_inner(
       }
     };
     state.header_preview = false;
+    use ainz::keybind::{Action as KeyAction, Match};
+    let action = resolver.resolve(&config.ui.keybindings, key, state.approval.is_some());
+    match action {
+      Match::Prefix => continue,
+      Match::Action(action) if action.live() => {
+        let action = match action {
+          KeyAction::Detach => crate::live::Action::Detach,
+          KeyAction::Sessions => crate::live::Action::Sessions,
+          KeyAction::NewSession => crate::live::Action::New,
+          KeyAction::NextSession => crate::live::Action::Next,
+          KeyAction::PreviousSession => crate::live::Action::Previous,
+          _ => crate::live::Action::Attention,
+        };
+        if let Some(link) = link.as_ref() {
+          link.action(action);
+        } else {
+          state.primary.entries.push(Entry::new(
+            EntryKind::System,
+            "Enable Background sessions in /settings, then restart; or launch ainz --detach."
+              .into(),
+          ));
+        }
+        continue;
+      }
+      Match::Action(KeyAction::Settings) => {
+        if state.busy() {
+          state.primary.entries.push(Entry::new(
+            EntryKind::System,
+            "Open settings after this run finishes; /detach leaves it working.".into(),
+          ));
+          continue;
+        }
+        return Ok(ChatOutcome {
+          session: session.take().context("session unavailable")?,
+          next: ChatNext::Settings,
+        });
+      }
+      Match::Action(KeyAction::Interrupt) if state.approval.is_some() => {
+        if let Some(controller) = &controller {
+          controller.cancel();
+          state.cancelled = true;
+        }
+        if let Some(approval) = state.approval.take() {
+          let _ = approval.reply.send(false);
+        }
+        state.waiting.clear();
+        continue;
+      }
+      Match::Action(KeyAction::Quit) => {
+        if !state.busy() && state.input.as_str().is_empty() {
+          return Ok(ChatOutcome {
+            session: session.take().context("session unavailable")?,
+            next: ChatNext::Quit,
+          });
+        }
+        continue;
+      }
+      Match::Action(KeyAction::Permissions) => {
+        config.permissions = match config.permissions {
+          PermissionMode::Ask => PermissionMode::Auto,
+          PermissionMode::Auto => PermissionMode::ReadOnly,
+          PermissionMode::ReadOnly => PermissionMode::Ask,
+        };
+        config.yeet = false;
+        options.permissions = config.permissions;
+        remember(&mut state, config).await;
+        continue;
+      }
+      Match::Action(action) => {
+        key = ainz::keybind::parse(action.default_key())?[0];
+      }
+      Match::None => {
+        if ainz::keybind::Action::ALL.into_iter().any(|action| {
+          config.ui.keybindings.contains_key(&action)
+            && ainz::keybind::parse(action.default_key())
+              .is_ok_and(|keys| keys.as_slice() == [ainz::keybind::normalize(key)])
+        }) {
+          continue;
+        }
+      }
+    }
     if let Some(approval) = state.approval.take() {
       match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1266,6 +1447,87 @@ async fn run_chat_inner(
       }
       KeyCode::Enter if state.active.is_none() && !state.input.as_str().trim().is_empty() => {
         let input = state.input.submit();
+        let live_action = match input.trim() {
+          "/detach" => Some(crate::live::Action::Detach),
+          "/sessions" => Some(crate::live::Action::Sessions),
+          "/attention" => Some(crate::live::Action::Attention),
+          _ => None,
+        };
+        if let Some(action) = live_action {
+          if let Some(link) = link.as_ref() {
+            link.action(action);
+          } else {
+            state.primary.entries.push(Entry::new(
+              EntryKind::System,
+              "Launch ainz --detach, or enable Background sessions in /settings and restart."
+                .into(),
+            ));
+          }
+          continue;
+        }
+        if !state.busy()
+          && matches!(
+            input.split_whitespace().next(),
+            Some("/statusline" | "/statusbar")
+          )
+        {
+          let value = input.split_once(' ').map(|(_, value)| value.trim());
+          let result: Result<()> = match value {
+            None => super::status::edit(terminal, &mut config.ui.status_line).map(|_| ()),
+            Some("reset" | "default") => {
+              config.ui.status_line = None;
+              Ok(())
+            }
+            Some("off" | "hide") => {
+              config.ui.status_line = Some(Vec::new());
+              Ok(())
+            }
+            Some(value) => {
+              let items: Option<Vec<_>> = value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|word| !word.is_empty())
+                .map(ainz::config::StatusItem::parse)
+                .collect();
+              match items {
+                Some(items) => {
+                  config.ui.status_line = Some(items);
+                  Ok(())
+                }
+                None => Err(anyhow::anyhow!(
+                  "Unknown field; use /statusline to choose fields, /statusline reset, or /statusline off."
+                )),
+              }
+            }
+          };
+          if let Err(error) = result {
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::Error, error.to_string()));
+          } else {
+            remember(&mut state, config).await;
+          }
+          terminal.swap_buffers();
+          terminal.swap_buffers();
+          crossterm::execute!(
+            terminal.backend_mut(),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+          )?;
+          continue;
+        }
+        if !state.busy() && input.trim().starts_with("/rename ") {
+          let name: String = input.trim()[8..]
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(80)
+            .collect();
+          if let Some(session) = session.as_mut() {
+            session.label = (!name.is_empty()).then_some(name);
+            store.save(session).await?;
+          }
+          continue;
+        }
         if state.busy() {
           if input.trim() == "/cancel" {
             if let Some(controller) = &controller {
@@ -1663,8 +1925,8 @@ fn command(
   let input = input.trim();
   match input {
     "/exit" | "/quit" => Ok(CommandResult::Quit),
-    "/config" | "/model" | "/provider" => Ok(CommandResult::Configure),
-    "/settings" => Ok(CommandResult::Settings),
+    "/model" | "/provider" => Ok(CommandResult::Configure),
+    "/config" | "/settings" => Ok(CommandResult::Settings),
     "/import" | "/mcp import" => Ok(CommandResult::Import),
     "/memory" => Ok(CommandResult::Recall(String::new())),
     "/synapse" => {
@@ -1764,6 +2026,21 @@ fn command(
       Ok(CommandResult::Handled)
     }
     "/help" => {
+      state.primary.entries.push(Entry::new(
+        EntryKind::System,
+        ainz::keybind::Action::ALL
+          .into_iter()
+          .map(|action| {
+            format!(
+              "{}: {}",
+              action.label(),
+              ainz::keybind::label(&config.ui.keybindings, action)
+            )
+          })
+          .collect::<Vec<_>>()
+          .join("\n"),
+      ));
+
       let listing = commands
         .iter()
         .map(|command| format!("{:<28} {}", command.usage, command.description))
@@ -1773,18 +2050,18 @@ fn command(
         EntryKind::System,
         format!(
           "{listing}\n\n\
-           up/down    earlier prompts        shift+enter  newline\n\
+           up/down    earlier prompts\n\
            @name      complete a path        esc esc      rewind a prompt\n\
-           ctrl+o     expand tool output     /vim /inline prompt and drawing\n\
+           /vim /inline prompt and drawing\n\
            y n a      allow, refuse, or keep the answer at a permission prompt\n\
            ctrl+a/e   line start/end         ctrl+w       delete word\n\
-           ctrl+u/k   clear before/after     alt+←/→      move a word\n\
-           wheel      scroll the transcript  page up/down  scroll a screen\n\
+           ctrl+k     cut after cursor       alt+←/→      move a word\n\
+           wheel      scroll the transcript\n\
            ctrl+end   latest output          shift+↑/↓    scroll a line\n\
            ctrl+home  oldest output\n\
            esc        cancel a run\n\
-           ctrl+1…9   select agent           ctrl+= / ctrl+-  cycle agents\n\
-           ctrl+l     roster                 ctrl+c       quit"
+           ctrl+1…9   select agent\n\
+           /settings  customize shortcuts"
         ),
       ));
       Ok(CommandResult::Handled)
@@ -2163,7 +2440,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       view.finish_message();
     }
     Event::Todos { items } => state.view_mut(session_id).todos = items,
-    Event::SessionStart { .. } => {}
+    Event::SessionStart { .. } | Event::ThinkingDelta { .. } => {}
   }
 }
 
@@ -2232,6 +2509,11 @@ fn render(
   workspace: &std::path::Path,
   commands: &[SlashCommand],
 ) {
+  let status_rows = if config.ui.status_line.as_ref().is_some_and(Vec::is_empty) {
+    0
+  } else {
+    1
+  };
   // the prompt grows with what is written in it, up to a few lines
   let prompt_rows = input::wrap(state.input.as_str(), prompt_width(frame.area().width))
     .len()
@@ -2240,7 +2522,7 @@ fn render(
     let [body, activity, status, input] = Layout::vertical([
       Constraint::Min(1),
       Constraint::Length(1),
-      Constraint::Length(1),
+      Constraint::Length(status_rows),
       Constraint::Length(prompt_rows),
     ])
     .areas(frame.area());
@@ -2258,7 +2540,7 @@ fn render(
     Constraint::Length(1),
     Constraint::Min(8),
     Constraint::Length(1),
-    Constraint::Length(1),
+    Constraint::Length(status_rows),
     Constraint::Length(prompt_rows),
   ])
   .areas(frame.area());
@@ -2724,10 +3006,57 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       format!(" │ todo {done}/{total}")
     }
   };
-  let text = if area.width >= 108 {
+  let attention = match state.attention {
+    (0, 0, 0) => String::new(),
+    (approval, failed, done) => format!("attention {approval} ask / {failed} failed / {done} done"),
+  };
+  let text = if let Some(items) = &config.ui.status_line {
+    use ainz::config::StatusItem;
+    let fields: Vec<String> = items
+      .iter()
+      .filter_map(|item| {
+        let text = match item {
+          StatusItem::Provider => provider.into(),
+          StatusItem::Model => model.clone(),
+          StatusItem::Mode => permissions.into(),
+          StatusItem::Memory => config.memory.backend.label().into(),
+          StatusItem::Tokens => format!("Σ{total} tok"),
+          StatusItem::InputTokens => format!("in {input}"),
+          StatusItem::OutputTokens => format!("out {output}"),
+          StatusItem::Context => {
+            format!("limit {} tok", compact_count(config.context_tokens as u64))
+          }
+          StatusItem::Todos => plan.trim_start_matches(" │ ").into(),
+          StatusItem::Agents => format!("agents {running}/{total_agents}"),
+          StatusItem::Workspace => state
+            .workspace
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+          StatusItem::Session => state.session_name.clone().unwrap_or_default(),
+          StatusItem::Activity => if state.approval.is_some() {
+            "needs approval"
+          } else if state.busy() {
+            "running"
+          } else {
+            "ready"
+          }
+          .into(),
+          StatusItem::Attention => attention.clone(),
+          StatusItem::Branch => state.branch.clone().unwrap_or_default(),
+        };
+        (!text.is_empty()).then_some(text)
+      })
+      .collect();
+    format!(" {} ", fields.join(" │ "))
+  } else if !attention.is_empty() {
+    format!(" {attention} │ {model} │ Σ{total} tok ")
+  } else if area.width >= 108 {
     format!(
       " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
-       {total}{cost} │ agents {running}/{total_agents}{plan} │ ^L roster "
+       {total}{cost} │ agents {running}/{total_agents}{plan} │ {} roster ",
+      ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Roster)
     )
   } else if area.width >= 72 {
     format!(

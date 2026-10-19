@@ -1,4 +1,8 @@
 use ainz::{Config, HeaderCatalog, MemoryBackend, PermissionMode, synapse};
+use ainz::{
+  config::{NotificationDelivery, Notifications},
+  keybind::{self, Action},
+};
 use anyhow::Result;
 use crossterm::event::{
   self, Event as InputEvent, KeyCode, KeyEventKind, MouseEventKind as InputMouse,
@@ -16,6 +20,9 @@ use super::{ACCENT, ACTIVE, INK, MUTED, Term, YELLOW, enter_terminal, leave_term
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Row {
   Provider,
+  Wire,
+  Reasoning,
+  Fallback,
   Permissions,
   Memory,
   RecallOnStart,
@@ -28,10 +35,18 @@ enum Row {
   Vim,
   Inline,
   Bell,
+  Background,
+  Notifications,
+  Delivery,
+  Status,
+  Binding(Action),
 }
 
-const ROWS: [Row; 13] = [
+const ROWS: [Row; 20] = [
   Row::Provider,
+  Row::Wire,
+  Row::Reasoning,
+  Row::Fallback,
   Row::Permissions,
   Row::Memory,
   Row::RecallOnStart,
@@ -44,12 +59,24 @@ const ROWS: [Row; 13] = [
   Row::Vim,
   Row::Inline,
   Row::Bell,
+  Row::Background,
+  Row::Notifications,
+  Row::Delivery,
+  Row::Status,
 ];
 
 impl Row {
   fn label(self) -> &'static str {
     match self {
+      Self::Background => "Background sessions",
+      Self::Notifications => "Notifications",
+      Self::Delivery => "Notification delivery",
+      Self::Status => "Status bar fields",
+      Self::Binding(action) => action.label(),
       Self::Provider => "Provider and model",
+      Self::Wire => "Provider API",
+      Self::Reasoning => "Reasoning effort",
+      Self::Fallback => "Fallback providers",
       Self::Permissions => "Permissions",
       Self::Memory => "Memory",
       Self::RecallOnStart => "Recall at session start",
@@ -67,6 +94,31 @@ impl Row {
 
   fn value(self, config: &Config, installed: bool) -> String {
     match self {
+      Self::Background => on_off(config.ui.background),
+      Self::Notifications => config.ui.notifications.label().into(),
+      Self::Delivery => config.ui.notification_delivery.label().into(),
+      Self::Status => match &config.ui.status_line {
+        None => "automatic".into(),
+        Some(items) if items.is_empty() => "hidden".into(),
+        Some(items) => format!("{} fields", items.len()),
+      },
+      Self::Binding(action) => keybind::label(&config.ui.keybindings, action).into(),
+      Self::Wire => config
+        .active_provider()
+        .map(|provider| format!("{:?}", provider.wire_api).to_lowercase())
+        .unwrap_or_else(|_| "unconfigured".into()),
+      Self::Reasoning => config
+        .active_provider()
+        .ok()
+        .and_then(|provider| provider.reasoning_effort)
+        .unwrap_or_else(|| "default".into()),
+      Self::Fallback => {
+        if config.fallback_providers.is_empty() {
+          "off".into()
+        } else {
+          config.fallback_providers.join(", ")
+        }
+      }
       Self::Provider => format!(
         "{} · {}",
         config.provider.as_deref().unwrap_or("default"),
@@ -112,6 +164,14 @@ impl Row {
 
   fn detail(self, config: &Config, installed: bool) -> (String, String) {
     match self {
+      Self::Background => ("Applies on the next launch".into(), "Keep an agent running when you detach or your terminal closes. Ctrl+B D detaches; ainz attach reconnects. Ctrl+B S switches sessions. Each running session has its own host; there is no idle daemon. Off by default. Hosted sessions use the full-screen interface.".into()),
+      Self::Notifications => ("For sessions you are not viewing".into(), "Off is quiet. Needs input alerts when approval is required. All also alerts on completion and failure. Opening a picker does not mark a completion as seen; viewing its transcript does.".into()),
+      Self::Delivery => ("Where alerts appear".into(), "Terminal uses OSC 9 in an attached terminal that supports notifications. System uses the operating system notification command, including when detached. Both require Notifications to be enabled.".into()),
+      Self::Status => ("The IRC bar above the prompt".into(), "Enter opens the field picker. Space toggles a field; Shift+Up/Down reorders it. Enter saves; R restores the responsive default. Turning every field off hides the bar.".into()),
+      Self::Binding(action) => ("Record one shortcut or a two-key chord".into(), format!("{} Default: {}. Enter starts recording; press the combination, then Enter to save. Backspace restores the default. Delete disables optional actions. Conflicts are explained before saving. Esc cancels.", action.help(), action.default_key())),
+      Self::Wire => ("The selected provider’s protocol".into(), "Chat uses Chat Completions; Responses supports encrypted reasoning; Messages uses the native Messages API. This edits a saved HTTP profile.".into()),
+      Self::Reasoning => ("For Responses providers".into(), "Choose a reasoning effort supported by your model. Default leaves the decision to the provider.".into()),
+      Self::Fallback => ("Explicit backup profiles in order".into(), "Enter configured provider names separated by commas. Each backup can have its own default model. Empty disables fallback. Failed attempts are buffered, so only a successful reply reaches the transcript.".into()),
       Self::Provider => (
         "Where completions come from".into(),
         "Open the provider setup to add or switch a provider and choose its model.".into(),
@@ -217,6 +277,26 @@ impl Row {
   // enter and the arrow keys move a row through its values; only the provider row leaves
   fn cycle(self, config: &mut Config, forward: bool, headers: &[String]) -> bool {
     match self {
+      Self::Background => config.ui.background = !config.ui.background,
+      Self::Notifications => {
+        config.ui.notifications = step(
+          &[
+            Notifications::Off,
+            Notifications::NeedsInput,
+            Notifications::All,
+          ],
+          config.ui.notifications,
+          forward,
+        )
+      }
+      Self::Delivery => {
+        config.ui.notification_delivery = step(
+          &[NotificationDelivery::Terminal, NotificationDelivery::System],
+          config.ui.notification_delivery,
+          forward,
+        )
+      }
+      Self::Status | Self::Binding(_) | Self::Wire | Self::Reasoning | Self::Fallback => {}
       Self::Provider => return true,
       Self::Permissions => {
         let modes = [
@@ -281,6 +361,171 @@ impl Row {
   }
 }
 
+impl Row {
+  fn section(self) -> &'static str {
+    match self {
+      Self::Provider | Self::Permissions | Self::Wire | Self::Reasoning | Self::Fallback => {
+        "Connection"
+      }
+      Self::Memory
+      | Self::RecallOnStart
+      | Self::RememberOnCompact
+      | Self::Teach
+      | Self::Synapse
+      | Self::Mesh => "Memory",
+      Self::Background | Self::Notifications | Self::Delivery => "Sessions",
+      Self::Binding(_) => "Keys",
+      _ => "Interface",
+    }
+  }
+}
+const SECTIONS: [&str; 6] = [
+  "All",
+  "Connection",
+  "Interface",
+  "Sessions",
+  "Keys",
+  "Memory",
+];
+fn rows(section: usize, query: &str) -> Vec<Row> {
+  ROWS
+    .into_iter()
+    .chain(Action::ALL.into_iter().map(Row::Binding))
+    .filter(|row| section == 0 || row.section() == SECTIONS[section])
+    .filter(|row| {
+      format!("{} {}", row.section(), row.label())
+        .to_lowercase()
+        .contains(&query.to_lowercase())
+    })
+    .collect()
+}
+fn binding(terminal: &mut Term, config: &mut Config, action: Action) -> Result<bool> {
+  let mut captured = Vec::new();
+  let mut problem = String::new();
+  loop {
+    terminal.draw(|frame| {
+      frame.render_widget(Paragraph::new(format!("Shortcut: {}\n\n{}\n\n{}\n\nPress one combination or two keys, then Enter to save.\nBackspace restores default · Delete disables · Esc cancels", action.label(), captured.join(" "), problem)).style(Style::default().fg(INK)).block(Block::default().title(" Record shortcut ").borders(Borders::ALL).padding(Padding::uniform(2))), frame.area());
+    })?;
+    let InputEvent::Key(key) = event::read()? else {
+      continue;
+    };
+    if key.kind == KeyEventKind::Release {
+      continue;
+    }
+    let value = match key.code {
+      KeyCode::Esc => return Ok(false),
+      KeyCode::Backspace if captured.is_empty() => Some(action.default_key().to_string()),
+      KeyCode::Delete if captured.is_empty() => Some("none".into()),
+      KeyCode::Backspace => {
+        captured.pop();
+        None
+      }
+      KeyCode::Enter if !captured.is_empty() => Some(captured.join(" ")),
+      _ if captured.len() < 2 => {
+        match keybind::format(key) {
+          Ok(key) => captured.push(key),
+          Err(error) => problem = error.to_string(),
+        };
+        None
+      }
+      _ => None,
+    };
+    if let Some(value) = value {
+      match keybind::set(&mut config.ui.keybindings, action, &value) {
+        Ok(()) => return Ok(true),
+        Err(error) => {
+          problem = error.to_string();
+          captured.clear();
+        }
+      }
+    }
+  }
+}
+
+fn provider_setting(terminal: &mut Term, config: &mut Config, row: Row) -> Result<bool> {
+  use ainz::WireApi;
+  let (items, current) = match row {
+    Row::Fallback => (vec![String::new()], config.fallback_providers.join(", ")),
+    Row::Wire => (
+      vec!["chat".into(), "responses".into(), "messages".into()],
+      config
+        .active_provider()
+        .map(|profile| format!("{:?}", profile.wire_api).to_lowercase())
+        .unwrap_or_else(|_| "chat".into()),
+    ),
+    Row::Reasoning => (
+      vec![
+        "default".into(),
+        "none".into(),
+        "minimal".into(),
+        "low".into(),
+        "medium".into(),
+        "high".into(),
+        "xhigh".into(),
+      ],
+      config
+        .active_provider()?
+        .reasoning_effort
+        .unwrap_or_else(|| "default".into()),
+    ),
+    _ => return Ok(false),
+  };
+  let Some(value) = super::choose_value(
+    terminal,
+    row.label(),
+    "Select a value or type another; Esc cancels",
+    "Value",
+    items,
+    &current,
+  )?
+  else {
+    return Ok(false);
+  };
+  if row == Row::Fallback {
+    let names: Vec<_> = value
+      .split(',')
+      .map(str::trim)
+      .filter(|name| !name.is_empty())
+      .map(str::to_owned)
+      .collect();
+    for name in &names {
+      if !config.providers.contains_key(name) {
+        anyhow::bail!("provider {name} is not configured");
+      }
+    }
+    config.fallback_providers = names;
+  } else {
+    let name = config
+      .provider
+      .as_ref()
+      .ok_or_else(|| anyhow::anyhow!("save a named provider through Provider and model first"))?;
+    let mut profile = config.providers[name].clone();
+    match row {
+      Row::Wire => {
+        profile.wire_api = match value.as_str() {
+          "chat" => WireApi::Chat,
+          "responses" => WireApi::Responses,
+          "messages" => WireApi::Messages,
+          _ => anyhow::bail!("use chat, responses, or messages"),
+        };
+        if profile.wire_api != WireApi::Responses {
+          profile.reasoning_effort = None;
+        }
+        if profile.wire_api != WireApi::Messages {
+          profile.thinking_tokens = 0;
+        }
+      }
+      Row::Reasoning => {
+        profile.reasoning_effort = (!value.is_empty() && value != "default").then_some(value)
+      }
+      _ => {}
+    }
+    profile.validate(name)?;
+    config.providers.insert(name.clone(), profile);
+  }
+  Ok(true)
+}
+
 fn step<T: Copy + PartialEq>(values: &[T], current: T, forward: bool) -> T {
   let index = values
     .iter()
@@ -316,52 +561,113 @@ pub async fn settings(config: &mut Config, headers: &HeaderCatalog) -> Result<bo
 }
 
 fn run(terminal: &mut Term, config: &mut Config, headers: &[String]) -> Result<(bool, bool)> {
-  let mut selected = 0;
+  let mut selected = 0usize;
+  let mut section = 0usize;
+  let mut query = String::new();
+  let mut searching = false;
   let mut changed = false;
+  let installed = synapse::binary(&config.synapse).is_some();
   loop {
-    let installed = synapse::binary(&config.synapse).is_some();
-    terminal.draw(|frame| render(frame, config, selected, installed))?;
+    let visible = rows(section, &query);
+    selected = selected.min(visible.len().saturating_sub(1));
+    terminal.draw(|frame| {
+      render(
+        frame,
+        config,
+        selected,
+        installed,
+        &visible,
+        (section, &query, searching),
+      )
+    })?;
     let key = match event::read()? {
       InputEvent::Mouse(mouse) => {
         match mouse.kind {
           InputMouse::ScrollUp => selected = selected.saturating_sub(1),
-          InputMouse::ScrollDown => selected = (selected + 1).min(ROWS.len() - 1),
-          InputMouse::Down(_) => {
-            if let Some(index) = mouse.row.checked_sub(4).map(usize::from)
-              && index < ROWS.len()
-            {
-              selected = index;
-            }
-          }
+          InputMouse::ScrollDown => selected = (selected + 1).min(visible.len().saturating_sub(1)),
           _ => {}
-        }
+        };
         continue;
       }
       InputEvent::Key(key) if key.kind != KeyEventKind::Release => key,
       _ => continue,
     };
+    if searching {
+      match key.code {
+        KeyCode::Esc => {
+          query.clear();
+          searching = false;
+        }
+        KeyCode::Enter => searching = false,
+        KeyCode::Backspace => {
+          query.pop();
+          selected = 0;
+        }
+        KeyCode::Char(ch) => {
+          query.push(ch);
+          selected = 0;
+        }
+        _ => {}
+      }
+      continue;
+    }
     match key.code {
+      KeyCode::Char('/') => searching = true,
+      KeyCode::Tab => {
+        section = (section + 1) % SECTIONS.len();
+        selected = 0;
+      }
+      KeyCode::BackTab => {
+        section = (section + SECTIONS.len() - 1) % SECTIONS.len();
+        selected = 0;
+      }
       KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
-      KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(ROWS.len() - 1),
-      KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Char('l') => {
-        if ROWS[selected].cycle(config, true, headers) {
-          return Ok((true, changed));
-        }
-        changed = true;
+      KeyCode::Down | KeyCode::Char('j') => {
+        selected = (selected + 1).min(visible.len().saturating_sub(1))
       }
-      KeyCode::Left | KeyCode::Char('h') => {
-        if ROWS[selected].cycle(config, false, headers) {
-          return Ok((true, changed));
+      KeyCode::Enter
+      | KeyCode::Char(' ')
+      | KeyCode::Right
+      | KeyCode::Char('l')
+      | KeyCode::Left
+      | KeyCode::Char('h') => {
+        let Some(row) = visible.get(selected).copied() else {
+          continue;
+        };
+        match row {
+          Row::Wire | Row::Reasoning | Row::Fallback => {
+            changed |= provider_setting(terminal, config, row)?
+          }
+          Row::Binding(action) => changed |= binding(terminal, config, action)?,
+          Row::Status => changed |= super::status::edit(terminal, &mut config.ui.status_line)?,
+          _ => {
+            if row.cycle(
+              config,
+              !matches!(key.code, KeyCode::Left | KeyCode::Char('h')),
+              headers,
+            ) {
+              return Ok((true, changed));
+            }
+            changed = true;
+          }
         }
-        changed = true;
       }
+      KeyCode::Esc if !query.is_empty() => query.clear(),
       KeyCode::Esc | KeyCode::Char('q') => return Ok((false, changed)),
       _ => {}
     }
   }
 }
 
-fn render(frame: &mut Frame, config: &Config, selected: usize, installed: bool) {
+fn render(
+  frame: &mut Frame,
+  config: &Config,
+  selected: usize,
+  installed: bool,
+  visible: &[Row],
+  filter: (usize, &str, bool),
+) {
+  let (section, query, searching) = filter;
   let [header, body, footer] = Layout::vertical([
     Constraint::Length(3),
     Constraint::Min(10),
@@ -372,13 +678,22 @@ fn render(frame: &mut Frame, config: &Config, selected: usize, installed: bool) 
     frame,
     header,
     "Settings",
-    "Changes are saved as you make them",
+    &format!(
+      "{} · / search{}{} · saved when you close",
+      SECTIONS[section],
+      if searching { ": " } else { " " },
+      query
+    ),
   );
   let [list, detail] = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)])
     .spacing(2)
     .areas(body);
-  let width = ROWS.iter().map(|row| row.label().len()).max().unwrap_or(20);
-  let items = ROWS.iter().map(|row| {
+  let width = visible
+    .iter()
+    .map(|row| row.label().len())
+    .max()
+    .unwrap_or(20);
+  let items = visible.iter().map(|row| {
     let value = row.value(config, installed);
     let tone = if value.starts_with("off") || value.contains("not installed") {
       MUTED
@@ -409,11 +724,14 @@ fn render(frame: &mut Frame, config: &Config, selected: usize, installed: bool) 
     list,
     &mut state,
   );
-  let (kind, description) = ROWS[selected].detail(config, installed);
+  let Some(row) = visible.get(selected) else {
+    return;
+  };
+  let (kind, description) = row.detail(config, installed);
   frame.render_widget(
     Paragraph::new(vec![
       Line::styled(
-        ROWS[selected].label(),
+        row.label(),
         Style::default().fg(INK).add_modifier(Modifier::BOLD),
       ),
       Line::raw(""),
@@ -431,5 +749,9 @@ fn render(frame: &mut Frame, config: &Config, selected: usize, installed: bool) 
     ),
     detail,
   );
-  super::render_footer(frame, footer, "↑↓ move   enter/←→ change   esc close");
+  super::render_footer(
+    frame,
+    footer,
+    "Tab section · / search · ↑↓ move · Enter change · Esc close",
+  );
 }

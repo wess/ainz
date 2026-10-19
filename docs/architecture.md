@@ -22,10 +22,9 @@ Ainz keeps the orchestration core independent from transports and user interface
    the final reply is atomic with taking the last batch, so an accepted message cannot fall
    between the last turn and the end hooks. Those hooks remain cancellable.
 
-The terminal multiplexer is a view and control plane over those primitives. Panes subscribe
-to `EventSink`; they never own provider processes, session history, or subagent lifetime.
-Subagent rows are projections of durable session IDs and start/end events. This keeps the TUI
-replaceable and prevents a pane from becoming a second source of runtime truth.
+The terminal projects `EventSink` events into transcript and subagent views. Each worker
+retains its provider, session history, and subagent lifetime while the attached client switches
+between live sessions. The client relays terminal bytes and keeps no second runtime copy.
 
 Extensions are discovered without execution. Static manifests define schemas and
 capabilities, content-pinned grants decide which extensions load, and runtime adapters
@@ -66,3 +65,11 @@ Named themes live in the optional CLI layer. The catalog reads bounded TOML file
 renderer maps palette roles over the visible terminal buffer. It does not traverse conversation
 history or allocate a second runtime. Header regions retain their source colors. See
 [themes](themes.md) for the supported roles and surfaces.
+
+## Live terminals
+
+The CLI live host owns a PTY and worker process per session. An attached terminal relays bytes
+over an owner-only Unix socket. The worker owns agent state, approvals, and saved history; the
+client owns the picker. Bounded messages and queues limit transport memory. Filesystem watches
+update live metadata and branch labels without idle polling. Hosting, terminal handling, and
+watchers stay behind the CLI feature; the core remains usable without terminal dependencies.

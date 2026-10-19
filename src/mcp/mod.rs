@@ -1,4 +1,5 @@
 mod client;
+pub mod oauth;
 mod tool;
 
 use std::{
@@ -123,7 +124,50 @@ impl From<McpServerConfig> for McpServerConfigFile {
 pub enum McpTransport {
   #[default]
   Stdio,
+  #[serde(alias = "http")]
   StreamableHttp,
+  Sse,
+}
+
+impl McpServerConfig {
+  pub(crate) fn expanded(&self) -> Result<Self> {
+    let mut server = self.clone();
+    server.command = server
+      .command
+      .iter()
+      .map(|value| expand(value))
+      .collect::<Result<_>>()?;
+    server.url = server.url.as_deref().map(expand).transpose()?;
+    for value in server.headers.values_mut().chain(server.env.values_mut()) {
+      *value = expand(value)?;
+    }
+    Ok(server)
+  }
+}
+
+fn expand(value: &str) -> Result<String> {
+  let mut output = String::new();
+  let mut rest = value;
+  while let Some((before, after)) = rest.split_once("${") {
+    output.push_str(before);
+    let (variable, tail) = after
+      .split_once('}')
+      .context("unterminated environment placeholder")?;
+    let (name, fallback) = variable
+      .split_once(":-")
+      .map_or((variable, None), |(name, fallback)| (name, Some(fallback)));
+    if name.is_empty() {
+      bail!("empty environment variable in MCP placeholder");
+    }
+    let resolved = std::env::var(name).ok().filter(|value| !value.is_empty());
+    match resolved.as_deref().or(fallback) {
+      Some(value) => output.push_str(value),
+      None => bail!("environment variable {name} is required by MCP configuration"),
+    }
+    rest = tail;
+  }
+  output.push_str(rest);
+  Ok(output)
 }
 
 fn enabled() -> bool {
@@ -189,17 +233,28 @@ impl McpProfile {
     let file: ExternalMcpFile = serde_json::from_slice(&data)
       .with_context(|| format!("parse MCP configuration {}", path.display()))?;
     for (name, server) in file.servers {
-      if server.command.trim().is_empty() {
-        bail!("MCP server {name} has an empty command");
-      }
+      let transport = match server.kind.as_deref() {
+        Some("http" | "streamable_http") => McpTransport::StreamableHttp,
+        Some("sse") => McpTransport::Sse,
+        Some("stdio") | None
+          if server
+            .command
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+          McpTransport::Stdio
+        }
+        None if server.url.is_some() => McpTransport::StreamableHttp,
+        _ => bail!("MCP server {name} has an unsupported transport or empty command"),
+      };
       profile.servers.insert(
         name,
         McpServerConfig {
-          transport: McpTransport::Stdio,
-          command: std::iter::once(server.command).chain(server.args).collect(),
-          url: None,
+          transport,
+          command: server.command.into_iter().chain(server.args).collect(),
+          url: server.url,
           header_env: BTreeMap::new(),
-          headers: BTreeMap::new(),
+          headers: server.headers,
           env: server.env,
           cwd: None,
           enabled: true,
@@ -254,7 +309,12 @@ struct ExternalMcpFile {
 
 #[derive(Deserialize)]
 struct ExternalMcpServer {
-  command: String,
+  #[serde(default, rename = "type")]
+  kind: Option<String>,
+  command: Option<String>,
+  url: Option<String>,
+  #[serde(default)]
+  headers: BTreeMap<String, String>,
   #[serde(default)]
   args: Vec<String>,
   #[serde(default)]

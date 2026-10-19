@@ -220,6 +220,8 @@ struct FunctionDelta<'a> {
 struct WireUsage {
   prompt_tokens: Option<u64>,
   completion_tokens: Option<u64>,
+  #[serde(alias = "cost")]
+  cost_usd: Option<f64>,
 }
 
 impl From<WireUsage> for Usage {
@@ -227,7 +229,7 @@ impl From<WireUsage> for Usage {
     Self {
       input_tokens: wire.prompt_tokens.unwrap_or(0),
       output_tokens: wire.completion_tokens.unwrap_or(0),
-      cost_usd: None,
+      cost_usd: wire.cost_usd,
     }
   }
 }
@@ -299,6 +301,9 @@ pub(super) fn parse_response(body: &[u8], events: &EventSink) -> Result<Provider
       tool_calls,
       tool_call_id: None,
       images: Vec::new(),
+      thinking: None,
+      response_items: Vec::new(),
+      response_model: None,
     },
     usage: response.usage.map(Usage::from).unwrap_or_default(),
   })
@@ -398,7 +403,7 @@ fn check_error(value: &Value) -> Result<()> {
 
 // what a provider said went wrong. these bodies are JSON, and a person reading a failed turn
 // should get the sentence in it rather than the punctuation around it
-pub(super) fn wire_error(status: StatusCode, body: &str) -> String {
+pub(crate) fn wire_error(status: StatusCode, body: &str) -> String {
   let sentence = error_message(body);
   if sentence.is_empty() {
     status.to_string()

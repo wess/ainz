@@ -23,6 +23,24 @@ and declares `ripgrep`, which the `search` tool shells out to. After the assets 
 the formula with their exact checksums and validate an installation from the tap. Never publish a
 formula whose URL does not yet exist.
 
+## macOS installer
+
+Run `scripts/pkg.sh` on the Mac architecture you want to ship. It builds the current source
+with default features and creates `dist/VERSION/ARCH/ainz.pkg` plus `ainz.sha256`.
+The installer places the CLI at `/usr/local/bin/ainz` and the manuals at
+`/usr/local/share/doc/ainz`. It does not install ripgrep; the completion screen explains that
+prerequisite.
+
+Set `AINZ_SIGN_IDENTITY` to a Developer ID Application identity and
+`AINZ_INSTALLER_IDENTITY` to a Developer ID Installer identity to sign both layers.
+Set `AINZ_NOTARY_PROFILE` to an existing `notarytool` keychain profile to submit, staple,
+and assess the package. The binary uses the hardened runtime with JIT permission for Wasm
+plugins. Without signing variables, the script produces an unsigned local installer.
+
+Before distributing, check the embedded binary with `codesign --verify --strict`, the package
+with `pkgutil --check-signature`, its ticket with `xcrun stapler validate`, and Gatekeeper with
+`spctl --assess --type install --verbose=2`. Verify the final checksum after stapling.
+
 ## Website
 
 The static site lives in `site/`; no build or package installation is required. Both designers

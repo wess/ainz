@@ -17,7 +17,7 @@ a completed performance evaluation.
 | Embedding | Public provider/tool interfaces, host events and sessions, independent CLI/Lua/Wasm features | Stable lifecycle envelope, bounded event delivery, documented compatibility policy |
 | Extensions | Content-pinned plugins, lazy MCP tool catalog, skills, hooks, subagents | Hung/disconnected extension soak tests and resource accounting per child |
 | Memory | Local and shared memory, prior-session search, proposed reusable skills | Retrieval usefulness, stale memory correction, prompt budget measurements |
-| Unattended work | Durable shell jobs and session files | Detached agent supervisor, reconnect/replay, recurring schedules, restart policy |
+| Unattended work | Durable shell jobs, saved sessions, opt-in PTY hosts, detach/reconnect, session switching and attention | Crash and reboot recovery, recurring schedules, restart policy |
 | Review | File edits and conversation rewind | Change inspector and file checkpoints with conflict-aware restore |
 | Providers | Streaming HTTP and process adapters | Explicit capability negotiation and provider-specific conformance fixtures |
 
@@ -133,3 +133,16 @@ validation, and preservation of artwork colors. `python3 tests/tui/themes.py` ex
 selection, reload, persistence, rejection, and reset in a real pseudo-terminal.
 `bun test tests/site` checks designer exports, exact installation contents, overwrite protection,
 and local links. Theme files add no scripting engine; the default palette skips the remapping pass.
+
+## Live session checks
+
+`python3 tests/tui/features.py target/debug/ainz` drives searchable settings, shortcut capture,
+status field persistence, detach/reconnect by name, and session switching through owned PTYs
+with a local fixture provider. Install `pyte` in the Python environment used for terminal
+checks. `cargo test` includes bounded frame decoding, notification deduplication, attention
+ordering, keybinding conflicts, and worktree branch metadata. No test needs a model account.
+
+Hosts and workers use two async runtime threads each. Filesystem watchers update session
+metadata and branch labels; idle chat does not use a refresh timer. Active hosts consume
+resources per session, so stop sessions you no longer need. This is an implementation bound,
+not a measured per-session CPU or memory guarantee.

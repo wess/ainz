@@ -5,9 +5,9 @@ use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
 use ainz::{
-  Config, HttpProvider, ImportKind, LocalSkills, McpProfile, McpServerConfig, McpTransport,
-  MemoryBackend, PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind,
-  Session, SessionStore, SkillCatalog, import as importer, synapse,
+  Config, ImportKind, LocalSkills, McpProfile, McpServerConfig, McpTransport, MemoryBackend,
+  PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind, Session, SessionStore,
+  SkillCatalog, import as importer, synapse,
 };
 
 #[derive(Subcommand)]
@@ -21,7 +21,52 @@ pub enum SessionsCommand {
 }
 
 #[derive(Subcommand)]
+pub enum JobCommand {
+  Start { command: String },
+  List,
+  Status { id: Uuid },
+  Output { id: Uuid },
+  Stop { id: Uuid },
+}
+
+pub async fn jobs(workspace: &Path, command: Option<JobCommand>, limit: usize) -> Result<()> {
+  use ainz::tool::ToolContext;
+  let arguments = match command.unwrap_or(JobCommand::List) {
+    JobCommand::Start { command } => serde_json::json!({"command":"start", "shell":command}),
+    JobCommand::List => serde_json::json!({"command":"list"}),
+    JobCommand::Status { id } => serde_json::json!({"command":"status", "id":id}),
+    JobCommand::Output { id } => serde_json::json!({"command":"output", "id":id}),
+    JobCommand::Stop { id } => serde_json::json!({"command":"stop", "id":id}),
+  };
+  let context = ToolContext::new(workspace.to_path_buf(), Uuid::now_v7(), limit);
+  let output = ainz::JobStore::default_store()?
+    .tool()
+    .execute(&context, arguments)
+    .await?;
+  println!("{output}");
+  Ok(())
+}
+
+#[derive(Subcommand)]
 pub enum McpCommand {
+  Login {
+    name: String,
+  },
+  Logout {
+    name: String,
+  },
+  AddHttp {
+    name: String,
+    url: String,
+    #[arg(long)]
+    required: bool,
+  },
+  AddSse {
+    name: String,
+    url: String,
+    #[arg(long)]
+    required: bool,
+  },
   Add {
     name: String,
     #[arg(long)]
@@ -50,6 +95,9 @@ pub enum PluginCommand {
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ProviderPreset {
+  Openai,
+  Anthropic,
+  Openrouter,
   Ollama,
   OllamaCloud,
   LiteLlm,
@@ -61,6 +109,9 @@ pub enum ProviderPreset {
 // the preset it came from when its shape changes
 pub(crate) fn preset_profile(preset: ProviderPreset) -> ProviderConfig {
   match preset {
+    ProviderPreset::Openai => ProviderConfig::openai(),
+    ProviderPreset::Anthropic => ProviderConfig::anthropic(),
+    ProviderPreset::Openrouter => ProviderConfig::openrouter(),
     ProviderPreset::Ollama => ProviderConfig::ollama(),
     ProviderPreset::OllamaCloud => ProviderConfig::ollama_cloud(),
     ProviderPreset::LiteLlm => ProviderConfig::lite_llm(),
@@ -131,6 +182,9 @@ pub enum SynapseCommand {
 
 #[derive(Subcommand)]
 pub enum ProviderCommand {
+  Fallback {
+    names: Vec<String>,
+  },
   List {
     #[arg(long)]
     json: bool,
@@ -145,8 +199,16 @@ pub enum ProviderCommand {
     command: Option<String>,
     #[arg(long = "arg", allow_hyphen_values = true)]
     args: Vec<String>,
-    #[arg(long, default_value = "AINZ_API_KEY")]
-    api_key_env: String,
+    #[arg(long)]
+    api_key_env: Option<String>,
+    #[arg(long)]
+    wire_api: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    reasoning_effort: Option<String>,
+    #[arg(long)]
+    thinking_tokens: Option<usize>,
     #[arg(long = "known-model")]
     models: Vec<String>,
     #[arg(long)]
@@ -217,10 +279,14 @@ pub async fn list_sessions(workspace: &Path, json: bool) -> Result<()> {
   } else {
     for session in sessions {
       println!(
-        "{}  {} nodes  {}{}",
+        "{}  {} nodes  {}{}{}",
         session.id,
         session.nodes,
         session.updated_at,
+        session
+          .label
+          .as_ref()
+          .map_or_else(String::new, |label| format!("  {label}")),
         session
           .parent_id
           .map_or_else(String::new, |parent| format!("  child of {parent}"))
@@ -609,6 +675,76 @@ pub async fn usage(workspace: &Path, json: bool) -> Result<()> {
 pub async fn mcp(command: Option<McpCommand>, json: bool) -> Result<()> {
   let mut profile = McpProfile::load().await?;
   match command {
+    Some(McpCommand::Login { name }) => {
+      let server = profile
+        .servers
+        .get(&name)
+        .with_context(|| format!("MCP server {name} is not configured"))?;
+      if server.transport == McpTransport::Stdio {
+        anyhow::bail!("only remote MCP servers support browser login");
+      }
+      let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+      let pending = ainz::mcp::oauth::begin(
+        &http,
+        &name,
+        server.url.as_deref().context("MCP server has no URL")?,
+      )
+      .await?;
+      println!("Open this URL to sign in to {name}:\n{}", pending.url);
+      pending.finish(&http).await?;
+      println!("signed in to {name}");
+      return Ok(());
+    }
+    Some(McpCommand::Logout { name }) => {
+      ainz::mcp::oauth::forget(&name).await?;
+      println!("signed out of {name}");
+      return Ok(());
+    }
+    Some(remote @ (McpCommand::AddHttp { .. } | McpCommand::AddSse { .. })) => {
+      let (name, url, required, transport) = match remote {
+        McpCommand::AddHttp {
+          name,
+          url,
+          required,
+        } => (name, url, required, McpTransport::StreamableHttp),
+        McpCommand::AddSse {
+          name,
+          url,
+          required,
+        } => (name, url, required, McpTransport::Sse),
+        _ => unreachable!(),
+      };
+      if !ainz::mcp::valid_name(&name) {
+        anyhow::bail!("invalid MCP server name {name}");
+      }
+      let parsed = url::Url::parse(&url).context("invalid MCP URL")?;
+      if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("MCP URL must use http or https");
+      }
+      if profile.servers.contains_key(&name) {
+        anyhow::bail!("MCP server {name} is already configured");
+      }
+      profile.servers.insert(
+        name.clone(),
+        McpServerConfig {
+          transport,
+          command: Vec::new(),
+          url: Some(url),
+          header_env: Default::default(),
+          headers: Default::default(),
+          env: Default::default(),
+          cwd: None,
+          enabled: true,
+          required,
+          timeout_ms: 30_000,
+        },
+      );
+      profile.save().await?;
+      println!("added MCP server {name}");
+      return Ok(());
+    }
     Some(McpCommand::Add {
       name,
       required,
@@ -709,6 +845,21 @@ pub async fn plugins(workspace: &Path, command: PluginCommand) -> Result<()> {
 pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<()> {
   match command {
     ProviderCommand::List { json } => print_providers(config, json)?,
+    ProviderCommand::Fallback { names } => {
+      for name in &names {
+        config
+          .providers
+          .get(name)
+          .with_context(|| format!("provider {name} is not configured"))?
+          .validate(name)?;
+      }
+      config.fallback_providers = names;
+      config.save().await?;
+      println!(
+        "fallback providers: {}",
+        config.fallback_providers.join(", ")
+      );
+    }
     ProviderCommand::Add {
       name,
       preset,
@@ -716,6 +867,10 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
       command,
       args,
       api_key_env,
+      wire_api,
+      model,
+      reasoning_effort,
+      thinking_tokens,
       models,
       json_result,
       stream_json,
@@ -729,7 +884,10 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
         }
         Some(preset) => preset_profile(preset),
         None => match (endpoint, command) {
-          (Some(endpoint), None) => ProviderConfig::http(endpoint, api_key_env),
+          (Some(endpoint), None) => ProviderConfig::http(
+            endpoint,
+            api_key_env.clone().unwrap_or_else(|| "AINZ_API_KEY".into()),
+          ),
           (None, Some(command)) => ProviderConfig::process(
             command,
             args,
@@ -743,6 +901,22 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
           (None, None) => anyhow::bail!("provider requires --preset, --endpoint, or --command"),
         },
       };
+      if let Some(var) = api_key_env {
+        profile.api_key_env = var;
+      }
+      if let Some(api) = wire_api {
+        profile.wire_api = match api.as_str() {
+          "chat" => ainz::WireApi::Chat,
+          "responses" => ainz::WireApi::Responses,
+          "messages" => ainz::WireApi::Messages,
+          _ => anyhow::bail!("unknown wire API {api}; use chat, responses, or messages"),
+        };
+      }
+      profile.model = model;
+      profile.reasoning_effort = reasoning_effort;
+      if let Some(tokens) = thinking_tokens {
+        profile.thinking_tokens = tokens;
+      }
       profile.models.extend(models);
       profile.models.sort();
       profile.models.dedup();
@@ -759,6 +933,7 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
         .providers
         .remove(&name)
         .with_context(|| format!("provider {name} is not configured"))?;
+      config.fallback_providers.retain(|entry| entry != &name);
       config.save().await?;
       println!("removed provider {name}");
     }
@@ -773,6 +948,8 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
           profile.models.sort();
         }
         config.model = model;
+      } else if let Some(model) = &profile.model {
+        config.model = model.clone();
       } else if config.model.is_empty()
         || (!profile.models.is_empty() && !profile.models.contains(&config.model))
       {
@@ -809,15 +986,13 @@ pub async fn models(config: &mut Config, command: ModelCommand) -> Result<()> {
         if profile.kind != ProviderKind::Http {
           anyhow::bail!("provider {name} does not support model discovery");
         }
-        let provider = HttpProvider::new(
-          profile
-            .endpoint
-            .clone()
-            .context("HTTP provider requires an endpoint")?,
+        let provider = ainz::RuntimeProvider::from_profile(
+          config,
+          &profile,
           config.model.clone(),
-          config.api_key_for(&profile).await?,
-          config.provider_retries,
-        )?;
+          Path::new("."),
+        )
+        .await?;
         let models = provider.models().await?;
         if let Some(profile) = config.providers.get_mut(&name) {
           profile.models = models.clone();
@@ -1045,5 +1220,31 @@ pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {
       (None, _) => format!(" · not installed — {}", synapse::SITE),
     }
   );
+  Ok(())
+}
+
+pub async fn check_provider(workspace: &Path, config: &Config) -> Result<()> {
+  use ainz::{
+    ChatProvider, EventSink, RuntimeProvider,
+    protocol::{Message, Role},
+  };
+  config.validate()?;
+  let mut probe = config.clone();
+  probe.provider_retries = 0;
+  let provider = RuntimeProvider::from_profile(
+    &probe,
+    &probe.active_provider()?,
+    probe.model.clone(),
+    workspace,
+  )
+  .await?;
+  let prompt = Message::text(Role::User, "Reply with OK.");
+  tokio::time::timeout(
+    std::time::Duration::from_secs(45),
+    provider.complete(&[&prompt], &[], &EventSink::default()),
+  )
+  .await
+  .context("provider check timed out after 45 seconds")??;
+  println!("provider check passed for {}", config.model);
   Ok(())
 }

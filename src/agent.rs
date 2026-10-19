@@ -134,6 +134,13 @@ impl<P: ChatProvider> Agent<P> {
     let mut effect = step(&mut turn, Action::Begin);
     loop {
       state.checkpoint()?;
+      if let (Some(limit), Some(cost)) = (options.budget_usd, state.usage.cost_usd)
+        && cost >= limit
+      {
+        bail!(
+          "run budget ${limit:.2} reached (reported cost ${cost:.2}); no further model requests or tools will run"
+        );
+      }
       effect = match effect {
         Effect::Ask => {
           let reply = self

@@ -148,6 +148,10 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &ChatState) {
         Style::default().fg(color).add_modifier(Modifier::BOLD),
       ),
       Span::styled(hint, Style::default().fg(MUTED)),
+      Span::styled(
+        state.live_hint.as_deref().unwrap_or(""),
+        Style::default().fg(MUTED),
+      ),
     ])),
     area,
   );

@@ -26,8 +26,30 @@ use crate::{
 
 const MAX_TRANSFER: usize = 16 * 1024 * 1024;
 
+mod anthropic;
+mod responses;
 mod stream;
-mod wire;
+mod transport;
+pub(crate) mod wire;
+pub use anthropic::AnthropicProvider;
+pub use responses::ResponsesProvider;
+use transport::{Wire, default_header, read_events};
+use wire::error_message;
+fn excerpt(data: &str) -> String {
+  data.chars().take(200).collect()
+}
+fn arguments(raw: &str) -> serde_json::Value {
+  serde_json::from_str::<serde_json::Value>(raw)
+    .ok()
+    .filter(serde_json::Value::is_object)
+    .unwrap_or_else(|| {
+      if raw.trim().is_empty() {
+        serde_json::json!({})
+      } else {
+        serde_json::json!({ crate::protocol::INVALID_ARGUMENTS: raw })
+      }
+    })
+}
 
 use stream::{Completion, StreamState};
 use wire::{
@@ -54,7 +76,128 @@ pub trait ChatProvider: Send + Sync {
 #[derive(Clone)]
 pub enum RuntimeProvider {
   Http(HttpProvider),
+  Anthropic(AnthropicProvider),
+  Responses(ResponsesProvider),
+  Fallback(Vec<(String, Box<RuntimeProvider>)>),
   Process(ProcessProvider),
+}
+
+impl RuntimeProvider {
+  pub fn with_model(&self, model: String) -> Self {
+    match self {
+      Self::Http(provider) => Self::Http(HttpProvider {
+        model,
+        ..provider.clone()
+      }),
+      Self::Process(provider) => Self::Process(ProcessProvider {
+        model,
+        ..provider.clone()
+      }),
+      Self::Anthropic(provider) => Self::Anthropic(provider.with_model(model)),
+      Self::Responses(provider) => Self::Responses(provider.with_model(model)),
+      Self::Fallback(providers) => Self::Fallback(
+        providers
+          .iter()
+          .map(|(name, provider)| (name.clone(), Box::new(provider.with_model(model.clone()))))
+          .collect(),
+      ),
+    }
+  }
+
+  pub async fn from_profile(
+    config: &crate::Config,
+    profile: &crate::ProviderConfig,
+    model: String,
+    workspace: &std::path::Path,
+  ) -> Result<Self> {
+    use crate::config::{ProviderKind, WireApi};
+    profile.validate("selected")?;
+    if profile.kind == ProviderKind::Process {
+      return Ok(Self::Process(ProcessProvider::new(
+        profile
+          .command
+          .clone()
+          .context("process provider requires a command")?,
+        profile.args.clone(),
+        model,
+        workspace.to_path_buf(),
+        config.permissions,
+        profile.output,
+      )));
+    }
+    let endpoint = profile
+      .endpoint
+      .clone()
+      .context("HTTP provider requires an endpoint")?;
+    let key = config.api_key_for(profile).await?;
+    Ok(match profile.wire_api {
+      WireApi::Chat => {
+        let mut provider = HttpProvider::new(endpoint, model, key, config.provider_retries)?;
+        provider.headers = profile.headers.clone();
+        Self::Http(provider)
+      }
+      WireApi::Messages => Self::Anthropic(AnthropicProvider::new(
+        endpoint,
+        model,
+        key,
+        profile.headers.clone(),
+        profile.thinking_tokens,
+        config.provider_retries,
+      )?),
+      WireApi::Responses => Self::Responses(ResponsesProvider::new(
+        endpoint,
+        model,
+        key,
+        profile.headers.clone(),
+        config.provider_retries,
+        profile.reasoning_effort.clone(),
+      )?),
+    })
+  }
+
+  pub async fn configured(config: &crate::Config, workspace: &std::path::Path) -> Result<Self> {
+    let active = Self::from_profile(
+      config,
+      &config.active_provider()?,
+      config.model.clone(),
+      workspace,
+    )
+    .await?;
+    if config.fallback_providers.is_empty() {
+      return Ok(active);
+    }
+    let mut providers = vec![(
+      config.provider.clone().unwrap_or_else(|| "default".into()),
+      Box::new(active),
+    )];
+    for name in &config.fallback_providers {
+      if config.provider.as_ref() == Some(name) {
+        continue;
+      }
+      let profile = config
+        .providers
+        .get(name)
+        .with_context(|| format!("fallback provider {name} is not configured"))?;
+      let model = profile
+        .model
+        .clone()
+        .unwrap_or_else(|| config.model.clone());
+      providers.push((
+        name.clone(),
+        Box::new(Self::from_profile(config, profile, model, workspace).await?),
+      ));
+    }
+    Ok(Self::Fallback(providers))
+  }
+
+  pub async fn models(&self) -> Result<Vec<String>> {
+    match self {
+      Self::Http(provider) => provider.models().await,
+      Self::Anthropic(provider) => provider.models().await,
+      Self::Responses(provider) => provider.models().await,
+      _ => bail!("model discovery requires a single HTTP provider"),
+    }
+  }
 }
 
 #[async_trait]
@@ -67,6 +210,29 @@ impl ChatProvider for RuntimeProvider {
   ) -> Result<ProviderReply> {
     match self {
       Self::Http(provider) => provider.complete(messages, tools, events).await,
+      Self::Anthropic(provider) => provider.complete(messages, tools, events).await,
+      Self::Responses(provider) => provider.complete(messages, tools, events).await,
+      Self::Fallback(providers) => {
+        let mut errors = Vec::new();
+        for (index, (name, provider)) in providers.iter().enumerate() {
+          let (buffer, mut received) = EventSink::channel();
+          match provider.complete(messages, tools, &buffer).await {
+            Ok(reply) => {
+              if index > 0 {
+                events.emit(Event::Notice {
+                  message: format!("provider fallback selected {name}"),
+                });
+              }
+              while let Ok(event) = received.try_recv() {
+                events.emit(event);
+              }
+              return Ok(reply);
+            }
+            Err(error) => errors.push(format!("{name}: {error:#}")),
+          }
+        }
+        bail!("all configured providers failed: {}", errors.join("; "))
+      }
       Self::Process(provider) => provider.complete(messages, tools, events).await,
     }
   }
@@ -191,6 +357,7 @@ pub struct HttpProvider {
   model: String,
   api_key: Option<String>,
   retries: usize,
+  headers: BTreeMap<String, String>,
 }
 
 impl HttpProvider {
@@ -214,6 +381,7 @@ impl HttpProvider {
       model,
       api_key,
       retries,
+      headers: BTreeMap::new(),
     })
   }
 
@@ -248,6 +416,9 @@ impl HttpProvider {
   }
 
   fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
+    let request = self.headers.iter().fold(request, |request, (name, value)| {
+      request.header(name, value)
+    });
     match &self.api_key {
       Some(key) => request.bearer_auth(key),
       None => request,
@@ -342,6 +513,9 @@ impl ChatProvider for HttpProvider {
         tool_calls,
         tool_call_id: None,
         images: Vec::new(),
+        thinking: None,
+        response_items: Vec::new(),
+        response_model: None,
       },
       usage,
     })

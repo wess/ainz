@@ -111,6 +111,19 @@ impl ToolSet {
     specs
   }
 
+  pub fn restricted(&self, allow: Option<&[String]>, deny: Option<&[String]>) -> Self {
+    let tools = self
+      .tools
+      .iter()
+      .filter(|(name, _)| {
+        allow.is_none_or(|names| names.iter().any(|allowed| allowed == *name))
+          && deny.is_none_or(|names| !names.iter().any(|denied| denied == *name))
+      })
+      .map(|(name, tool)| (name.clone(), tool.clone()))
+      .collect();
+    Self { tools }
+  }
+
   pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
     self.tools.get(name)
   }

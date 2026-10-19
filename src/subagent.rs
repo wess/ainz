@@ -1,3 +1,5 @@
+mod catalog;
+pub use catalog::{AgentCatalog, AgentDefinition};
 use std::{
   collections::BTreeMap,
   future::Future,
@@ -205,7 +207,7 @@ impl Tool for SubagentTool {
         "type": "object", "properties": {
           "action": {"type": "string", "enum": ["delegate", "collect", "list"]},
           "prompt": {"type": "string", "minLength": 1},
-          "role": {"type": "string"},
+          "role": {"type": "string", "description": "Optional named agent type from the discovered agent catalog"},
           "name": {"type": "string"},
           "background": {"type": "boolean"}
         }, "additionalProperties": false

@@ -6,7 +6,7 @@ overrides the path). The active provider and model remain global CLI overrides t
 `--provider`, `--model`, `AINZ_PROVIDER`, and `AINZ_MODEL`.
 
 With no configured model, `ainz` opens an interactive setup flow before starting the first
-session. Enter `/config` later to add a provider or switch the active provider and model without
+session. Enter `/model` later to add a provider or switch the active provider and model without
 leaving the app.
 
 ## Manage profiles
@@ -81,7 +81,7 @@ var = "OPENROUTER_API_KEY"
 ```
 
 A profile written before this existed keeps its `api_key_env` name and resolves exactly as it
-did. `/config` on a saved provider offers to keep what it uses or change it, which is the usual
+did. `/model` on a saved provider offers to keep what it uses or change it, which is the usual
 reason to open setup again.
 
 ## Custom HTTP providers
@@ -143,3 +143,49 @@ Process providers are adapters around complete coding agents, not raw model APIs
 tools and session behavior remain authoritative; Ainz does not pass them its tool schemas.
 They omit image content from the rendered transcript, and report token usage only in the
 streaming mode.
+
+## Native APIs and fallback
+
+The OpenAI preset uses Responses. Anthropic uses Messages, including signed thinking blocks;
+OpenRouter uses Chat Completions. Existing profiles remain on Chat Completions.
+
+```sh
+ainz login
+ainz providers add openai --preset openai
+ainz providers add anthropic --preset anthropic --thinking-tokens 1024
+ainz providers add router --preset openrouter
+ainz providers add backup --endpoint https://gateway.example.org/v1 \
+  --wire-api responses --model BACKUP_MODEL --reasoning-effort high
+ainz providers fallback anthropic backup
+ainz doctor --check-provider
+```
+
+`--wire-api chat|responses|messages` also works on presets, so a compatible gateway can use
+Responses. `--api-key-env` overrides a preset's credential variable. `--model` on `providers add`
+sets the profile's default model; `--known-model` adds entries to its selection list.
+
+`/settings` includes Provider API, Reasoning effort, and Fallback providers under Connection.
+Reasoning effort applies only to Responses: `none`, `minimal`, `low`, `medium`, `high`, or
+`xhigh`; leave it unset for the model's default. A Messages thinking budget must be between
+1024 and 128000 tokens. The upstream decides which options its model supports.
+
+The active provider is tried first. Each named fallback can have its own `model`; without one
+it uses the active model. Fallback is explicit and buffers each attempt's events, so a failed
+partial reply never appears alongside a successful backup answer. This delays visible output
+until an attempt completes when fallback is enabled. Run `ainz providers fallback` with no names
+to clear the chain. Repeated `--fallback-provider NAME` flags override it for one run, as does
+`AINZ_FALLBACK_PROVIDERS` with comma-separated names. `AINZ_ENDPOINT` overrides the selected
+HTTP profile's endpoint as well as the legacy endpoint.
+
+Responses requests set `store = false`. Output items, including encrypted reasoning, persist
+in the local session and replay only to the model that produced them. Hosted tools and
+WebSocket transport are not implemented. Native Messages retains signed/redacted thinking for
+the next tool turn. Reasoning deltas are JSON events; the IRC answer stays separate.
+
+`doctor --check-provider` makes a billable request to the active model with no tools, retries,
+or fallback and a 45-second timeout. Listing models alone does not prove inference access.
+
+`budget_usd` in the config, or `--budget-usd AMOUNT`, stops further model requests and tool
+execution after the run's reported cost reaches the amount. Providers that omit cost cannot
+enforce this limit, and an in-flight request may already have exceeded it. No token prices are
+estimated locally.

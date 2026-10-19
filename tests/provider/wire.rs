@@ -22,6 +22,9 @@ fn replay(lines: &[&str]) -> Result<ProviderReply> {
         .collect::<Result<_>>()?,
       tool_call_id: None,
       images: Vec::new(),
+      thinking: None,
+      response_items: Vec::new(),
+      response_model: None,
     },
     usage,
   })

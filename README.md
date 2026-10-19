@@ -4,12 +4,12 @@ Ainz is a small agent harness built in Rust on Tokio. The model loop, tools, ses
 history, and extensions are library primitives; the terminal interface is one consumer of
 them, alongside one-shot, JSON event stream, and JSON-RPC modes.
 
-It talks to OpenAI-compatible chat-completions endpoints with streaming and tool calls,
+It talks to native Messages and Responses APIs and OpenAI-compatible Chat Completions endpoints with streaming and tool calls,
 including a LiteLLM proxy, and to headless coding CLIs as process providers. Sessions are
 resumable trees with automatic, branch-aware compaction. Tools cover workspace read, list,
 search, write, edit, and shell, reading a URL, a plan the session keeps as it works, durable
 background jobs, lazily loaded skills, prompt templates, subagents, MCP servers over stdio and
-Streamable HTTP, and content-pinned Lua, WebAssembly component, or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
+Streamable HTTP or SSE, and content-pinned Lua, WebAssembly component, or process plugins. Sessions remember across runs: durable memory kept locally or in Synapse,
 search over earlier sessions, and skills a session writes for the next one.
 
 ## Install
@@ -61,8 +61,9 @@ See [embedding](docs/embedding.md) for the public API and feature choices, and
 
 ## Configure
 
-Running `ainz` with no configured model opens the setup flow. `/config` inside a session
-adds or switches providers without restarting, and the same operations are scriptable:
+Running `ainz` with no configured model opens setup. `/config`, `/settings`, and F2 open
+searchable settings. Select **Provider and model**, or use `/model`, to add or switch providers.
+The same provider operations are scriptable:
 
 ```sh
 ainz providers add ollama --preset ollama
@@ -108,8 +109,14 @@ enabled = false
 mesh = false
 ```
 
-`/settings` opens the same list in a session: provider and model, permissions, memory, Synapse,
-the agent mesh, the roster, and header art, each with a line saying what it does.
+`/settings` groups connection, interface, sessions, keys, and memory preferences. Tab changes
+sections; `/` searches. Select an action under **Keys** to record its shortcut. Use `/statusline`
+to choose and order fields in the IRC bar above the prompt. See [settings](docs/settings.md).
+
+Start `ainz --detach` to keep an agent running when you leave. `Ctrl+B D` detaches,
+`ainz attach` reconnects, and `Ctrl+B S` switches sessions. `/rename review` gives a session
+a name for `ainz attach review`. Enable **Background sessions** in settings to make hosting
+the default. Notifications start off. See [background sessions](docs/sessions.md).
 
 Without a `provider`, the legacy top-level `endpoint` and `api_key_env` keys describe one HTTP
 provider. HTTP profiles use Ainz's own model and tool loop. Process profiles run a coding CLI's
@@ -121,6 +128,9 @@ they run read-only, and `auto` permits workspace edits. See
 
 ```sh
 ainz                                    # interactive
+ainz "inspect the failing tests"         # send the first request immediately
+cat build.log | ainz -p "explain this"    # include piped input and exit
+ainz -c                                 # continue the latest saved conversation
 ainz ask "inspect the project and run its tests"
 ainz ask --image screenshot.png "explain this interface"
 ainz ask --json "summarize this workspace"   # machine-readable event stream
@@ -141,6 +151,9 @@ ainz synapse
 ainz mcp
 ainz plugins list
 ainz doctor
+ainz doctor --check-provider
+ainz agents
+ainz jobs list
 ```
 
 JSON mode never opens an approval prompt; pass `--permissions auto` explicitly when a
@@ -390,3 +403,5 @@ capabilities, fresh states, memory and instruction budgets, and cancellation. Co
 wall-clock limits, no WASI authority, and capability-checked host imports per tool. Process
 plugins are trusted native programs; capabilities drive visibility and approval but cannot
 sandbox one. See [`docs/plugins.md`](docs/plugins.md).
+
+The [Solar comparison](docs/parity.md) records capability alignment and intentional differences.

@@ -30,6 +30,12 @@ pub fn message_bytes(message: &Message) -> usize {
       .map(|call| call.name.len() + json_len(&call.arguments) + call.id.len())
       .sum::<usize>()
     + message.tool_call_id.as_ref().map_or(0, String::len)
+    + message.thinking.as_ref().map_or(0, |thinking| {
+      thinking.text.len()
+        + thinking.signature.as_ref().map_or(0, String::len)
+        + thinking.redacted.iter().map(String::len).sum::<usize>()
+    })
+    + message.response_items.iter().map(json_len).sum::<usize>()
     + message.images.len() * 4_096
     + 12
 }

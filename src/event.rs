@@ -14,6 +14,9 @@ pub enum Event {
   SessionStart {
     session_id: String,
   },
+  ThinkingDelta {
+    text: String,
+  },
   TextDelta {
     text: String,
   },

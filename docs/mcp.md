@@ -128,3 +128,36 @@ event bodies up to 8 MiB, and returns as soon as the event answering the request
 
 The implemented transport follows the [protocol transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 and [schema reference](https://modelcontextprotocol.io/specification/2025-11-25/schema).
+
+## Remote servers and sign-in
+
+Remote servers can be registered from the shell:
+
+```sh
+ainz mcp add-http docs https://tools.example.org/mcp
+ainz mcp add-sse legacy https://tools.example.org/sse
+ainz mcp login legacy
+ainz mcp logout legacy
+```
+
+`login` prints a browser URL and waits for the loopback callback. OAuth uses PKCE and state
+validation. Tokens are kept in `mcpauth.json` beside the Ainz config with mode `0600`;
+`AINZ_MCP_AUTH` overrides its path. Expiring access tokens refresh before connection. Explicit
+Authorization headers take precedence over stored sign-in. No browser opens during ordinary
+agent startup. The SSE transport refuses a POST endpoint on another origin and does not follow
+redirects with configured credentials.
+
+Use `transport = "sse"` for HTTP+SSE, `"streamable_http"` (or `"http"`) for Streamable HTTP.
+Both also work in explicit JSON launch profiles using `"type": "sse"` or `"type": "http"`.
+
+`${NAME}` and `${NAME:-fallback}` expand in a server's command, arguments, environment, URL,
+and headers when it connects. The stored profile retains placeholders. An unset required
+variable fails that connection with the variable's name; it never sends the literal placeholder.
+A plain `$NAME` is left unchanged.
+
+```toml
+[servers.remote]
+transport = "streamable_http"
+url = "https://tools.example.org/mcp"
+headers = { Authorization = "Bearer ${TOOLS_TOKEN}" }
+```

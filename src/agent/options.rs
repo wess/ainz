@@ -9,6 +9,7 @@ pub struct RunOptions {
   // what may run without asking, whatever the mode
   pub rules: PermissionRules,
   pub max_steps: usize,
+  pub budget_usd: Option<f64>,
   pub max_output_bytes: usize,
   pub context_tokens: usize,
   pub compact_at_tokens: usize,
@@ -34,6 +35,7 @@ impl From<&Config> for RunOptions {
       permissions: config.permissions,
       rules: config.rules.clone(),
       max_steps: config.max_steps,
+      budget_usd: config.budget_usd,
       max_output_bytes: config.max_output_bytes,
       context_tokens: config.context_tokens,
       compact_at_tokens: config.compact_at_tokens,
@@ -47,6 +49,12 @@ impl From<&Config> for RunOptions {
 impl RunOptions {
   /// Checked before a run changes the session or starts hooks and providers.
   pub fn validate(&self) -> Result<()> {
+    ensure!(
+      self
+        .budget_usd
+        .is_none_or(|budget| budget.is_finite() && budget > 0.0),
+      "budget_usd must be positive and finite"
+    );
     ensure!(self.max_steps > 0, "max_steps must be greater than zero");
     ensure!(
       self.compact_at_tokens > 0 && self.compact_at_tokens < self.context_tokens,

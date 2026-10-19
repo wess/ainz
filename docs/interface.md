@@ -86,7 +86,8 @@ files, so artwork installed while Ainz is running is available immediately.
 Use the [masthead studio](https://wess.io/ainz/masthead/) to draw or extend a header and copy an
 installation command. See [headers](headers.md) for files, paths, and limits.
 
-`/settings` controls the roster, header, bell, and editing preferences. `/inline` chooses the
+`/settings`, `/config`, and F2 open [settings](settings.md), with sections, search, status-bar
+customization, and shortcut recording. `/model` opens provider setup. `/inline` chooses the
 terminal's own scrollback instead of the full-screen buffer on the next launch. Inline mode
 has no agent roster or full-screen header preview. Expanded tool output already flushed into
 terminal scrollback retains its formatting.
@@ -95,4 +96,8 @@ Line stamps use the clock of the machine the buffer is being read on.
 
 Use the [Theme Designer](https://wess.io/ainz/theme/) to change chat colors. `/themes` lists
 installed palettes; `/theme NAME` applies or reloads one immediately, and `/theme default` resets
-it. See [themes](themes.md) for the file format and scope. Nick and status formats remain fixed.
+it. See [themes](themes.md) for the file format and scope. Nick formats keep the IRC layout; `/statusline` customizes the status fields.
+
+Use `ainz --detach` to leave an agent running. `Ctrl+B D` detaches, `Ctrl+B S` switches
+sessions, and `ainz attach` reconnects. See [background sessions](sessions.md) for naming,
+attention badges, and optional notifications.

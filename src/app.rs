@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use ainz::{
-  Agent, Approver, Config, Event, EventSink, HttpProvider, JobStore, McpHub, McpProfile,
-  PermissionMode, PluginCatalog, ProcessOutput, ProcessProvider, PromptCatalog, ProviderConfig,
-  ProviderKind, RunOptions, RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler,
-  SubagentRegistry, SubagentRequest, SubagentResult,
+  Agent, Approver, Config, Event, EventSink, JobStore, McpHub, McpProfile, PermissionMode,
+  PluginCatalog, ProcessOutput, PromptCatalog, ProviderConfig, ProviderKind, RunOptions,
+  RuntimeProvider, Session, SessionStore, SkillCatalog, SubagentHandler, SubagentRegistry,
+  SubagentRequest, SubagentResult,
   agent::Approval,
   config::MemoryBackend,
   deny_all, instruction,
@@ -79,28 +79,7 @@ pub(crate) async fn make_agent_parts(
   events: EventSink,
   approver: Approver,
 ) -> Result<(Agent<RuntimeProvider>, RunOptions, Arc<McpHub>)> {
-  let profile = config.active_provider()?;
-  let provider = match profile.kind {
-    ProviderKind::Http => RuntimeProvider::Http(HttpProvider::new(
-      profile
-        .endpoint
-        .clone()
-        .context("HTTP provider requires an endpoint")?,
-      config.model.clone(),
-      config.api_key_for(&profile).await?,
-      config.provider_retries,
-    )?),
-    ProviderKind::Process => RuntimeProvider::Process(ProcessProvider::new(
-      profile
-        .command
-        .context("process provider requires a command")?,
-      profile.args,
-      config.model.clone(),
-      workspace.to_path_buf(),
-      config.permissions,
-      profile.output,
-    )),
-  };
+  let provider = RuntimeProvider::configured(config, workspace).await?;
   let mut catalog = PluginCatalog::discover(workspace).await?;
   if config.yeet {
     catalog.trust_all();
@@ -215,6 +194,13 @@ pub(crate) async fn make_agent_parts(
       }),
     }
   }
+  let agents = ainz::subagent::AgentCatalog::discover(workspace).await?;
+  if !agents.agents.is_empty() {
+    instructions.push_str("\n\nNamed agent types (use subagent.role to select):\n");
+    for agent in &agents.agents {
+      instructions.push_str(&format!("- {}\n", agent.summary()));
+    }
+  }
   let options = RunOptions {
     instructions,
     memory_nudge: (config.memory.remember_on_compact && !memory.is_off()).then(|| {
@@ -240,7 +226,14 @@ pub(crate) async fn make_agent_parts(
       prompt,
       role,
     } = request;
-    let provider = child_provider.clone();
+    let definition = role.as_deref().and_then(|role| agents.get(role)).cloned();
+    let provider = definition
+      .as_ref()
+      .and_then(|agent| agent.model.clone())
+      .map_or_else(
+        || child_provider.clone(),
+        |model| child_provider.with_model(model),
+      );
     let mut tools = child_tools.clone();
     let workspace = child_workspace.clone();
     let mut options = child_options.clone();
@@ -269,6 +262,28 @@ pub(crate) async fn make_agent_parts(
           Err(error) => events.emit(Event::Error {
             message: format!("{name} could not join the mesh: {error:#}"),
           }),
+        }
+      }
+      if let Some(definition) = definition {
+        options.instructions.push_str(&format!(
+          "\n\nInstructions for agent type {}:\n{}",
+          definition.name, definition.instructions
+        ));
+        tools = tools.restricted(
+          definition.tools.as_deref(),
+          definition.disallowed_tools.as_deref(),
+        );
+        if let Some(steps) = definition.max_steps {
+          options.max_steps = options.max_steps.min(steps);
+        }
+        if let Some(mode) = definition.permission_mode {
+          options.permissions = match (options.permissions, mode) {
+            (PermissionMode::ReadOnly, _) | (_, PermissionMode::ReadOnly) => {
+              PermissionMode::ReadOnly
+            }
+            (PermissionMode::Ask, _) | (_, PermissionMode::Ask) => PermissionMode::Ask,
+            _ => PermissionMode::Auto,
+          };
         }
       }
       events.emit(Event::SubagentStart {
@@ -345,6 +360,7 @@ pub async fn interactive(
   mut config: Config,
   mut session: Session,
   mut initial_prompt: Option<String>,
+  mut link: Option<crate::live::Link>,
 ) -> Result<()> {
   let store = SessionStore::default_store()?;
   let prompts = PromptCatalog::discover(&workspace).await?;
@@ -361,6 +377,7 @@ pub async fn interactive(
         &mut config,
         session,
         initial_prompt.take(),
+        &mut link,
       )
       .await?;
       session = outcome.session;
@@ -513,7 +530,7 @@ fn print_header(config: &Config) {
   );
 }
 
-async fn configure(
+pub(crate) async fn configure(
   config: &mut Config,
   lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
 ) -> Result<()> {
@@ -524,6 +541,7 @@ async fn configure(
   println!("  1  Ollama");
   println!("  2  Ollama Cloud");
   println!("  3  LiteLLM proxy");
+  println!("     openai / anthropic / openrouter");
   println!("  4  Codex CLI (headless)");
   println!("  5  Claude Code (headless)");
   println!("  6  Custom HTTP endpoint");
@@ -556,6 +574,9 @@ async fn configure(
       .await?;
       (name, ProviderConfig::http(endpoint, api_key_env))
     }
+    "openai" => ("openai".into(), ProviderConfig::openai()),
+    "anthropic" => ("anthropic".into(), ProviderConfig::anthropic()),
+    "openrouter" => ("openrouter".into(), ProviderConfig::openrouter()),
     "4" | "codex" => ("codex".to_string(), preset_profile(ProviderPreset::Codex)),
     "5" | "claude" | "claude-code" => {
       let mut profile = preset_profile(ProviderPreset::ClaudeCode);
@@ -594,19 +615,9 @@ async fn configure(
     anyhow::bail!("provider name must be non-empty and contain no whitespace");
   }
   if profile.kind == ProviderKind::Http && profile.models.is_empty() {
-    let key = (!profile.api_key_env.is_empty())
-      .then(|| std::env::var(&profile.api_key_env).ok())
-      .flatten()
-      .filter(|key| !key.is_empty());
-    let provider = HttpProvider::new(
-      profile
-        .endpoint
-        .clone()
-        .context("HTTP provider requires an endpoint")?,
-      String::new(),
-      key,
-      config.provider_retries,
-    )?;
+    let provider =
+      RuntimeProvider::from_profile(config, &profile, String::new(), std::path::Path::new("."))
+        .await?;
     match provider.models().await {
       Ok(models) => profile.models = models,
       Err(error) => eprintln!("could not ask the endpoint which models it serves: {error:#}"),
@@ -821,4 +832,9 @@ fn approve(call: &ToolCall, risk: Risk) -> Approval {
     .await
     .unwrap_or(false)
   })
+}
+
+pub(crate) async fn configure_standalone(config: &mut Config) -> Result<()> {
+  let mut lines = BufReader::new(tokio::io::stdin()).lines();
+  configure(config, &mut lines).await
 }

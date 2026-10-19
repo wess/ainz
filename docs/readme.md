@@ -8,6 +8,8 @@ commands and configuration in one place.
 | --- | --- |
 | [Install](install.md) | Release binaries, source builds, updates, and uninstalling |
 | [Interface](interface.md) | IRC buffer, channel topics, run completion, keys, and steering |
+| [Settings](settings.md) | Searchable settings, status-bar fields, and custom shortcuts |
+| [Sessions](sessions.md) | Detach, reconnect, multiplex, attention, and notifications |
 | [Themes](themes.md) | Theme Designer, palette roles, installation, and live switching |
 | [Headers](headers.md) | Mascots, masthead studio, installing and sharing artwork |
 | [Providers](providers.md) | HTTP endpoints and process adapters |
@@ -17,7 +19,9 @@ commands and configuration in one place.
 | [Memory](memory.md) | Recall, session search, and proposed skills |
 | [Import](import.md) | Reuse existing tool servers and extensions |
 | [Plugins](plugins.md) | Lua, component, and process plugins |
-| [MCP](mcp.md) | Stdio and Streamable HTTP tool servers |
+| [MCP](mcp.md) | Stdio, Streamable HTTP, SSE, and remote sign-in |
+| [Agents](agents.md) | Named subagent definitions and constraints |
+| [Solar comparison](parity.md) | Capability alignment and intentional differences |
 | [Synapse](synapse.md) | Shared memory, guidance, skills, and agent mesh |
 | [Embedding](embedding.md) | Host the Rust core without the terminal interface |
 | [JSON-RPC](rpc.md) | Control a persistent Ainz process |

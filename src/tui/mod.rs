@@ -1,3 +1,5 @@
+mod context;
+mod status;
 use std::{
   io::{self, Stdout},
   sync::{
@@ -61,6 +63,9 @@ enum Choice {
 impl Choice {
   fn name(&self) -> &str {
     match self {
+      Self::Preset(ProviderPreset::Openai) => "OpenAI",
+      Self::Preset(ProviderPreset::Anthropic) => "Anthropic",
+      Self::Preset(ProviderPreset::Openrouter) => "OpenRouter",
       Self::Preset(ProviderPreset::Ollama) => "Ollama",
       Self::Preset(ProviderPreset::OllamaCloud) => "Ollama Cloud",
       Self::Preset(ProviderPreset::LiteLlm) => "LiteLLM",
@@ -74,6 +79,18 @@ impl Choice {
 
   fn detail(&self) -> (&str, &str) {
     match self {
+      Self::Preset(ProviderPreset::Openai) => (
+        "Cloud models",
+        "Uses the provider’s native API with your own credentials.",
+      ),
+      Self::Preset(ProviderPreset::Anthropic) => (
+        "Cloud models",
+        "Uses the provider’s native API with your own credentials.",
+      ),
+      Self::Preset(ProviderPreset::Openrouter) => (
+        "Cloud models",
+        "Uses the provider’s native API with your own credentials.",
+      ),
       Self::Preset(ProviderPreset::Ollama) => (
         "Local models",
         "Connects to the local server and discovers installed models automatically.",
@@ -124,6 +141,9 @@ impl Choice {
 
   fn key(&self) -> Option<&str> {
     match self {
+      Self::Preset(ProviderPreset::Openai) => Some("openai"),
+      Self::Preset(ProviderPreset::Anthropic) => Some("anthropic"),
+      Self::Preset(ProviderPreset::Openrouter) => Some("openrouter"),
       Self::Preset(ProviderPreset::Ollama) => Some("ollama"),
       Self::Preset(ProviderPreset::OllamaCloud) => Some("ollama-cloud"),
       Self::Preset(ProviderPreset::LiteLlm) => Some("litellm"),
@@ -140,8 +160,10 @@ async fn discover_models(
   provider: &ProviderConfig,
   endpoint: String,
 ) -> Result<Vec<String>> {
-  let key = config.api_key_for(provider).await?;
-  HttpProvider::new(endpoint, String::new(), key, config.provider_retries)?
+  let mut profile = provider.clone();
+  profile.endpoint = Some(endpoint);
+  ainz::RuntimeProvider::from_profile(config, &profile, String::new(), std::path::Path::new("."))
+    .await?
     .models()
     .await
 }
@@ -634,6 +656,9 @@ async fn configure_inner(
   let mut choices = vec![
     Choice::Preset(ProviderPreset::Ollama),
     Choice::Preset(ProviderPreset::OllamaCloud),
+    Choice::Preset(ProviderPreset::Openai),
+    Choice::Preset(ProviderPreset::Anthropic),
+    Choice::Preset(ProviderPreset::Openrouter),
     Choice::Preset(ProviderPreset::LiteLlm),
     Choice::Preset(ProviderPreset::Codex),
     Choice::Preset(ProviderPreset::ClaudeCode),
@@ -645,6 +670,33 @@ async fn configure_inner(
   };
 
   let (name, profile, direct_model) = match choice {
+    Choice::Preset(
+      preset @ (ProviderPreset::Openai | ProviderPreset::Anthropic | ProviderPreset::Openrouter),
+    ) => {
+      let mut profile = preset_profile(preset);
+      let name = match preset {
+        ProviderPreset::Openai => "openai",
+        ProviderPreset::Anthropic => "anthropic",
+        _ => "openrouter",
+      };
+      let Some(credential) =
+        choose_credential(terminal, config, name, name, &profile.api_key_env, None).await?
+      else {
+        return Ok(None);
+      };
+      profile.credential = Some(credential);
+      terminal.draw(|frame| render_loading(frame, "Finding provider models…"))?;
+      if let Ok(models) = discover_models(
+        config,
+        &profile,
+        profile.endpoint.clone().unwrap_or_default(),
+      )
+      .await
+      {
+        profile.models = models;
+      }
+      (name.into(), profile, None)
+    }
     Choice::Preset(ProviderPreset::Ollama) => {
       let mut profile = preset_profile(ProviderPreset::Ollama);
       terminal.draw(|frame| render_loading(frame, "Finding local models…"))?;

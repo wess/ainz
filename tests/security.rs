@@ -24,6 +24,7 @@ fn options() -> RunOptions {
     compact_at_tokens: 12000,
     preserve_messages: 4,
     memory_nudge: None,
+    budget_usd: None,
     hooks: HookRunner::default(),
   }
 }
@@ -64,6 +65,9 @@ fn script(calls: Vec<ToolCall>) -> Script {
         tool_calls: calls,
         tool_call_id: None,
         images: vec![],
+        thinking: None,
+        response_items: Vec::new(),
+        response_model: None,
       },
       usage: Usage::default(),
     },

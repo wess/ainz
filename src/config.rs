@@ -27,6 +27,15 @@ pub enum ProviderKind {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum WireApi {
+  #[default]
+  Chat,
+  Responses,
+  Messages,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessOutput {
   #[default]
   Text,
@@ -160,9 +169,121 @@ impl PermissionRules {
   }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusItem {
+  Provider,
+  Model,
+  Mode,
+  Memory,
+  Tokens,
+  InputTokens,
+  OutputTokens,
+  Context,
+  Todos,
+  Agents,
+  Workspace,
+  Session,
+  Activity,
+  Attention,
+  Branch,
+}
+
+impl StatusItem {
+  pub const ALL: [Self; 15] = [
+    Self::Provider,
+    Self::Model,
+    Self::Mode,
+    Self::Memory,
+    Self::Tokens,
+    Self::InputTokens,
+    Self::OutputTokens,
+    Self::Context,
+    Self::Todos,
+    Self::Agents,
+    Self::Workspace,
+    Self::Session,
+    Self::Activity,
+    Self::Attention,
+    Self::Branch,
+  ];
+
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Provider => "provider",
+      Self::Model => "model",
+      Self::Mode => "mode",
+      Self::Memory => "memory",
+      Self::Tokens => "tokens",
+      Self::InputTokens => "inputtokens",
+      Self::OutputTokens => "outputtokens",
+      Self::Context => "context",
+      Self::Todos => "todos",
+      Self::Agents => "agents",
+      Self::Workspace => "workspace",
+      Self::Session => "session",
+      Self::Activity => "activity",
+      Self::Attention => "attention",
+      Self::Branch => "branch",
+    }
+  }
+
+  pub fn parse(value: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|item| item.label() == value)
+  }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Notifications {
+  #[default]
+  Off,
+  NeedsInput,
+  All,
+}
+impl Notifications {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Off => "off",
+      Self::NeedsInput => "needs input",
+      Self::All => "needs input + finished",
+    }
+  }
+  pub fn accepts(self, state: &str) -> bool {
+    match self {
+      Self::Off => false,
+      Self::NeedsInput => state == "needs approval",
+      Self::All => matches!(state, "needs approval" | "finished run" | "failed run"),
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDelivery {
+  #[default]
+  Terminal,
+  System,
+}
+impl NotificationDelivery {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Terminal => "terminal",
+      Self::System => "system",
+    }
+  }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct UiConfig {
+  pub background: bool,
+  pub notifications: Notifications,
+  pub notification_delivery: NotificationDelivery,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub keybindings: crate::keybind::Overrides,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub status_line: Option<Vec<StatusItem>>,
   pub roster_visible: bool,
   pub header: String,
   pub theme: String,
@@ -177,6 +298,11 @@ pub struct UiConfig {
 impl Default for UiConfig {
   fn default() -> Self {
     Self {
+      background: false,
+      notifications: Notifications::Off,
+      notification_delivery: NotificationDelivery::Terminal,
+      keybindings: BTreeMap::new(),
+      status_line: None,
       roster_visible: true,
       header: "random".into(),
       theme: "default".into(),
@@ -200,6 +326,16 @@ pub struct HookDef {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProviderConfig {
+  #[serde(default)]
+  pub wire_api: WireApi,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reasoning_effort: Option<String>,
+  #[serde(default)]
+  pub thinking_tokens: usize,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
   pub kind: ProviderKind,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub endpoint: Option<String>,
@@ -233,6 +369,11 @@ impl ProviderConfig {
   pub fn http(endpoint: impl Into<String>, api_key_env: impl Into<String>) -> Self {
     Self {
       kind: ProviderKind::Http,
+      wire_api: WireApi::Chat,
+      model: None,
+      reasoning_effort: None,
+      thinking_tokens: 0,
+      headers: BTreeMap::new(),
       endpoint: Some(endpoint.into()),
       api_key_env: api_key_env.into(),
       credential: None,
@@ -246,6 +387,11 @@ impl ProviderConfig {
   pub fn process(command: impl Into<String>, args: Vec<String>, output: ProcessOutput) -> Self {
     Self {
       kind: ProviderKind::Process,
+      wire_api: WireApi::Chat,
+      model: None,
+      reasoning_effort: None,
+      thinking_tokens: 0,
+      headers: BTreeMap::new(),
       endpoint: None,
       api_key_env: String::new(),
       credential: None,
@@ -254,6 +400,24 @@ impl ProviderConfig {
       output,
       models: Vec::new(),
     }
+  }
+
+  pub fn openai() -> Self {
+    Self {
+      wire_api: WireApi::Responses,
+      ..Self::http("https://api.openai.com/v1", "OPENAI_API_KEY")
+    }
+  }
+
+  pub fn anthropic() -> Self {
+    Self {
+      wire_api: WireApi::Messages,
+      ..Self::http("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY")
+    }
+  }
+
+  pub fn openrouter() -> Self {
+    Self::http("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
   }
 
   pub fn ollama() -> Self {
@@ -309,6 +473,27 @@ impl ProviderConfig {
   }
 
   pub fn validate(&self, name: &str) -> Result<()> {
+    if self.reasoning_effort.as_deref().is_some_and(|value| {
+      !matches!(
+        value,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+      )
+    }) {
+      bail!("provider {name} has an invalid reasoning effort");
+    }
+    if self.reasoning_effort.is_some() && self.wire_api != WireApi::Responses {
+      bail!("provider {name}: reasoning_effort requires wire_api = responses");
+    }
+    if self.thinking_tokens > 0
+      && (self.wire_api != WireApi::Messages
+        || self.thinking_tokens < 1024
+        || self.thinking_tokens > 128_000)
+    {
+      bail!("provider {name}: thinking_tokens requires Messages and a budget from 1024 to 128000");
+    }
+    if self.kind == ProviderKind::Process && self.wire_api != WireApi::Chat {
+      bail!("provider {name}: wire_api is only supported for HTTP providers");
+    }
     match self.kind {
       ProviderKind::Http if self.endpoint.as_deref().is_none_or(str::is_empty) => {
         bail!("HTTP provider {name} requires an endpoint")
@@ -325,6 +510,7 @@ impl ProviderConfig {
 #[serde(default)]
 pub struct Config {
   pub provider: Option<String>,
+  pub fallback_providers: Vec<String>,
   pub endpoint: String,
   pub model: String,
   pub api_key_env: String,
@@ -333,6 +519,7 @@ pub struct Config {
   pub provider_retries: usize,
   pub providers: BTreeMap<String, ProviderConfig>,
   pub max_steps: usize,
+  pub budget_usd: Option<f64>,
   pub max_output_bytes: usize,
   pub context_tokens: usize,
   pub compact_at_tokens: usize,
@@ -357,12 +544,14 @@ impl Default for Config {
   fn default() -> Self {
     Self {
       provider: None,
+      fallback_providers: Vec::new(),
       endpoint: "http://127.0.0.1:11434/v1".into(),
       model: "".into(),
       api_key_env: default_api_key_env(),
       provider_retries: 3,
       providers: BTreeMap::new(),
       max_steps: 32,
+      budget_usd: None,
       max_output_bytes: 64 * 1024,
       context_tokens: 128_000,
       compact_at_tokens: 96_000,
@@ -420,6 +609,22 @@ impl Config {
     }
     if let Ok(provider) = env::var("AINZ_PROVIDER") {
       config.provider = Some(provider);
+    }
+    if let Ok(endpoint) = env::var("AINZ_ENDPOINT")
+      && let Some(profile) = config
+        .provider
+        .as_ref()
+        .and_then(|name| config.providers.get_mut(name))
+    {
+      profile.endpoint = Some(endpoint);
+    }
+    if let Ok(names) = env::var("AINZ_FALLBACK_PROVIDERS") {
+      config.fallback_providers = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
     }
     if let Ok(backend) = env::var("AINZ_MEMORY") {
       config.memory.backend = MemoryBackend::parse(&backend)?;
@@ -513,6 +718,8 @@ impl Config {
   }
 
   pub fn validate(&self) -> Result<()> {
+    #[cfg(feature = "cli")]
+    crate::keybind::validate(&self.ui.keybindings)?;
     if self.model.trim().is_empty() {
       bail!(
         "no model configured; use `ainz providers use NAME MODEL`, set AINZ_MODEL, or set model in {}",
@@ -521,6 +728,19 @@ impl Config {
     }
     let provider = self.active_provider()?;
     provider.validate(self.provider.as_deref().unwrap_or("default"))?;
+    for name in &self.fallback_providers {
+      let profile = self
+        .providers
+        .get(name)
+        .with_context(|| format!("fallback provider {name} is not configured"))?;
+      profile.validate(name)?;
+    }
+    if self
+      .budget_usd
+      .is_some_and(|budget| !budget.is_finite() || budget <= 0.0)
+    {
+      bail!("budget_usd must be positive and finite");
+    }
     if self.max_steps == 0 {
       bail!("max_steps must be greater than zero");
     }

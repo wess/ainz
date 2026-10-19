@@ -5,7 +5,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
   System,
@@ -16,6 +16,12 @@ pub enum Role {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Message {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub thinking: Option<Thinking>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub response_items: Vec<Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub response_model: Option<String>,
   pub role: Role,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub content: Option<String>,
@@ -28,6 +34,18 @@ pub struct Message {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Thinking {
+  pub text: String,
+  /// Anthropic returns a signature that has to come back verbatim on the next request.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub signature: Option<String>,
+  /// Thinking the provider encrypted rather than showed. It still has to go back with the
+  /// tool call it preceded, or the next request is refused.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub redacted: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Image {
   pub url: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +53,10 @@ pub struct Image {
 }
 
 impl Image {
+  pub fn parts(&self) -> Option<(&str, &str)> {
+    self.url.strip_prefix("data:")?.split_once(";base64,")
+  }
+
   pub async fn from_path(path: &Path) -> Result<Self> {
     let media_type = match path
       .extension()
@@ -65,34 +87,62 @@ impl Image {
   }
 }
 
+impl Role {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::System => "system",
+      Self::User => "user",
+      Self::Assistant => "assistant",
+      Self::Tool => "tool",
+    }
+  }
+}
+
 impl Message {
-  pub fn text(role: Role, content: impl Into<String>) -> Self {
+  fn empty(role: Role) -> Self {
     Self {
       role,
-      content: Some(content.into()),
+      content: None,
+      thinking: None,
       tool_calls: Vec::new(),
       tool_call_id: None,
       images: Vec::new(),
+      response_items: Vec::new(),
+      response_model: None,
+    }
+  }
+
+  pub fn text(role: Role, content: impl Into<String>) -> Self {
+    Self {
+      content: Some(content.into()),
+      ..Self::empty(role)
     }
   }
 
   pub fn tool(id: impl Into<String>, content: impl Into<String>) -> Self {
     Self {
-      role: Role::Tool,
-      content: Some(content.into()),
-      tool_calls: Vec::new(),
       tool_call_id: Some(id.into()),
-      images: Vec::new(),
+      ..Self::text(Role::Tool, content)
     }
   }
 
   pub fn user(content: impl Into<String>, images: Vec<Image>) -> Self {
     Self {
-      role: Role::User,
-      content: Some(content.into()),
-      tool_calls: Vec::new(),
-      tool_call_id: None,
       images,
+      ..Self::text(Role::User, content)
+    }
+  }
+
+  pub fn assistant(
+    content: Option<String>,
+    thinking: Option<Thinking>,
+    tool_calls: Vec<ToolCall>,
+  ) -> Self {
+    Self {
+      content,
+      thinking,
+      tool_calls,
+      ..Self::empty(Role::Assistant)
     }
   }
 }
