@@ -40,7 +40,13 @@ pub(super) async fn run_hook(
   let stdout = child.stdout.take().expect("stdout was piped");
   let stderr = child.stderr.take().expect("stderr was piped");
   let write = async {
-    stdin.write_all(&bytes).await.context("write hook stdin")?;
+    // A hook may exit without reading its payload; its exit status, not the pipe, decides.
+    match stdin.write_all(&bytes).await {
+      Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+        return Err(error).context("write hook stdin");
+      }
+      _ => {}
+    }
     drop(stdin);
     Ok::<_, anyhow::Error>(())
   };
