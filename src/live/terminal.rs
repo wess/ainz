@@ -15,14 +15,15 @@ pub(super) fn spawn(command: &mut Command, cols: u16, rows: u16) -> Result<(Pty,
   let mut master = -1;
   let mut slave = -1;
   let mut size = size(cols, rows);
-  // openpty initializes two descriptors and copies the supplied window size.
+  // openpty initializes two descriptors and copies the supplied window size. Linux takes the
+  // size as `*const` and macOS as `*mut`; `as _` fits either.
   if unsafe {
     libc::openpty(
       &mut master,
       &mut slave,
       std::ptr::null_mut(),
       std::ptr::null_mut(),
-      &mut size,
+      &raw mut size as _,
     )
   } < 0
   {
