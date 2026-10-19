@@ -22,3 +22,7 @@
 .vscode/*
 !.vscode/settings.json
 .claude/worktrees/
+
+# Python
+__pycache__/
+*.pyc
