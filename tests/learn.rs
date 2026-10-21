@@ -106,3 +106,39 @@ async fn proposals_can_be_rejected_and_names_are_checked() {
   assert!(skills.proposed().await.unwrap().is_empty());
   assert!(skills.approve("write-a-migration").await.is_err());
 }
+
+#[tokio::test]
+async fn an_experiment_proposal_is_installed_only_by_explicit_approval() {
+  let temp = tempfile::tempdir().unwrap();
+  let proposals = LocalSkills::with_root(temp.path().join("experiment/skills"));
+  let installed = LocalSkills::with_root(temp.path().join("installed"));
+  Teacher::Local(proposals.clone())
+    .teach(
+      "verify-fix",
+      "Reproduce before fixing",
+      "1. reproduce\n2. fix\n3. check",
+      "project",
+      None,
+    )
+    .await
+    .unwrap();
+  assert!(!temp.path().join("installed/verify-fix").exists());
+  let path = installed
+    .approve_from("verify-fix", &proposals)
+    .await
+    .unwrap();
+  let expected = tokio::fs::read(proposals.proposed_dir().join("verify-fix/SKILL.md"))
+    .await
+    .unwrap();
+  assert_eq!(
+    tokio::fs::read(path.join("SKILL.md")).await.unwrap(),
+    expected
+  );
+  assert!(
+    installed
+      .approve_from("verify-fix", &proposals)
+      .await
+      .is_err()
+  );
+  assert_eq!(proposals.proposed().await.unwrap().len(), 1);
+}

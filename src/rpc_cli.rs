@@ -123,6 +123,10 @@ pub async fn run(workspace: PathBuf, config: Config, no_save: bool) -> Result<()
               } else {
                 store.save(&session).await
               };
+              if !no_save && saved.is_ok()
+                && let Some(message) = crate::command::improve::after_save(&session, &config).await {
+                out.send(&json!({"jsonrpc":"2.0", "method":"event", "params":{"type":"notice", "message":message}}));
+              }
               match outcome {
                 Ok(output) => {
                   let mut result = json!({

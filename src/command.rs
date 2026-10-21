@@ -10,6 +10,8 @@ use ainz::{
   SkillCatalog, import as importer, synapse,
 };
 
+pub mod improve;
+
 #[derive(Subcommand)]
 pub enum SessionsCommand {
   /// Write the session's active conversation path as Markdown, to --out or stdout.
@@ -132,6 +134,9 @@ pub enum SkillCommand {
   },
   Approve {
     name: String,
+    /// Approve a local proposal from an experiment's skills directory
+    #[arg(long)]
+    from: Option<PathBuf>,
   },
   Reject {
     name: String,
@@ -361,7 +366,14 @@ pub async fn skills(
       }
       Ok(())
     }
-    Some(SkillCommand::Approve { name }) => {
+    Some(SkillCommand::Approve { name, from }) => {
+      if let Some(root) = from {
+        let path = LocalSkills::new()?
+          .approve_from(&name, &LocalSkills::with_root(root))
+          .await?;
+        println!("approved {name} at {}", path.display());
+        return Ok(());
+      }
       if config.memory.backend == MemoryBackend::Synapse {
         println!("approve it in Synapse: synapse skill approve {name}");
         return Ok(());

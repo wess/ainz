@@ -5,6 +5,10 @@ you corrected, the command that finally worked, the reason a plausible approach 
 gone with it unless something wrote it down. Ainz has three places to put that: durable
 memories, past sessions, and skills.
 
+For an experiment that uses saved runs to change the harness itself, see
+[improving the harness](improve.md). `ainz improve` produces checked source patches and skill
+proposals for review.
+
 Everything here is a setting. `/settings` in a session shows the whole list; the CLI equivalents
 are below.
 

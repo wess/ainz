@@ -143,6 +143,7 @@ ainz resume
 ainz resume SESSION_ID --at NODE_ID "continue from this branch"
 ainz skills
 ainz skills proposed
+ainz improve on                         # enable background improvement once
 ainz prompts
 ainz usage
 ainz memory list
@@ -306,6 +307,14 @@ this last week" is recoverable without having remembered it in advance.
 With `memory.teach` on, a `learn` tool lets a session propose a skill from something it figured
 out, and correct one that turned out wrong. A proposal waits in `skills/proposed/`, which
 discovery does not read, until `ainz skills approve NAME`. See [`docs/memory.md`](docs/memory.md).
+
+`ainz improve` learns from recent saved runs and tests a proposed harness change in a separate
+source copy. It compares baseline and candidate checks and retains a patch, report, and proposed
+skills for review. Turn on **Automatic improvement** in settings or use `/improve on` once;
+normal saved runs then trigger background experiments. `/improve` reviews a result and
+`/improve approve` accepts its source patch and skills after source and behavioral drift checks.
+Fixed task evaluations run automatically against both versions; every candidate task must pass. See
+[improving the harness](docs/improve.md).
 
 ## Synapse
 

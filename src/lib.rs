@@ -4,12 +4,14 @@ pub mod config;
 pub mod context;
 pub mod control;
 pub mod credential;
+pub mod eval;
 pub mod event;
 mod frontmatter;
 #[cfg(feature = "cli")]
 pub mod header;
 pub mod hook;
 pub mod import;
+pub mod improve;
 pub mod instruction;
 pub mod job;
 pub mod keybind;

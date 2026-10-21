@@ -347,6 +347,9 @@ pub async fn run_once(
   };
   if save {
     SessionStore::default_store()?.save(&session).await?;
+    if let Some(message) = crate::command::improve::after_save(&session, &config).await {
+      output_events(json).emit(Event::Notice { message });
+    }
   }
   result?;
   if !json {
@@ -446,6 +449,13 @@ pub async fn interactive(
       print_header(&config);
       continue;
     }
+    if prompt == "/improve" || prompt.starts_with("/improve ") {
+      match crate::command::improve::chat(&workspace, &mut config, prompt[8..].trim()).await {
+        Ok(text) => println!("{text}"),
+        Err(error) => eprintln!("{error:#}"),
+      }
+      continue;
+    }
     if let Some(value) = prompt.strip_prefix("/checkout ") {
       let cursor = value
         .trim()
@@ -482,6 +492,9 @@ pub async fn interactive(
       eprintln!("\nerror: {error:#}");
     }
     store.save(&session).await?;
+    if let Some(message) = crate::command::improve::after_save(&session, &config).await {
+      eprintln!("{message}");
+    }
   }
   Ok(())
 }
@@ -796,7 +809,7 @@ async fn load_images(paths: &[PathBuf]) -> Result<Vec<Image>> {
   Ok(images)
 }
 
-fn output_events(json: bool) -> EventSink {
+pub(crate) fn output_events(json: bool) -> EventSink {
   EventSink::new(move |event| {
     if json {
       println!("{}", serde_json::to_string(&event).unwrap_or_default());
@@ -808,6 +821,7 @@ fn output_events(json: bool) -> EventSink {
         drop(std::io::stdout().flush());
       }
       Event::ToolStart { call } => eprintln!("\n→ {}", call.name),
+      Event::Notice { message } => eprintln!("\n{message}"),
       Event::ToolEnd {
         output,
         error: true,
@@ -819,7 +833,7 @@ fn output_events(json: bool) -> EventSink {
 }
 
 // the prompt reads the terminal directly on a blocking thread so the runtime keeps streaming
-fn approve(call: &ToolCall, risk: Risk) -> Approval {
+pub(crate) fn approve(call: &ToolCall, risk: Risk) -> Approval {
   let name = call.name.clone();
   let arguments = call.arguments.to_string();
   Box::pin(async move {

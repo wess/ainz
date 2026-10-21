@@ -82,6 +82,8 @@ impl From<PermissionArg> for PermissionMode {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Propose and check a harness improvement using recent runs
+  Improve(command::improve::ImproveArgs),
   #[command(hide = true)]
   Host { id: Uuid },
   /// Reconnect to a live session by id or unique name; omit to choose
@@ -332,6 +334,7 @@ async fn run() -> Result<()> {
     None => None,
   };
   match cli.command {
+    Some(Command::Improve(args)) => command::improve::run(&workspace, &mut config, args).await,
     Some(Command::Host { id }) => live::serve(id).await,
     Some(Command::Attach { id }) => live::attach(id.as_deref(), None, &workspace).await,
     Some(Command::Stop { id }) => live::stop(&id).await,

@@ -105,6 +105,10 @@ impl LocalSkills {
     self.root.join("proposed")
   }
 
+  pub fn root(&self) -> &Path {
+    &self.root
+  }
+
   fn installed(&self, name: &str) -> PathBuf {
     self.root.join(name).join("SKILL.md")
   }
@@ -212,6 +216,29 @@ impl LocalSkills {
     fs::rename(&source, &destination)
       .await
       .with_context(|| format!("install {}", destination.display()))?;
+    Ok(destination)
+  }
+
+  /// Approves a proposal from a retained experiment, keeping its evidence copy intact.
+  pub async fn approve_from(&self, name: &str, source: &LocalSkills) -> Result<PathBuf> {
+    check_name(name)?;
+    let text = fs::read_to_string(source.proposal(name)).await?;
+    let front = frontmatter::parse(&text);
+    if front.field("name").as_deref() != Some(name)
+      || front.field("description").is_none()
+      || front.body.trim().is_empty()
+    {
+      bail!("proposal {name} needs a matching name, description, and instructions");
+    }
+    let destination = self.root.join(name);
+    fs::create_dir_all(&self.root).await?;
+    fs::create_dir(&destination).await.with_context(|| {
+      format!(
+        "create skill {} (an installed skill is never overwritten)",
+        destination.display()
+      )
+    })?;
+    fs::write(destination.join("SKILL.md"), text).await?;
     Ok(destination)
   }
 

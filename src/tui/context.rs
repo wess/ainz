@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
+pub(crate) fn improvements() -> Option<(notify::RecommendedWatcher, mpsc::Receiver<()>)> {
+  let store = ainz::improve::automatic::AutomaticStore::default_store().ok()?;
+  store.update(|_| Ok(())).ok()?;
+  crate::live::attention::watch(&store.root).ok()
+}
+
 pub(crate) struct Branch {
   pub updates: mpsc::Receiver<Option<String>>,
   task: tokio::task::JoinHandle<()>,

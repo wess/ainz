@@ -33,6 +33,12 @@ impl SlashCommand {
 pub fn builtins() -> Vec<SlashCommand> {
   [
     (
+      "improve",
+      "/improve [on|off|approve]",
+      "Enable background improvement or review its latest result",
+      "memory",
+    ),
+    (
       "detach",
       "/detach",
       "Leave this agent running and return to the shell",

@@ -1,6 +1,25 @@
 use ainz::{Config, MemoryBackend, ProcessOutput, ProviderConfig};
 
 #[tokio::test]
+async fn automatic_improvement_is_opt_in_and_its_limits_round_trip() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("config.toml");
+  let mut config = Config::default();
+  assert!(!config.improve.enabled);
+  config.improve.enabled = true;
+  config.improve.source = Some(temp.path().join("source"));
+  config.improve.every_runs = 3;
+  config.improve.checks = vec!["cargo test --no-default-features".into()];
+  config.save_to(&path).await.unwrap();
+  assert_eq!(
+    Config::load_from(&path).await.unwrap().improve,
+    config.improve
+  );
+  config.improve.budget_usd = f64::NAN;
+  assert!(config.improve.validate().is_err());
+}
+
+#[tokio::test]
 async fn provider_profiles_round_trip() {
   let dir = tempfile::tempdir().unwrap();
   let path = dir.path().join("config.toml");

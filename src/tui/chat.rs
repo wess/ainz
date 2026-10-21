@@ -89,6 +89,7 @@ enum Wake {
   Redraw(Option<crate::live::Control>),
   Live(Vec<crate::live::Info>),
   Branch(Option<String>),
+  Improvement(bool),
 }
 
 struct CommandData {
@@ -852,6 +853,20 @@ async fn run_chat_inner(
   let mut resolver = ainz::keybind::Resolver::default();
   let mut monitor = crate::live::attention::monitor().await.ok();
   let mut branch = super::context::branch(&workspace).await;
+  let mut improvement_watch = config
+    .improve
+    .enabled
+    .then(super::context::improvements)
+    .flatten();
+  if config.improve.enabled
+    && let Ok(Some(message)) =
+      ainz::improve::automatic::AutomaticStore::default_store().and_then(|s| s.notice(&workspace))
+  {
+    state
+      .primary
+      .entries
+      .push(Entry::new(EntryKind::System, message));
+  }
   // the only thing on screen that moves by itself is the seconds count on a running turn
   let mut clock = tokio::time::interval(CLOCK);
   clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -933,10 +948,26 @@ async fn run_chat_inner(
       redraw = async { match link.as_mut() { Some(link) => link.redraw.recv().await, None => std::future::pending().await } }, if link.is_some() => Wake::Redraw(redraw),
       infos = async { match monitor.as_mut() { Some(monitor) => monitor.updates.recv().await, None => std::future::pending().await } }, if monitor.is_some() => Wake::Live(infos.unwrap_or_default()),
       name = async { match branch.as_mut() { Some(branch) => branch.updates.recv().await, None => std::future::pending().await } }, if branch.is_some() => Wake::Branch(name.flatten()),
+      changed = async { match improvement_watch.as_mut() { Some((_, updates)) => updates.recv().await, None => std::future::pending().await } }, if improvement_watch.is_some() => Wake::Improvement(changed.is_some()),
       _ = clock.tick(), if ticking => Wake::Clock,
       () = tokio::time::sleep(idle) => Wake::Tick,
     };
     let mut key = match wake {
+      Wake::Improvement(open) => {
+        if !open {
+          improvement_watch = None;
+        }
+        if let Ok(Some(message)) = ainz::improve::automatic::AutomaticStore::default_store()
+          .and_then(|s| s.notice(&workspace))
+        {
+          state
+            .primary
+            .entries
+            .push(Entry::new(EntryKind::System, message));
+          dirty = true;
+        }
+        continue;
+      }
       Wake::Live(infos) => {
         state.attention = crate::live::attention::counts(
           &infos,
@@ -1034,6 +1065,13 @@ async fn run_chat_inner(
             EntryKind::Error,
             format!("could not save the session: {error:#}"),
           ));
+        } else if let Some(message) =
+          crate::command::improve::after_save(&returned_session, config).await
+        {
+          state
+            .primary
+            .entries
+            .push(Entry::new(EntryKind::System, message));
         }
         session = Some(returned_session);
         controller = None;
@@ -1620,6 +1658,17 @@ async fn run_chat_inner(
           }
         };
         match command_result {
+          CommandResult::Improve(action) => {
+            let text = crate::command::improve::chat(&workspace, config, &action).await;
+            if config.improve.enabled && improvement_watch.is_none() {
+              improvement_watch = super::context::improvements();
+            }
+            state.primary.entries.push(match text {
+              Ok(text) => Entry::new(EntryKind::System, text),
+              Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+            });
+            continue;
+          }
           CommandResult::Quit => {
             return Ok(ChatOutcome {
               session: session.take().unwrap(),
@@ -1894,6 +1943,7 @@ async fn remember(state: &mut ChatState, config: &Config) {
 }
 
 enum CommandResult {
+  Improve(String),
   Quit,
   Configure,
   Settings,
@@ -1924,6 +1974,8 @@ fn command(
 ) -> Result<CommandResult> {
   let input = input.trim();
   match input {
+    "/improve" => Ok(CommandResult::Improve(String::new())),
+    input if input.starts_with("/improve ") => Ok(CommandResult::Improve(input[9..].trim().into())),
     "/exit" | "/quit" => Ok(CommandResult::Quit),
     "/model" | "/provider" => Ok(CommandResult::Configure),
     "/config" | "/settings" => Ok(CommandResult::Settings),

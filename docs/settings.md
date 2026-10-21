@@ -11,6 +11,11 @@ Use Up/Down to select a row and Enter or Left/Right to change its value. Read th
 beside the row before changing it. Close settings to save. Runtime setup changes apply when
 chat reopens; background hosting applies at the next launch.
 
+**Memory → Automatic improvement** enables background experiments after saved runs. Turn it
+on once, then use Ainz normally; result notices appear in the conversation. `/improve` reviews
+the latest patch and proposed skills, and `/improve approve` accepts the reviewed result. See
+[improving the harness](improve.md) for limits, drift guards, and source handling.
+
 ## Customize the status bar
 
 `/statusline` or `/statusbar` opens a field picker for the IRC bar above the prompt. You can

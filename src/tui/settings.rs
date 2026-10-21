@@ -28,6 +28,7 @@ enum Row {
   RecallOnStart,
   RememberOnCompact,
   Teach,
+  Improve,
   Synapse,
   Mesh,
   Roster,
@@ -42,7 +43,7 @@ enum Row {
   Binding(Action),
 }
 
-const ROWS: [Row; 20] = [
+const ROWS: [Row; 21] = [
   Row::Provider,
   Row::Wire,
   Row::Reasoning,
@@ -52,6 +53,7 @@ const ROWS: [Row; 20] = [
   Row::RecallOnStart,
   Row::RememberOnCompact,
   Row::Teach,
+  Row::Improve,
   Row::Synapse,
   Row::Mesh,
   Row::Roster,
@@ -81,7 +83,8 @@ impl Row {
       Self::Memory => "Memory",
       Self::RecallOnStart => "Recall at session start",
       Self::RememberOnCompact => "Remember before compaction",
-      Self::Teach => "Self-improvement",
+      Self::Teach => "Learn reusable procedures",
+      Self::Improve => "Automatic improvement",
       Self::Synapse => "Synapse",
       Self::Mesh => "Agent mesh",
       Self::Roster => "Agent roster",
@@ -140,6 +143,7 @@ impl Row {
       Self::RecallOnStart => on_off(config.memory.recall_on_start),
       Self::RememberOnCompact => on_off(config.memory.remember_on_compact),
       Self::Teach => on_off(config.memory.teach),
+      Self::Improve => on_off(config.improve.enabled),
       Self::Synapse => match (config.synapse.enabled, installed) {
         (true, false) => "on · not installed".into(),
         (enabled, _) => on_off(enabled),
@@ -209,6 +213,10 @@ impl Row {
          one that turned out wrong. A new skill waits for approval — `ainz skills proposed` \
          lists them — so writing one costs a line in a list rather than context everywhere."
           .into(),
+      ),
+      Self::Improve => (
+        "Learn from normal runs in the background".into(),
+        format!("After {} new saved runs, test one harness change and propose skills. Experiments edit separate source copies and run checks without prompts. Uses the current model, at most {} repair steps and six steps per behavioral task, sharing ${:.2} reported cost and {} seconds. Every fixed behavioral task must pass before acceptance. Cooldown: {} seconds. Source and checks are found automatically. /improve reviews results; /improve approve accepts the reviewed source patch and skills. No automatic installation.", config.improve.every_runs, config.improve.max_steps, config.improve.budget_usd, config.improve.max_seconds, config.improve.cooldown_seconds),
       ),
       Self::Synapse => (
         if installed {
@@ -323,6 +331,7 @@ impl Row {
         config.memory.remember_on_compact = !config.memory.remember_on_compact;
       }
       Self::Teach => config.memory.teach = !config.memory.teach,
+      Self::Improve => config.improve.enabled = !config.improve.enabled,
       Self::Synapse => {
         config.synapse.enabled = !config.synapse.enabled;
         if !config.synapse.enabled {
@@ -371,6 +380,7 @@ impl Row {
       | Self::RecallOnStart
       | Self::RememberOnCompact
       | Self::Teach
+      | Self::Improve
       | Self::Synapse
       | Self::Mesh => "Memory",
       Self::Background | Self::Notifications | Self::Delivery => "Sessions",

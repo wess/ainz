@@ -17,6 +17,7 @@ commands and configuration in one place.
 | [Permissions](permissions.md) | Approval modes and standing rules |
 | [Hooks](hooks.md) | Start/end hooks, tool hooks, cancellation, and limits |
 | [Memory](memory.md) | Recall, session search, and proposed skills |
+| [Improvement](improve.md) | Learn from runs, propose harness patches, and verify behavior |
 | [Import](import.md) | Reuse existing tool servers and extensions |
 | [Plugins](plugins.md) | Lua, component, and process plugins |
 | [MCP](mcp.md) | Stdio, Streamable HTTP, SSE, and remote sign-in |

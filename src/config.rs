@@ -529,6 +529,7 @@ pub struct Config {
   pub rules: PermissionRules,
   pub ui: UiConfig,
   pub memory: MemoryConfig,
+  pub improve: crate::improve::ImproveConfig,
   pub synapse: SynapseConfig,
   // keyed by event name (session_start, pre_tool, post_tool, session_end); see src/hook.rs
   pub hooks: BTreeMap<String, Vec<HookDef>>,
@@ -560,6 +561,7 @@ impl Default for Config {
       rules: PermissionRules::default(),
       ui: UiConfig::default(),
       memory: MemoryConfig::default(),
+      improve: crate::improve::ImproveConfig::default(),
       synapse: SynapseConfig::default(),
       hooks: BTreeMap::new(),
       mcp_config: None,
@@ -718,6 +720,9 @@ impl Config {
   }
 
   pub fn validate(&self) -> Result<()> {
+    if self.improve.enabled {
+      self.improve.validate()?;
+    }
     #[cfg(feature = "cli")]
     crate::keybind::validate(&self.ui.keybindings)?;
     if self.model.trim().is_empty() {
