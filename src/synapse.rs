@@ -123,13 +123,13 @@ pub async fn disconnect(config: &mut Config) -> Result<()> {
   let original_config = config.clone();
   let mut profile = McpProfile::load().await?;
   let original_profile = profile.clone();
-  if let Some(server) = profile.servers.get(SERVER) {
-    if !is_profile_server(server) {
-      bail!(
-        "the MCP profile has a non-Synapse server named `synapse`; remove it explicitly with \
-         `ainz mcp remove synapse`"
-      );
-    }
+  if let Some(server) = profile.servers.get(SERVER)
+    && !is_profile_server(server)
+  {
+    bail!(
+      "the MCP profile has a non-Synapse server named `synapse`; remove it explicitly with \
+       `ainz mcp remove synapse`"
+    );
   }
   profile.servers.remove(SERVER);
   profile.save().await?;
