@@ -90,7 +90,12 @@ the user profile.
 
 ```sh
 synapse connect ainz
+# or, from Ainz:
+ainz synapse connect
 ```
+
+Both commands update Ainz's native Synapse settings and the MCP profile Synapse detects, so the
+two products report the same connection. Add `--mesh` to the Ainz command to join the agent mesh.
 
 For a checkout of Synapse that predates native Ainz support, register it manually:
 

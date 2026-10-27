@@ -85,7 +85,7 @@ impl Row {
       Self::RememberOnCompact => "Remember before compaction",
       Self::Teach => "Learn reusable procedures",
       Self::Improve => "Automatic improvement",
-      Self::Synapse => "Synapse",
+      Self::Synapse => "Synapse connection",
       Self::Mesh => "Agent mesh",
       Self::Roster => "Agent roster",
       Self::Header => "Header art",
@@ -225,9 +225,10 @@ impl Row {
           "Not installed".into()
         },
         format!(
-          "{} Turning this on registers Synapse as a tool server, loads its SOUL.md guidance, \
-           and lets memory and skills live there instead of in one tool. Optional: Ainz runs \
-           the same without it. {}",
+          "{} Turning this on connects both products: Ainz loads Synapse's SOUL.md guidance \
+           and shared library, while Synapse can see Ainz and its subagents. Choose synapse as \
+           the Memory backend to share durable context too. Cmd+R opens the machine-wide mesh \
+           roster. Optional: Ainz runs the same without it. {}",
           synapse::SUMMARY,
           synapse::SITE
         ),
@@ -555,6 +556,7 @@ fn on_off(value: bool) -> String {
 
 /// The settings screen. Returns true when the user asked for provider setup.
 pub async fn settings(config: &mut Config, headers: &HeaderCatalog) -> Result<bool> {
+  let synapse_was_active = config.synapse_active();
   let names: Vec<String> = headers
     .headers
     .iter()
@@ -565,7 +567,13 @@ pub async fn settings(config: &mut Config, headers: &HeaderCatalog) -> Result<bo
   leave_terminal(&mut terminal)?;
   let (configure, changed) = result?;
   if changed {
-    config.save().await?;
+    match (synapse_was_active, config.synapse_active()) {
+      (false, true) if synapse::binary(&config.synapse).is_some() => {
+        synapse::connect(config, None, false).await?;
+      }
+      (true, false) => synapse::disconnect(config).await?,
+      _ => config.save().await?,
+    }
   }
   Ok(configure)
 }

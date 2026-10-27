@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::{
-  config::SynapseConfig,
-  mcp::{McpHub, McpServerConfig, McpTransport},
+  config::{Config, MemoryBackend, SynapseConfig},
+  mcp::{McpHub, McpProfile, McpServerConfig, McpTransport},
   memory::MemoryRecord,
 };
 
@@ -63,6 +63,102 @@ pub fn server_config(command: &Path, workspace: &Path) -> McpServerConfig {
     required: false,
     timeout_ms: TIMEOUT_MS,
   }
+}
+
+/// Connect Ainz's native integration and its visible MCP profile in one operation.
+///
+/// Keeping both records together matters because Synapse reads the MCP profile to report whether
+/// Ainz is connected, while Ainz reads its own setting to enable shared memory and guidance.
+pub async fn connect(
+  config: &mut Config,
+  command: Option<PathBuf>,
+  shared_memory: bool,
+) -> Result<PathBuf> {
+  let original_config = config.clone();
+  if let Some(command) = command {
+    config.synapse.command = Some(command.display().to_string());
+  }
+  let command = binary(&config.synapse).context(format!(
+    "Synapse is not installed — install it from {SITE} or pass --command"
+  ))?;
+  config.synapse.command = Some(command.display().to_string());
+  config.synapse.enabled = true;
+  if shared_memory {
+    config.memory.backend = MemoryBackend::Synapse;
+  }
+
+  let mut profile = McpProfile::load().await?;
+  let original_profile = profile.clone();
+  if let Some(server) = profile.servers.get(SERVER)
+    && !is_profile_server(server)
+  {
+    *config = original_config;
+    bail!(
+      "the MCP profile has a non-Synapse server named `synapse`; rename or remove it before \
+       connecting"
+    );
+  }
+  let mut server = server_config(&command, Path::new("."));
+  // A persistent profile follows the workspace Ainz was launched in. The native integration
+  // loads Synapse's guidance itself, so a stopped Synapse must not prevent Ainz from starting.
+  server.cwd = None;
+  profile.servers.insert(SERVER.into(), server);
+  if let Err(error) = profile.save().await {
+    *config = original_config;
+    return Err(error).context("save the Ainz MCP profile");
+  }
+  if let Err(error) = config.save().await {
+    *config = original_config;
+    original_profile
+      .save()
+      .await
+      .context("restore the MCP profile after the Ainz configuration could not be saved")?;
+    return Err(error).context("save the Ainz Synapse connection");
+  }
+  Ok(command)
+}
+
+/// Remove only the reciprocal Ainz/Synapse connection and return memory to the local backend.
+pub async fn disconnect(config: &mut Config) -> Result<()> {
+  let original_config = config.clone();
+  let mut profile = McpProfile::load().await?;
+  let original_profile = profile.clone();
+  if let Some(server) = profile.servers.get(SERVER) {
+    if !is_profile_server(server) {
+      bail!(
+        "the MCP profile has a non-Synapse server named `synapse`; remove it explicitly with \
+         `ainz mcp remove synapse`"
+      );
+    }
+  }
+  profile.servers.remove(SERVER);
+  profile.save().await?;
+
+  config.synapse.enabled = false;
+  config.synapse.mesh = false;
+  config.synapse.command = None;
+  if config.memory.backend == MemoryBackend::Synapse {
+    config.memory.backend = MemoryBackend::Local;
+  }
+  if let Err(error) = config.save().await {
+    *config = original_config;
+    original_profile
+      .save()
+      .await
+      .context("restore the MCP profile after the Ainz configuration could not be saved")?;
+    return Err(error).context("save the disconnected Ainz configuration");
+  }
+  Ok(())
+}
+
+/// Whether Ainz's MCP profile exposes the reciprocal connection Synapse detects.
+pub async fn profile_connected() -> Result<bool> {
+  let profile = McpProfile::load().await?;
+  Ok(profile.servers.get(SERVER).is_some_and(is_profile_server))
+}
+
+fn is_profile_server(server: &McpServerConfig) -> bool {
+  server.transport == McpTransport::Stdio && server.command.len() == 2 && server.command[1] == "mcp"
 }
 
 /// One secret Synapse holds: its qualified name, the env var it resolves into, and whether it

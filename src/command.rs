@@ -180,9 +180,22 @@ pub enum MemoryCommand {
 #[derive(Subcommand)]
 pub enum SynapseCommand {
   Status,
+  /// Connect Ainz to Synapse for shared guidance and memory.
+  Connect {
+    /// Path to the Synapse executable when it is not on PATH.
+    #[arg(long)]
+    command: Option<PathBuf>,
+    /// Also place this session and its subagents on the agent mesh.
+    #[arg(long)]
+    mesh: bool,
+  },
+  /// Remove Ainz's Synapse connection and return memory to local storage.
+  Disconnect,
   Enable,
   Disable,
-  Mesh { state: String },
+  Mesh {
+    state: String,
+  },
 }
 
 #[derive(Subcommand)]
@@ -532,6 +545,20 @@ pub async fn import(
 
 pub async fn synapse(config: &mut Config, command: Option<SynapseCommand>) -> Result<()> {
   match command {
+    Some(SynapseCommand::Connect { command, mesh }) => {
+      if mesh {
+        config.synapse.mesh = true;
+      }
+      let binary = synapse::connect(config, command, true).await?;
+      println!("connected Ainz to Synapse through {}", binary.display());
+      if !mesh {
+        println!("mesh       off · add --mesh or run `ainz synapse mesh on`");
+      }
+    }
+    Some(SynapseCommand::Disconnect) => {
+      synapse::disconnect(config).await?;
+      println!("disconnected Ainz from Synapse");
+    }
     Some(SynapseCommand::Enable) => {
       config.synapse.enabled = true;
       config.save().await?;
@@ -556,6 +583,14 @@ pub async fn synapse(config: &mut Config, command: Option<SynapseCommand>) -> Re
   println!(
     "synapse   {}",
     if config.synapse.enabled { "on" } else { "off" }
+  );
+  println!(
+    "bridge    {}",
+    if synapse::profile_connected().await? {
+      "connected"
+    } else {
+      "not connected"
+    }
   );
   println!(
     "binary    {}",

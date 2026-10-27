@@ -148,6 +148,8 @@ ainz prompts
 ainz usage
 ainz memory list
 ainz memory add the staging database is named orbit
+ainz synapse connect                    # shared memory and guidance, visible in both products
+ainz synapse connect --mesh             # also join the agent mesh
 ainz synapse
 ainz mcp
 ainz plugins list
@@ -323,16 +325,16 @@ machine, shared with the other tools you use. Ainz can use all three, and runs t
 it — the setting has to be on and the binary has to be installed.
 
 ```sh
-ainz synapse enable
-ainz memory backend synapse
-ainz synapse mesh on
+ainz synapse connect
+ainz synapse connect --mesh
 ```
 
-Turning it on registers `synapse mcp` for the session, appends Synapse's guidance and your
-`SOUL.md` to the system prompt, and points memory and taught skills at Synapse instead of local
-files, so a decision recorded here reaches a later session in Claude Code or Codex. With the mesh
-on, the session and every subagent register under their own names and can message each other,
-and you have a seat of your own to answer from. See [`docs/synapse.md`](docs/synapse.md).
+One command updates Ainz's native integration and the MCP profile Synapse detects, so both
+products report the same connection. It loads Synapse's guidance and your `SOUL.md`, and points
+memory and taught skills at Synapse instead of local files. Add `--mesh` when the session and
+every subagent should register under their own names and message each other. Running
+`synapse connect ainz` performs the same handshake from the other side. See
+[`docs/synapse.md`](docs/synapse.md).
 
 ## Instructions, skills, and prompts
 

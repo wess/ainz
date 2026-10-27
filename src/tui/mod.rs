@@ -439,16 +439,14 @@ pub(crate) async fn offer_synapse(config: &mut Config) -> Result<bool> {
   leave_terminal(&mut terminal)?;
   let accepted = result?;
   if accepted {
-    config.synapse.enabled = true;
-    config.memory.backend = ainz::MemoryBackend::Synapse;
-    config.save().await?;
+    ainz::synapse::connect(config, None, true).await?;
   }
   Ok(accepted)
 }
 
 fn choose_synapse(terminal: &mut Term) -> Result<bool> {
   let choices = [
-    "Use Synapse for memory and guidance",
+    "Connect Ainz to Synapse",
     "Keep memory local to this machine",
   ];
   let mut selected = 0;
@@ -492,9 +490,9 @@ fn choose_synapse(terminal: &mut Term) -> Result<bool> {
           ),
           Line::raw(""),
           Line::styled(
-            "Ainz can keep what it works out in Synapse, so a later session here — or Claude \
-             Code, or Codex — starts already knowing it. It also loads your SOUL.md guidance \
-             and can put subagents on the Synapse mesh.",
+            "One connection works in both directions: Ainz shares memory, skills, and SOUL.md \
+             guidance with your other tools, and Synapse can see Ainz and its subagents. Cmd+R \
+             opens the machine-wide mesh roster inside Ainz.",
             Style::default().fg(MUTED),
           ),
           Line::raw(""),

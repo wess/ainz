@@ -289,6 +289,94 @@ async fn mcp_commands_persist_a_synapse_compatible_registration() {
 }
 
 #[tokio::test]
+async fn synapse_connect_and_disconnect_keep_both_products_in_sync() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = dir.path().join("config.toml");
+  let profile = dir.path().join("mcp.toml");
+  let binary = dir.path().join("synapse");
+  tokio::fs::write(&binary, "fixture").await.unwrap();
+
+  let connected = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .args([
+      "synapse",
+      "connect",
+      "--command",
+      binary.to_str().unwrap(),
+      "--mesh",
+    ])
+    .env("AINZ_CONFIG", &config)
+    .env("AINZ_MCP_PROFILE", &profile)
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    connected.status.success(),
+    "{}",
+    String::from_utf8_lossy(&connected.stderr)
+  );
+  let stdout = String::from_utf8_lossy(&connected.stdout);
+  assert!(stdout.contains("connected Ainz to Synapse"));
+  assert!(stdout.contains("bridge    connected"));
+
+  let saved = tokio::fs::read_to_string(&config).await.unwrap();
+  assert!(saved.contains("backend = \"synapse\""));
+  assert!(saved.contains("enabled = true"));
+  assert!(saved.contains("mesh = true"));
+  assert!(saved.contains(binary.to_str().unwrap()));
+  let registered = tokio::fs::read_to_string(&profile).await.unwrap();
+  assert!(registered.contains("[servers.synapse]"));
+  assert!(registered.contains("args = [\"mcp\"]"));
+
+  let disconnected = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .args(["synapse", "disconnect"])
+    .env("AINZ_CONFIG", &config)
+    .env("AINZ_MCP_PROFILE", &profile)
+    .output()
+    .await
+    .unwrap();
+  assert!(
+    disconnected.status.success(),
+    "{}",
+    String::from_utf8_lossy(&disconnected.stderr)
+  );
+  let saved = tokio::fs::read_to_string(&config).await.unwrap();
+  assert!(saved.contains("backend = \"local\""));
+  assert!(saved.contains("enabled = false"));
+  assert!(saved.contains("mesh = false"));
+  assert!(
+    !tokio::fs::read_to_string(&profile)
+      .await
+      .unwrap()
+      .contains("synapse")
+  );
+}
+
+#[tokio::test]
+async fn synapse_connect_does_not_replace_an_unrelated_server_with_the_same_name() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = dir.path().join("config.toml");
+  let profile = dir.path().join("mcp.toml");
+  let binary = dir.path().join("synapse");
+  tokio::fs::write(&binary, "fixture").await.unwrap();
+  let original = "[servers.synapse]\ntransport = \"streamable_http\"\nurl = \
+                  \"https://example.test/mcp\"\nenabled = true\nrequired = false\ntimeout_ms = 30000\n";
+  tokio::fs::write(&profile, original).await.unwrap();
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ainz"))
+    .args(["synapse", "connect", "--command", binary.to_str().unwrap()])
+    .env("AINZ_CONFIG", &config)
+    .env("AINZ_MCP_PROFILE", &profile)
+    .output()
+    .await
+    .unwrap();
+
+  assert!(!output.status.success());
+  assert!(String::from_utf8_lossy(&output.stderr).contains("non-Synapse server"));
+  assert_eq!(tokio::fs::read_to_string(&profile).await.unwrap(), original);
+  assert!(!config.exists());
+}
+
+#[tokio::test]
 async fn the_ainz_rename_carries_forward_existing_user_configuration() {
   let dir = tempfile::tempdir().unwrap();
   let root = config_root(dir.path());

@@ -9,14 +9,18 @@ without it.
 
 ```sh
 ainz synapse            # what is on, and where the binary is
-ainz synapse enable
-ainz memory backend synapse
-ainz synapse mesh on
-ainz synapse disable
+ainz synapse connect    # shared memory, guidance, and skills
+ainz synapse connect --mesh
+ainz synapse disconnect
 ```
 
+The connect command updates both sides of the relationship: Ainz enables its native integration
+and records Synapse as its memory backend, while its MCP profile gains the entry the Synapse
+dashboard detects. `--mesh` also registers the session and its subagents. The mesh stays off by
+default because its tools add context to every connected session.
+
 `/settings` does the same in a session. When Synapse is installed and this is your first run,
-Ainz offers it once after provider setup and takes no for an answer.
+Ainz offers the reciprocal connection once after provider setup and takes no for an answer.
 
 ```toml
 [synapse]
@@ -30,7 +34,8 @@ Setting `memory.backend = "synapse"` implies `enabled`, so the two cannot disagr
 ## What it adds
 
 **A tool server.** Ainz registers `synapse mcp` for the session, so every Synapse tool is
-reachable through the `mcp` tool without appearing in the profile or in the prompt.
+reachable through the `mcp` tool without filling the prompt with every schema. The profile entry
+also lets Synapse report and repair the connection from its own Connections page.
 
 **Guidance.** Synapse's own instructions, including your `SOUL.md`, are appended to the system
 prompt — the same guidance your other connected tools load.
@@ -68,6 +73,8 @@ or mesh integration:
 ```sh
 ainz mcp add synapse --required -- /path/to/synapse mcp
 ```
+
+Prefer `ainz synapse connect` or `synapse connect ainz` for a complete reciprocal connection.
 
 Synapse can also pass `--mcp-config FILE` when it launches Ainz. Harness integration goes through
 [JSON-RPC mode](rpc.md).
