@@ -120,8 +120,12 @@ fn an_at_sign_starts_a_path_completion() {
   assert_eq!(file_fragment("@src/main.rs now", 16), None);
 }
 
-use super::{ChatState, EntryKind, Event, ToolState, Usage, apply_agent_event, render_transcript};
+use super::{
+  ChatState, EntryKind, Event, ToolState, Usage, apply_agent_event, render_mesh_roster,
+  render_transcript,
+};
 use ainz::protocol::ToolCall;
+use ainz::synapse::{MeshAgent, MeshRoster, MeshWorker};
 use ratatui::{Terminal, backend::TestBackend};
 
 #[test]
@@ -293,6 +297,63 @@ fn wrapped_transcript_reaches_the_end_and_stays_put_when_reading_history() {
     .draw(|frame| render_transcript(frame, frame.area(), &state))
     .unwrap();
   assert!(screen(&terminal).contains("more output"));
+}
+
+#[test]
+fn mesh_roster_leads_with_workers_and_collapses_offline_agents() {
+  let state = ChatState {
+    mesh_roster: Some(MeshRoster {
+      enabled: true,
+      workers: vec![MeshWorker {
+        name: "builder".into(),
+        role: "frontend".into(),
+        status: "running".into(),
+        process: 42,
+        restarts: 0,
+      }],
+      agents: vec![
+        MeshAgent {
+          name: "builder".into(),
+          role: "frontend".into(),
+          status: "working".into(),
+          note: "cleaning the roster".into(),
+          project: "/tmp/project".into(),
+          tool: "ainz".into(),
+          human: false,
+          registered: true,
+          online: true,
+        },
+        MeshAgent {
+          name: "old-session".into(),
+          role: "worker".into(),
+          status: "working".into(),
+          note: "stale".into(),
+          project: "/tmp/project".into(),
+          tool: "ainz".into(),
+          human: false,
+          registered: true,
+          online: false,
+        },
+      ],
+    }),
+    ..Default::default()
+  };
+  let mut terminal = Terminal::new(TestBackend::new(34, 8)).unwrap();
+  terminal
+    .draw(|frame| render_mesh_roster(frame, frame.area(), &state))
+    .unwrap();
+  let screen = terminal
+    .backend()
+    .buffer()
+    .content
+    .iter()
+    .map(|cell| cell.symbol())
+    .collect::<String>();
+
+  assert!(screen.contains("builder"), "{screen}");
+  assert!(screen.contains("working"), "{screen}");
+  assert!(screen.contains("1 offline hidden"), "{screen}");
+  assert!(!screen.contains("old-session"), "{screen}");
 }
 
 #[test]

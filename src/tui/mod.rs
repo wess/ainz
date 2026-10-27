@@ -631,6 +631,13 @@ pub(super) fn enter_terminal() -> Result<Term> {
   }
 }
 
+/// The chat gives drag gestures back to the terminal so transcript text can be selected and
+/// copied. Setup and settings keep mouse capture because their lists use clicks and the wheel.
+pub(super) fn release_mouse(terminal: &mut Term) -> Result<()> {
+  execute!(terminal.backend_mut(), DisableMouseCapture)?;
+  Ok(())
+}
+
 pub(super) fn leave_terminal(terminal: &mut Term) -> Result<()> {
   restore_terminal();
   terminal.show_cursor()?;

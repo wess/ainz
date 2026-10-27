@@ -28,7 +28,7 @@ capabilities under that interface.
 | Settings, keybindings, themes, headers, status fields | Existing; added API, reasoning, and fallback settings |
 | Headless operation | Existing ask/JSON/RPC; added positional requests, `-p` with piped input, and `-c` continuation |
 | Reported-cost budgets | Added `budget_usd` / `--budget-usd`; stops subsequent requests/tools after reported cost reaches the limit |
-| Scrollback, stable reading position, tool output, selection | Existing IRC buffer and terminal Shift-drag selection; Ainz retains terminal-owned copying |
+| Scrollback, stable reading position, tool output, selection | Existing IRC buffer and terminal-owned transcript selection and copying |
 | Embedding | Existing library API without CLI/Lua/WASM defaults; retained |
 
 ## Intentional differences

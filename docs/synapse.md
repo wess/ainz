@@ -48,6 +48,12 @@ subagent registers under its own guardian name. They become addressable: `send` 
 happening, and you have a seat of your own in Synapse's console, so an agent that hits a
 decision it should not make alone has somebody to ask.
 
+Press `Cmd+R` on macOS (`Super+R` elsewhere) to replace Ainz's local subagent roster with the
+machine-wide Synapse mesh roster. Supervised workers come first, followed by other online agents;
+offline history is summarized instead of filling the rail. Press `Ctrl+L` to return to the local
+Ainz roster. Opening the mesh roster reads `synapse relay status --json` and does not create
+another mesh seat.
+
 A mesh subagent gets its own client rather than sharing its parent's, so it holds a seat of its
 own; that also means it starts its own copy of any tool server it uses.
 

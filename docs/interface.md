@@ -50,6 +50,7 @@ cancellation does not undo effects a tool already completed.
 | Control | Action |
 | --- | --- |
 | `Ctrl+L` | Toggle the right-hand roster; remembers the choice |
+| `Cmd+R` on macOS / `Super+R` elsewhere | Open or refresh the Synapse mesh roster |
 | `Ctrl+1` | Main agent |
 | `Ctrl+2` through `Ctrl+9` | Subagent transcripts |
 | `Ctrl+=` / `Ctrl+-` | Cycle agents |
@@ -73,8 +74,9 @@ cut before the cursor, after it, or the previous word. `Shift+Enter`, or a trail
 adds a newline. `/vim` enables modal editing.
 
 `/` opens command search; `@` completes workspace paths. Pressing `Esc` twice while idle rewinds
-the last prompt and returns it for editing. Hold `Shift` while dragging to use your terminal's
-normal text selection. An image pasted or dropped onto the prompt attaches to the next message.
+the last prompt and returns it for editing. Drag across transcript text to use your terminal's
+normal selection and copy commands. An image pasted or dropped onto the prompt attaches to the
+next message.
 
 ## Customize the session
 

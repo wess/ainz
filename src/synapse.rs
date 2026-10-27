@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
@@ -70,6 +71,51 @@ pub struct Secret {
   pub name: String,
   pub var: String,
   pub global: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MeshAgent {
+  pub name: String,
+  pub role: String,
+  pub status: String,
+  pub note: String,
+  pub project: String,
+  pub tool: String,
+  pub human: bool,
+  pub registered: bool,
+  pub online: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MeshWorker {
+  pub name: String,
+  pub role: String,
+  pub status: String,
+  pub process: u32,
+  pub restarts: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MeshRoster {
+  pub enabled: bool,
+  pub agents: Vec<MeshAgent>,
+  pub workers: Vec<MeshWorker>,
+}
+
+/// Read the whole machine roster without joining it. The TUI uses the command surface here so
+/// opening its sidebar does not create a second mesh seat or keep another MCP server alive.
+pub async fn mesh_roster(config: &SynapseConfig) -> Result<MeshRoster> {
+  let command = binary(config).context("Synapse is not installed")?;
+  let output = Command::new(command)
+    .args(["relay", "status", "--json"])
+    .output()
+    .await
+    .context("could not read the Synapse mesh")?;
+  if !output.status.success() {
+    let message = String::from_utf8_lossy(&output.stderr);
+    bail!("could not read the Synapse mesh: {}", message.trim());
+  }
+  serde_json::from_slice(&output.stdout).context("Synapse returned an invalid mesh roster")
 }
 
 /// Every secret Synapse holds, for a chooser to offer during provider setup. Empty whenever

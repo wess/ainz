@@ -12,7 +12,7 @@
 <body>
   <a class="skip" href="#main">skip to content</a>
   <div class="shell">
-    <div class="topline"><strong>AINZ 0.13.0</strong><nav aria-label="Main navigation"><a aria-current="page" href="./">Home</a><a href="tutorial/">Tutorial</a><a href="docs/">Docs</a><a href="masthead/">Masthead</a><a href="theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+    <div class="topline"><strong>AINZ 0.14.0</strong><nav aria-label="Main navigation"><a aria-current="page" href="./">Home</a><a href="tutorial/">Tutorial</a><a href="docs/">Docs</a><a href="masthead/">Masthead</a><a href="theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
     <main id="main">
       <section class="hero">
         <div class="mainpane">
@@ -41,18 +41,21 @@
           <h2>Workspace</h2>
           <p><span class="prompt">status</span><br>permissions: ask<br>provider: ollama<br>model: qwen3:8b</p>
           <hr class="side-rule">
-          <p><code>Ctrl+L</code> roster<br><code>Ctrl+1..9</code> agents<br><code>Ctrl+=/-</code> cycle<br><code>/</code> commands</p>
+          <p><code>Ctrl+L</code> local roster<br><code>Cmd+R</code> Synapse mesh<br><code>Ctrl+1..9</code> agents<br><code>Ctrl+=/-</code> cycle</p>
         </aside>
       </section>
       <div class="statusline"><span>main</span><span>12.4k tokens</span><span>ask</span><span>3 agents</span><span>completed</span></div>
       <section class="content">
         <h2>A buffer you can follow.</h2>
-        <p>Inspired by irssi and BitchX: messages share a line with their nick, agents live in the right-hand roster, and the channel topic says what the selected agent is doing. Markdown renders in the terminal.</p>
+        <p>Inspired by irssi and BitchX: messages share a line with their nick, agents live in the right-hand roster, and the channel topic says what the selected agent is doing. Switch the rail to the machine-wide Synapse mesh with <code>Cmd+R</code>. Markdown renders in the terminal, and transcript text remains selectable with the terminal's normal copy command.</p>
         <div class="buffer-example"><p class="buffer-topic">#main · Improve the output</p><pre>15:31 &lt;you&gt; Make the buffer easier to read.
 15:31 &lt;Ainz&gt; Keep names beside their messages. Longer replies
              wrap under the text, with room for code and lists.
 15:32      ▸ shell  cargo test</pre><p class="buffer-result">*** Completed · 8s</p></div>
         <p>Working, Responding, Running tools, and Waiting for approval tell you when a run is active. Completed, Cancelled, or Failed stays above the prompt after it ends, with a matching marker in the buffer. Completion includes end hooks.</p>
+        <h2>Learn from the work.</h2>
+        <p>Enable <strong>Automatic improvement</strong> in settings or use <code>/improve on</code> once. Normal saved runs then trigger background experiments that propose harness fixes and reusable skills. Fixed behavioral tasks check each candidate before you review and accept it.</p>
+        <p><a href="docs/#improvement">Set up automatic improvement</a> and learn how source checks, behavioral evaluations, and review protect the next run.</p>
         <h2>Make yourself at home.</h2>
         <p>Choose <code>/header mascot</code> for the built-in mascot. Draw your own artwork or tune the interface colors in the designers, then copy one install command and select your creation inside Ainz.</p>
         <div class="actions"><a class="button" href="masthead/">Masthead Studio</a><a class="button secondary" href="theme/">Theme Designer</a></div>
@@ -72,7 +75,7 @@
         <div class="callout">No model configured? Just run <code>ainz</code>. The setup screen lists providers and pulls their models straight from each endpoint — no config file, no typing a model name by hand.</div>
       </section>
     </main>
-    <footer><span>Ainz 0.13.0 · MIT licensed</span><span><a href="https://github.com/wess/ainz/releases">downloads</a> · <a href="docs/#security">security</a></span></footer>
+    <footer><span>Ainz 0.14.0 · MIT licensed</span><span><a href="https://github.com/wess/ainz/releases">downloads</a> · <a href="docs/#security">security</a></span></footer>
   </div>
   <script src="assets/site.js"></script>
 </body>

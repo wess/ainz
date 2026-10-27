@@ -106,7 +106,7 @@ h1 { max-width: 850px; margin: 13px 0 18px; font-size: clamp(2rem, 5vw, 4.8rem);
 .callout { margin: 24px 0; border: 1px solid #315b5c; padding: 13px 16px; background: #071719; box-shadow: 5px 5px 0 #041031; }
 .callout::before { content: "NOTICE "; color: var(--yellow); font-weight: bold; }
 
-.step { display: grid; grid-template-columns: 46px 1fr; gap: 14px; margin: 30px 0; }
+.step { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 14px; margin: 30px 0; }
 .stepnum { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--cyan); color: var(--yellow); background: #07234b; font-weight: bold; box-shadow: 4px 4px 0 #2e0e4d; }
 .step h2 { margin: 4px 0 12px; border: 0; }
 
@@ -120,7 +120,7 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10
   .mainpane { border-right: 0; }
   .sidepane { display: none; }
   .grid { grid-template-columns: 1fr; }
-  .split { grid-template-columns: 1fr; }
+  .split { grid-template-columns: minmax(0, 1fr); }
   .toc { position: static; columns: 2; }
   .statusline span:nth-child(n+3) { display: none; }
 }

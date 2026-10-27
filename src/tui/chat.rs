@@ -38,6 +38,7 @@ use uuid::Uuid;
 use super::{
   ACCENT, ACTIVE, BLUE, CYAN, INK, MAGENTA, MUTED, RED, Term, YELLOW, centered,
   enter_inline_terminal, enter_terminal, input, input::Input, leave_terminal, masthead,
+  release_mouse,
 };
 use crate::app::{expand_prompt, make_agent_with};
 
@@ -318,6 +319,13 @@ impl AgentView {
   }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RosterSource {
+  #[default]
+  Local,
+  Mesh,
+}
+
 struct ChatState {
   live_hint: Option<String>,
   attention: (usize, usize, usize),
@@ -328,6 +336,9 @@ struct ChatState {
   agents: BTreeMap<String, AgentView>,
   active: Option<String>,
   roster: bool,
+  roster_source: RosterSource,
+  mesh_roster: Option<ainz::synapse::MeshRoster>,
+  mesh_error: Option<String>,
   // where the reader is, and how far they have asked to move since the last frame; only a
   // frame knows how tall everything is, so it is the frame that settles the two
   scroll: Cell<Scroll>,
@@ -380,6 +391,9 @@ impl Default for ChatState {
       agents: BTreeMap::new(),
       active: None,
       roster: true,
+      roster_source: RosterSource::Local,
+      mesh_roster: None,
+      mesh_error: None,
       scroll: Cell::new(Scroll::Follow),
       scroll_delta: Cell::new(0),
       page: Cell::new(0),
@@ -570,6 +584,9 @@ pub(crate) async fn run_chat(
     },
     false => (enter_terminal()?, false),
   };
+  if !inline {
+    release_mouse(&mut terminal)?;
+  }
   let result = run_chat_inner(
     &mut terminal,
     workspace,
@@ -1002,8 +1019,7 @@ async fn run_chat_inner(
         crossterm::execute!(
           terminal.backend_mut(),
           crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-          crossterm::event::EnableBracketedPaste,
-          crossterm::event::EnableMouseCapture
+          crossterm::event::EnableBracketedPaste
         )?;
         dirty = true;
         continue;
@@ -1232,6 +1248,27 @@ async fn run_chat_inner(
         }
         continue;
       }
+      Match::Action(KeyAction::Roster) => {
+        let visible = !state.roster || state.roster_source != RosterSource::Local;
+        state.roster_source = RosterSource::Local;
+        set_roster(&mut state, config, visible).await;
+        continue;
+      }
+      Match::Action(KeyAction::MeshRoster) => {
+        state.roster_source = RosterSource::Mesh;
+        set_roster(&mut state, config, true).await;
+        match ainz::synapse::mesh_roster(&config.synapse).await {
+          Ok(roster) => {
+            state.mesh_roster = Some(roster);
+            state.mesh_error = None;
+          }
+          Err(error) => {
+            state.mesh_roster = None;
+            state.mesh_error = Some(format!("{error:#}"));
+          }
+        }
+        continue;
+      }
       Match::Action(KeyAction::Permissions) => {
         config.permissions = match config.permissions {
           PermissionMode::Ask => PermissionMode::Auto,
@@ -1319,6 +1356,7 @@ async fn run_chat_inner(
         KeyCode::Char('-') => state.cycle_agent(false),
         KeyCode::Char('l') => {
           let visible = !state.roster;
+          state.roster_source = RosterSource::Local;
           set_roster(&mut state, config, visible).await;
         }
         KeyCode::Char('o') => state.expanded = !state.expanded,
@@ -1729,6 +1767,7 @@ async fn run_chat_inner(
             continue;
           }
           CommandResult::ShowAgents => {
+            state.roster_source = RosterSource::Local;
             set_roster(&mut state, config, true).await;
             continue;
           }
@@ -2598,10 +2637,17 @@ fn render(
   .areas(frame.area());
   title::render(frame, header, state, session_id, workspace);
   let transcript = if state.roster && body.width >= 72 {
-    let [transcript, roster] = Layout::horizontal([Constraint::Min(30), Constraint::Length(24)])
+    let width = match state.roster_source {
+      RosterSource::Local => 24,
+      RosterSource::Mesh => 34,
+    };
+    let [transcript, roster] = Layout::horizontal([Constraint::Min(30), Constraint::Length(width)])
       .spacing(1)
       .areas(body);
-    render_roster(frame, roster, state);
+    match state.roster_source {
+      RosterSource::Local => render_roster(frame, roster, state),
+      RosterSource::Mesh => render_mesh_roster(frame, roster, state),
+    }
     transcript
   } else {
     body
@@ -2861,7 +2907,10 @@ fn append_splash_footer(lines: &mut Vec<Line<'static>>) {
     )
     .alignment(Alignment::Center),
     Line::styled(
-      "/help commands · ctrl+1…9 select · ctrl+= / ctrl+- cycle · ctrl+l roster",
+      format!(
+        "/help commands · ctrl+1…9 select · ctrl+l local · {} mesh",
+        ainz::keybind::Action::MeshRoster.default_key()
+      ),
       Style::default().fg(MUTED),
     )
     .alignment(Alignment::Center),
@@ -2975,6 +3024,114 @@ fn render_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
   if plan.height > 1 {
     render_plan(frame, plan, todos);
   }
+}
+
+fn render_mesh_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
+  let block = Block::default()
+    .title(" synapse mesh ")
+    .borders(Borders::LEFT)
+    .border_style(Style::default().fg(BLUE));
+  let inner = block.inner(area);
+  frame.render_widget(block, area);
+  let Some(roster) = &state.mesh_roster else {
+    let message = state
+      .mesh_error
+      .as_deref()
+      .unwrap_or("Use the mesh roster shortcut to load Synapse. Enable it in /settings first.");
+    frame.render_widget(
+      Paragraph::new(message)
+        .style(Style::default().fg(MUTED))
+        .wrap(Wrap { trim: false }),
+      inner,
+    );
+    return;
+  };
+  if !roster.enabled {
+    frame.render_widget(
+      Paragraph::new("The mesh is off. Turn on Agent mesh in /settings, then refresh this roster.")
+        .style(Style::default().fg(MUTED))
+        .wrap(Wrap { trim: false }),
+      inner,
+    );
+    return;
+  }
+
+  let mut items = Vec::new();
+  if !roster.workers.is_empty() {
+    items.push(ListItem::new(Line::styled(
+      format!(" workers {}", roster.workers.len()),
+      Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+    )));
+  }
+  for worker in &roster.workers {
+    let agent = roster.agents.iter().find(|agent| agent.name == worker.name);
+    let (marker, color, status) = match agent {
+      Some(agent) if agent.online && agent.status.eq_ignore_ascii_case("working") => {
+        ("+", ACTIVE, "working")
+      }
+      Some(agent) if agent.online && agent.status.eq_ignore_ascii_case("blocked") => {
+        ("!", YELLOW, "blocked")
+      }
+      Some(agent) if agent.online => ("+", CYAN, agent.status.as_str()),
+      _ if worker.status == "running" => ("?", YELLOW, "unresponsive"),
+      _ => ("·", MUTED, "stopped"),
+    };
+    let detail = if status.is_empty() { "online" } else { status };
+    items.push(ListItem::new(Line::from(vec![
+      Span::styled(format!(" {marker} "), Style::default().fg(color)),
+      Span::styled(clip(&worker.name, 18), Style::default().fg(color)),
+      Span::styled(format!(" {detail}"), Style::default().fg(MUTED)),
+    ])));
+  }
+
+  let worker_names = roster
+    .workers
+    .iter()
+    .map(|worker| worker.name.as_str())
+    .collect::<std::collections::HashSet<_>>();
+  let available = roster
+    .agents
+    .iter()
+    .filter(|agent| agent.online && !worker_names.contains(agent.name.as_str()))
+    .collect::<Vec<_>>();
+  if !available.is_empty() {
+    items.push(ListItem::new(Line::styled(
+      format!(" other agents {}", available.len()),
+      Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+    )));
+  }
+  for agent in available {
+    let status = if agent.human {
+      "you"
+    } else if agent.status.is_empty() {
+      "online"
+    } else {
+      agent.status.as_str()
+    };
+    items.push(ListItem::new(Line::from(vec![
+      Span::styled(" + ", Style::default().fg(CYAN)),
+      Span::styled(clip(&agent.name, 18), Style::default().fg(CYAN)),
+      Span::styled(format!(" {status}"), Style::default().fg(MUTED)),
+    ])));
+  }
+  let hidden = roster
+    .agents
+    .iter()
+    .filter(|agent| !agent.online && !worker_names.contains(agent.name.as_str()))
+    .count();
+  if hidden > 0 {
+    items.push(ListItem::new(Line::styled(
+      format!(" {hidden} offline hidden"),
+      Style::default().fg(MUTED),
+    )));
+  }
+  if items.is_empty() {
+    items.push(ListItem::new(Line::styled(
+      " no agents have joined",
+      Style::default().fg(MUTED),
+    )));
+  }
+  frame.render_widget(List::new(items), inner);
 }
 
 fn render_plan(frame: &mut Frame, area: Rect, todos: &[ainz::Todo]) {
@@ -3107,8 +3264,9 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   } else if area.width >= 108 {
     format!(
       " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
-       {total}{cost} │ agents {running}/{total_agents}{plan} │ {} roster ",
-      ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Roster)
+       {total}{cost} │ agents {running}/{total_agents}{plan} │ {} local · {} mesh ",
+      ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Roster),
+      ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::MeshRoster)
     )
   } else if area.width >= 72 {
     format!(

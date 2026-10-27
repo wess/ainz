@@ -19,6 +19,7 @@ pub enum Action {
   Newline,
   Clear,
   Roster,
+  MeshRoster,
   Detail,
   NextAgent,
   PreviousAgent,
@@ -28,7 +29,7 @@ pub enum Action {
 }
 
 impl Action {
-  pub const ALL: [Self; 19] = [
+  pub const ALL: [Self; 20] = [
     Self::Detach,
     Self::Sessions,
     Self::NewSession,
@@ -42,6 +43,7 @@ impl Action {
     Self::Newline,
     Self::Clear,
     Self::Roster,
+    Self::MeshRoster,
     Self::Detail,
     Self::NextAgent,
     Self::PreviousAgent,
@@ -64,6 +66,7 @@ impl Action {
       Self::Newline => "new line",
       Self::Clear => "clear input",
       Self::Roster => "agent roster",
+      Self::MeshRoster => "Synapse mesh roster",
       Self::Detail => "tool details",
       Self::NextAgent => "next agent",
       Self::PreviousAgent => "previous agent",
@@ -87,6 +90,13 @@ impl Action {
       Self::Newline => "shift+enter",
       Self::Clear => "ctrl+u",
       Self::Roster => "ctrl+l",
+      Self::MeshRoster => {
+        if cfg!(target_os = "macos") {
+          "cmd+r"
+        } else {
+          "super+r"
+        }
+      }
       Self::Detail => "ctrl+o",
       Self::NextAgent => "ctrl+=",
       Self::PreviousAgent => "ctrl+-",
@@ -166,7 +176,14 @@ mod terminal {
       (KeyModifiers::CONTROL, "ctrl+"),
       (KeyModifiers::ALT, "alt+"),
       (KeyModifiers::SHIFT, "shift+"),
-      (KeyModifiers::SUPER, "super+"),
+      (
+        KeyModifiers::SUPER,
+        if cfg!(target_os = "macos") {
+          "cmd+"
+        } else {
+          "super+"
+        },
+      ),
     ] {
       if key.modifiers.contains(modifier) {
         text.push_str(name);

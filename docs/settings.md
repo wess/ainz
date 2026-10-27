@@ -72,7 +72,7 @@ Function keys F1–F12 and navigation names such as `pageup`, `enter`, and `tab`
 Ainz validates the complete set, including default bindings, when it loads the config.
 
 Actions: `detach`, `sessions`, `new_session`, `next_session`, `previous_session`,
-`next_attention`, `settings`, `interrupt`, `quit`, `send`, `newline`, `clear`, `roster`,
+`next_attention`, `settings`, `interrupt`, `quit`, `send`, `newline`, `clear`, `roster`, `mesh_roster`,
 `detail`, `next_agent`, `previous_agent`, `scroll_up`, `scroll_down`, and `permissions`.
 `/help` lists your current bindings. A terminal can intercept shortcuts before Ainz receives
 them; choose another combination if that happens.

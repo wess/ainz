@@ -182,8 +182,8 @@ newline. `Esc` twice steps back to the last prompt and puts it in the line to be
 the session from there. `/vim` turns on modal editing. The wheel, `Shift+↑`/`Shift+↓` and
 `PageUp`/`PageDown` scroll the transcript. Reading earlier output holds your place while new
 text arrives; `Ctrl+End` returns to the latest output. `Ctrl+O` expands captured tool output,
-including while a tool is running. The mouse selects a field or a menu row in the setup screens, and holding `Shift` while dragging
-selects text the way it normally would.
+including while a tool is running. The mouse selects a field or a menu row in setup screens. In
+chat, drag across transcript text to use the terminal's normal selection and copy commands.
 
 `/inline` draws the prompt at the bottom of the terminal's own scroll instead of taking the
 whole screen, so finished output stays in the scrollback the terminal already keeps — at the
