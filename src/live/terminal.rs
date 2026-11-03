@@ -55,7 +55,9 @@ pub(super) fn spawn(command: &mut Command, cols: u16, rows: u16) -> Result<(Pty,
     });
   }
   let child = command.spawn()?;
-  Ok((Pty(AsyncFd::new(master)?), child))
+  // OwnedFd keeps this valid and stable until AsyncFd relinquishes ownership.
+  let master = unsafe { AsyncFd::register(master)? };
+  Ok((Pty(master), child))
 }
 
 fn size(cols: u16, rows: u16) -> libc::winsize {
