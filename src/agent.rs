@@ -120,10 +120,11 @@ impl<P: ChatProvider> Agent<P> {
     mut inbox: Option<&mut RunInbox>,
     state: &mut RunState,
   ) -> Result<String> {
-    session.append(prompt);
     let specs = self.tools.specs();
     // neither changes during a run, so neither is measured or rebuilt on every step
     let fixed = options.instructions.len() + tool_bytes(&specs);
+    context::admit(&prompt, options, fixed)?;
+    session.append(prompt);
     let system = Message::text(Role::System, &options.instructions);
     state.planning = self.tools.get(crate::todo::TOOL).is_some();
     if state.planning {
@@ -193,29 +194,74 @@ impl<P: ChatProvider> Agent<P> {
     fixed: usize,
     state: &mut RunState,
   ) -> Result<Message> {
-    let full = tokens(fixed, &session.context()?) >= options.compact_at_tokens;
-    if full {
-      self.compact(session, options, &mut state.usage).await?;
+    let mut tails = context::TAILS.into_iter();
+    loop {
+      self.fit(session, options, fixed, &mut state.usage).await?;
+      let context = session.context()?;
+      let mut messages = Vec::with_capacity(context.len() + 1);
+      messages.push(system);
+      messages.extend(context.iter());
+      state.checkpoint()?;
+      // a provider that panics fails the run cleanly; the session it was handed is still whole
+      let reply = AssertUnwindSafe(self.provider.complete(&messages, specs, &self.events))
+        .catch_unwind()
+        .await
+        .map_err(|panic| anyhow!("the provider failed: {}", tool::panic_message(&*panic)))?;
+      match reply {
+        Ok(reply) => {
+          accumulate(&mut state.usage, &reply.usage);
+          return Ok(reply.message);
+        }
+        // the estimate came in low, which only the provider can say: give up more of the tail
+        Err(error) if context::too_long(&error) => {
+          let mut archived = false;
+          while !archived && let Some(preserve) = tails.next() {
+            archived = self
+              .compact(session, options, &mut state.usage, preserve)
+              .await?;
+          }
+          if !archived {
+            return Err(error);
+          }
+        }
+        Err(error) => return Err(error),
+      }
     }
-    let context = session.context()?;
-    let estimate = tokens(fixed, &context);
-    if estimate > options.context_tokens {
+  }
+
+  /// Compacts when the history has grown past the threshold or would leave no room for the
+  /// reply. When the preserved tail is itself what does not fit, compaction runs again keeping
+  /// less of it, down to the latest prompt or the latest round of tool results.
+  async fn fit(
+    &self,
+    session: &mut Session,
+    options: &RunOptions,
+    fixed: usize,
+    usage: &mut Usage,
+  ) -> Result<()> {
+    let limit = context::room(options);
+    let mut estimate = tokens(fixed, &session.context()?);
+    if (estimate >= options.compact_at_tokens || estimate > limit)
+      && self
+        .compact(session, options, usage, options.preserve_messages)
+        .await?
+    {
+      estimate = tokens(fixed, &session.context()?);
+    }
+    for preserve in context::TAILS {
+      if estimate > limit && self.compact(session, options, usage, preserve).await? {
+        estimate = tokens(fixed, &session.context()?);
+      }
+    }
+    if estimate > limit {
       bail!(
-        "estimated context is {estimate} tokens, above the {} token limit",
+        "the latest messages are about {estimate} tokens even after compacting, and only \
+         {limit} fit in a {} token context with room left for a reply; send another prompt to \
+         carry on without them, or raise context_tokens if this model takes more",
         options.context_tokens
       );
     }
-    let mut messages = Vec::with_capacity(context.len() + 1);
-    messages.push(system);
-    messages.extend(context.iter());
-    state.checkpoint()?;
-    // a provider that panics fails the run cleanly; the session it was handed is still whole
-    let reply = AssertUnwindSafe(self.provider.complete(&messages, specs, &self.events))
-      .catch_unwind()
-      .await
-      .map_err(|panic| anyhow!("the provider failed: {}", tool::panic_message(&*panic)))??;
-    accumulate(&mut state.usage, &reply.usage);
-    Ok(reply.message)
+    Ok(())
   }
 }
 

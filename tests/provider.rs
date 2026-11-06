@@ -572,3 +572,65 @@ async fn provider_shows_the_sentence_from_an_error_body() {
   assert!(!error.contains("invalid_request_error"), "{error}");
   server.await.unwrap();
 }
+
+/// One tool result the way the command reports a screenshot it read: about a megabyte of
+/// base64 on one line, and the same base64 again beside it.
+const SCREENSHOTS: &str = r#"
+cat > /dev/null
+data=$(head -c 650000 /dev/zero | tr '\0' 'x')
+i=0
+while [ $i -lt 20 ]; do
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t%s","content":[{"type":"image","source":{"data":"%s"}}]}]},"tool_use_result":{"file":{"base64":"%s"}}}\n' "$i" "$data" "$data"
+  i=$((i+1))
+done
+"#;
+
+const FINISHED: &str =
+  r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"finished"}'"#;
+
+fn reporting(script: String) -> ProcessProvider {
+  ProcessProvider::new(
+    "/bin/sh".into(),
+    vec!["-c".into(), script],
+    "test".into(),
+    std::env::current_dir().unwrap(),
+    PermissionMode::ReadOnly,
+    ProcessOutput::StreamJson,
+  )
+}
+
+async fn reply(provider: ProcessProvider) -> String {
+  provider
+    .complete(
+      &[&Message::text(Role::User, "work")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap()
+    .message
+    .content
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_run_is_not_ended_by_how_much_it_has_reported() {
+  let provider = reporting(format!("{SCREENSHOTS}{FINISHED}"));
+  assert_eq!(reply(provider).await, "finished");
+}
+
+#[tokio::test]
+async fn a_line_too_long_to_keep_is_skipped_and_the_run_goes_on() {
+  let provider = reporting(format!(
+    "cat > /dev/null; head -c 17000000 /dev/zero | tr '\\0' 'x'; echo; {FINISHED}"
+  ));
+  assert_eq!(reply(provider).await, "finished");
+}
+
+#[tokio::test]
+async fn a_line_that_is_not_text_is_skipped_and_the_run_goes_on() {
+  let provider = reporting(format!(
+    "cat > /dev/null; printf '\\377\\376\\n'; {FINISHED}"
+  ));
+  assert_eq!(reply(provider).await, "finished");
+}

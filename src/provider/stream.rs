@@ -2,8 +2,11 @@
 //! `claude -p --output-format stream-json` produces: one JSON object per line, mixing token
 //! deltas, whole messages, and a final result.
 
+use std::io;
+
 use anyhow::{Result, bail};
 use serde_json::Value;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
 use crate::{
   event::{Event, EventSink},
@@ -169,4 +172,85 @@ fn blocks(value: &Value) -> impl Iterator<Item = &Value> {
 
 fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
   value.get(key).and_then(Value::as_str)
+}
+
+/// The next line of a command's report, or nothing at the end of it. A line past `limit` comes
+/// back empty with its bytes read and dropped: one report too long to keep is no reason to end
+/// the work it describes.
+pub(super) async fn next_line<R>(reader: &mut R, limit: usize) -> io::Result<Option<Vec<u8>>>
+where
+  R: AsyncBufRead + Unpin,
+{
+  let mut line = Vec::new();
+  let read = (&mut *reader)
+    .take(limit as u64 + 1)
+    .read_until(b'\n', &mut line)
+    .await?;
+  if read == 0 {
+    return Ok(None);
+  }
+  if line.len() <= limit {
+    return Ok(Some(line));
+  }
+  if line.last() != Some(&b'\n') {
+    skip_line(reader).await?;
+  }
+  Ok(Some(Vec::new()))
+}
+
+async fn skip_line<R>(reader: &mut R) -> io::Result<()>
+where
+  R: AsyncBufRead + Unpin,
+{
+  loop {
+    let available = reader.fill_buf().await?;
+    if available.is_empty() {
+      return Ok(());
+    }
+    match available.iter().position(|byte| *byte == b'\n') {
+      Some(end) => {
+        reader.consume(end + 1);
+        return Ok(());
+      }
+      None => {
+        let length = available.len();
+        reader.consume(length);
+      }
+    }
+  }
+}
+
+#[cfg(test)]
+mod lines {
+  use super::next_line;
+
+  #[tokio::test]
+  async fn a_line_ending_on_the_limit_does_not_take_the_next_one_with_it() {
+    let mut reader: &[u8] = b"abcd\nok\n";
+    assert_eq!(next_line(&mut reader, 4).await.unwrap(), Some(Vec::new()));
+    assert_eq!(
+      next_line(&mut reader, 4).await.unwrap(),
+      Some(b"ok\n".to_vec())
+    );
+    assert_eq!(next_line(&mut reader, 4).await.unwrap(), None);
+  }
+
+  #[tokio::test]
+  async fn a_line_past_the_limit_is_dropped_up_to_its_end() {
+    let mut reader: &[u8] = b"abcdefgh\nok\n";
+    assert_eq!(next_line(&mut reader, 4).await.unwrap(), Some(Vec::new()));
+    assert_eq!(
+      next_line(&mut reader, 4).await.unwrap(),
+      Some(b"ok\n".to_vec())
+    );
+  }
+
+  #[tokio::test]
+  async fn a_last_line_without_an_ending_is_still_a_line() {
+    let mut reader: &[u8] = b"ok";
+    assert_eq!(
+      next_line(&mut reader, 4).await.unwrap(),
+      Some(b"ok".to_vec())
+    );
+  }
 }

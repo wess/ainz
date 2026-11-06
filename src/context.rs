@@ -59,6 +59,56 @@ fn json_len(value: &serde_json::Value) -> usize {
   count.0
 }
 
+/// The most of one message a compaction request carries. A summary needs to know a file was
+/// read and what mattered in it, not the file again; the head and the tail are kept because
+/// that is where a command's error and a file's purpose usually are.
+const COMPACTED_MESSAGE_BYTES: usize = 8 * 1024;
+
+/// The history as transcripts of at most `budget` bytes each, oldest first, so a history of
+/// any length can be summarised by requests that each fit.
+pub fn compaction_chunks(messages: &[Message], budget: usize) -> Vec<String> {
+  let limit = COMPACTED_MESSAGE_BYTES.min(budget / 2).max(1);
+  let mut chunks = Vec::new();
+  let mut current = String::new();
+  for message in messages {
+    let piece = transcript(std::slice::from_ref(message));
+    let piece = clip(&piece, limit);
+    if !current.is_empty() && current.len() + piece.len() + 2 > budget {
+      chunks.push(std::mem::take(&mut current));
+    }
+    if !current.is_empty() {
+      current.push_str("\n\n");
+    }
+    current.push_str(&piece);
+  }
+  if !current.is_empty() {
+    chunks.push(current);
+  }
+  chunks
+}
+
+/// `text` cut to about `limit` bytes by dropping its middle, on character boundaries.
+fn clip(text: &str, limit: usize) -> std::borrow::Cow<'_, str> {
+  if text.len() <= limit {
+    return text.into();
+  }
+  let mut head = limit * 3 / 4;
+  while !text.is_char_boundary(head) {
+    head -= 1;
+  }
+  let mut tail = text.len() - (limit - head);
+  while !text.is_char_boundary(tail) {
+    tail += 1;
+  }
+  format!(
+    "{}\n[... {} bytes left out ...]\n{}",
+    &text[..head],
+    tail - head,
+    &text[tail..]
+  )
+  .into()
+}
+
 pub fn transcript(messages: &[Message]) -> String {
   messages
     .iter()

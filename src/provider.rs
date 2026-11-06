@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, header::RETRY_AFTER};
 use serde::Deserialize;
 use tokio::{
-  io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+  io::{AsyncWriteExt, BufReader},
   process::Command,
 };
 
@@ -51,7 +51,7 @@ fn arguments(raw: &str) -> serde_json::Value {
     })
 }
 
-use stream::{Completion, StreamState};
+use stream::{Completion, StreamState, next_line};
 use wire::{
   ChatRequest, PartialCall, StreamOptions, WireTool, parse_data, parse_response, wire_error,
   wire_message,
@@ -621,22 +621,14 @@ impl ChatProvider for ProcessProvider {
       let mut reader = BufReader::new(stdout);
       let mut buffered = String::new();
       if self.output == ProcessOutput::StreamJson {
-        let mut received = 0;
-        loop {
-          let mut line = String::new();
-          let read = (&mut reader)
-            .take((MAX_TRANSFER - received + 1) as u64)
-            .read_line(&mut line)
-            .await
-            .context("read provider output")?;
-          if read == 0 {
-            break;
-          }
-          received += read;
-          if received > MAX_TRANSFER {
-            bail!("provider output exceeds the transfer limit");
-          }
-          stream.push(&line, events);
+        // a line is acted on and dropped, so only its length costs memory: a limit on the whole
+        // report would be a limit on how long the command may work, and every screenshot it
+        // reads is a megabyte of that report
+        while let Some(line) = next_line(&mut reader, MAX_TRANSFER)
+          .await
+          .context("read provider output")?
+        {
+          stream.push(&String::from_utf8_lossy(&line), events);
         }
       } else {
         // the other modes want the whole of stdout, so read it in one piece
