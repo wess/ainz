@@ -167,6 +167,44 @@ output = "json_result"
   assert_eq!(mine.args, ["-p", "--output-format", "json"]);
 }
 
+#[tokio::test]
+async fn a_saved_claude_preset_learns_to_read_images() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(
+    &path,
+    r#"
+provider = "claude"
+model = "sonnet"
+
+[providers.claude]
+kind = "process"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--no-session-persistence", "--model", "{model}", "--permission-mode", "{permission}"]
+output = "stream_json"
+
+[providers.mine]
+kind = "process"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose"]
+output = "stream_json"
+"#,
+  )
+  .await
+  .unwrap();
+
+  let loaded = Config::load_from(&path).await.unwrap();
+
+  assert_eq!(
+    loaded.providers["claude"].args,
+    ainz::config::ProviderConfig::claude_code().args
+  );
+  assert_eq!(
+    loaded.providers["mine"].args,
+    ["-p", "--output-format", "stream-json", "--verbose"]
+  );
+}
+
 #[test]
 fn a_standing_rule_decides_before_anyone_is_asked() {
   let rules = ainz::PermissionRules {

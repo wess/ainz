@@ -88,7 +88,7 @@ async fn serve_launch(id: Uuid, launch: Launch) -> Result<()> {
     problem: None,
   };
   save(&info).await?;
-  let mut command = tokio::process::Command::new(std::env::current_exe()?);
+  let mut command = tokio::process::Command::new(ainz::update::executable()?);
   command
     .kill_on_drop(true)
     .arg("--live-worker")

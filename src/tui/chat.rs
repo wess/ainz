@@ -91,6 +91,7 @@ enum Wake {
   Live(Vec<crate::live::Info>),
   Branch(Option<String>),
   Improvement(bool),
+  Update(Option<String>),
 }
 
 struct CommandData {
@@ -870,6 +871,7 @@ async fn run_chat_inner(
   let mut resolver = ainz::keybind::Resolver::default();
   let mut monitor = crate::live::attention::monitor().await.ok();
   let mut branch = super::context::branch(&workspace).await;
+  let mut update_notice = watch_update(config);
   let mut improvement_watch = config
     .improve
     .enabled
@@ -966,10 +968,22 @@ async fn run_chat_inner(
       infos = async { match monitor.as_mut() { Some(monitor) => monitor.updates.recv().await, None => std::future::pending().await } }, if monitor.is_some() => Wake::Live(infos.unwrap_or_default()),
       name = async { match branch.as_mut() { Some(branch) => branch.updates.recv().await, None => std::future::pending().await } }, if branch.is_some() => Wake::Branch(name.flatten()),
       changed = async { match improvement_watch.as_mut() { Some((_, updates)) => updates.recv().await, None => std::future::pending().await } }, if improvement_watch.is_some() => Wake::Improvement(changed.is_some()),
+      notice = async { match update_notice.as_mut() { Some(notice) => notice.recv().await, None => std::future::pending().await } }, if update_notice.is_some() => Wake::Update(notice),
       _ = clock.tick(), if ticking => Wake::Clock,
       () = tokio::time::sleep(idle) => Wake::Tick,
     };
     let mut key = match wake {
+      Wake::Update(notice) => {
+        update_notice = None;
+        if let Some(notice) = notice {
+          state
+            .primary
+            .entries
+            .push(Entry::new(EntryKind::System, notice));
+          dirty = true;
+        }
+        continue;
+      }
       Wake::Improvement(open) => {
         if !open {
           improvement_watch = None;
@@ -3289,6 +3303,23 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
 
 // what the call is actually doing, the way the coding agents put it: shell(git status).
 // the key order is what these tools name their subject, whichever harness sent the call
+/// The launch check, off the interface's path: a slow network must never delay the first frame.
+/// Once per process, since a chat restarts here when it moves to another session.
+fn watch_update(config: &Config) -> Option<tokio::sync::mpsc::Receiver<String>> {
+  static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+  if !config.update.auto || STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    return None;
+  }
+  let updater = ainz::update::local().ok()?;
+  let (sender, receiver) = tokio::sync::mpsc::channel(1);
+  tokio::spawn(async move {
+    if let Some(notice) = ainz::update::background(&updater, ainz::update::now()).await {
+      drop(sender.send(notice).await);
+    }
+  });
+  Some(receiver)
+}
+
 /// A pasted path to an image, however the terminal spelled it: quoted, escaped, or a file URL.
 fn image_path(text: &str) -> Option<PathBuf> {
   const KINDS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];

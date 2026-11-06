@@ -35,6 +35,8 @@ pub mod synapse;
 pub mod theme;
 pub mod todo;
 pub mod tool;
+#[cfg(feature = "cli")]
+pub mod update;
 mod workspace;
 
 pub use agent::{Agent, Approver, RunOptions, deny_all};

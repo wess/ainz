@@ -21,7 +21,7 @@ release. The `search` tool needs [ripgrep](https://github.com/BurntSushi/ripgrep
 ## Cargo
 
 ```sh
-cargo install --git https://github.com/wess/ainz --tag v0.15.2 --locked
+cargo install --git https://github.com/wess/ainz --tag v0.16.0 --locked
 ```
 
 ## Current checkout and smaller builds
@@ -45,6 +45,27 @@ all feature combinations; a feature-minimal host need not include the CLI at all
 
 The [masthead studio](https://wess.io/ainz/masthead/) runs in the browser. Installing its exported
 artwork is separate from installing Ainz; see [headers](headers.md).
+
+## Updating
+
+Run `ainz update` to move to the latest release, or `ainz update --check` to see whether one exists.
+What it does depends on how this copy was installed:
+
+- Installer copies are replaced in place. The archive is checked against its published SHA-256
+  file and the new binary must start and report the right version before it takes over.
+- Homebrew copies run `brew upgrade wess/packages/ainz`.
+- Cargo builds print the `cargo install` line to run.
+
+The interactive interface also checks once a day, in the background. An installer copy updates
+itself and says to restart; Homebrew and Cargo copies get a notice and are left alone. Running
+sessions keep the version they started with. `ainz -p`, `ainz ask`, and JSON-RPC never check.
+
+To turn the launch check off, which a pinned `AINZ_VERSION` install will want:
+
+```toml
+[update]
+auto = false
+```
 
 ## Upgrading from AgentX
 

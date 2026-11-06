@@ -11,6 +11,7 @@ use ainz::{
 };
 
 pub mod improve;
+pub mod update;
 
 #[derive(Subcommand)]
 pub enum SessionsCommand {

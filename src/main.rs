@@ -197,6 +197,12 @@ enum Command {
   Headers,
   /// Write workspace instructions with the active model.
   Init,
+  /// Update Ainz to the latest release.
+  Update {
+    /// Only report whether a newer release exists.
+    #[arg(long)]
+    check: bool,
+  },
   Doctor {
     /// Send a small billable inference request, without retries or fallback.
     #[arg(long)]
@@ -451,6 +457,7 @@ async fn run() -> Result<()> {
       let session = Session::new(workspace.clone());
       app::run_once(workspace, config, session, "Inspect this workspace and write a concise AGENTS.md with its build, test, architecture, and coding conventions. Preserve existing instructions and do not invent commands.".into(), Vec::new(), false, true).await
     }
+    Some(Command::Update { check }) => command::update::run(check).await,
     Some(Command::Doctor { check_provider }) => {
       command::doctor(&workspace, &config).await?;
       if check_provider {

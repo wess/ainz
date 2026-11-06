@@ -306,7 +306,7 @@ pub(crate) async fn start(workspace: &Path, args: Vec<OsString>) -> Result<Uuid>
   };
   let path = root()?.join(format!("{id}.launch"));
   private::write(&path, serde_json::to_vec(&launch)?).await?;
-  let mut command = std::process::Command::new(std::env::current_exe()?);
+  let mut command = std::process::Command::new(ainz::update::executable()?);
   command
     .arg("--workspace")
     .arg(workspace)

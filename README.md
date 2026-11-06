@@ -29,7 +29,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 Release downloads cover Apple Silicon macOS and x86_64 and arm64 Linux. The
 `search` tool shells out to [ripgrep](https://github.com/BurntSushi/ripgrep), so install `rg`
-as well. See [`docs/install.md`](docs/install.md) for pinned versions, custom install
+as well. `ainz update` moves to the latest release, and the interface checks for one daily. See [`docs/install.md`](docs/install.md) for pinned versions, custom install
 directories, Cargo, and uninstalling. The [documentation index](docs/readme.md) lists every guide. The project site has a
 [tutorial](https://wess.io/ainz/tutorial/) and [reference manual](https://wess.io/ainz/docs/).
 

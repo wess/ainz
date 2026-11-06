@@ -460,6 +460,8 @@ impl ProviderConfig {
         "-p",
         "--output-format",
         "stream-json",
+        "--input-format",
+        "stream-json",
         "--verbose",
         "--include-partial-messages",
         "--no-session-persistence",
@@ -506,6 +508,20 @@ impl ProviderConfig {
   }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UpdateConfig {
+  /// Check for a new release when the interface starts, and install it when nothing else
+  /// manages this copy. `ainz update` works either way.
+  pub auto: bool,
+}
+
+impl Default for UpdateConfig {
+  fn default() -> Self {
+    Self { auto: true }
+  }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -531,6 +547,7 @@ pub struct Config {
   pub memory: MemoryConfig,
   pub improve: crate::improve::ImproveConfig,
   pub synapse: SynapseConfig,
+  pub update: UpdateConfig,
   // keyed by event name (session_start, pre_tool, post_tool, session_end); see src/hook.rs
   pub hooks: BTreeMap<String, Vec<HookDef>>,
   #[serde(skip)]
@@ -563,6 +580,7 @@ impl Default for Config {
       memory: MemoryConfig::default(),
       improve: crate::improve::ImproveConfig::default(),
       synapse: SynapseConfig::default(),
+      update: UpdateConfig::default(),
       hooks: BTreeMap::new(),
       mcp_config: None,
       yeet: false,
@@ -653,6 +671,18 @@ impl Config {
       "--permission-mode",
       "{permission}",
     ];
+    const TEXT_INPUT_CLAUDE: [&str; 10] = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--no-session-persistence",
+      "--model",
+      "{model}",
+      "--permission-mode",
+      "{permission}",
+    ];
     for provider in self.providers.values_mut() {
       if provider.kind == ProviderKind::Process
         && provider.command.as_deref() == Some("claude")
@@ -662,6 +692,15 @@ impl Config {
         let preset = ProviderConfig::claude_code();
         provider.args = preset.args;
         provider.output = preset.output;
+      }
+      // the saved preset from before images could be handed over: without the input flag the
+      // command only ever reads text
+      if provider.kind == ProviderKind::Process
+        && provider.command.as_deref() == Some("claude")
+        && provider.output == ProcessOutput::StreamJson
+        && provider.args == TEXT_INPUT_CLAUDE
+      {
+        provider.args = ProviderConfig::claude_code().args;
       }
     }
   }

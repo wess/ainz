@@ -27,6 +27,7 @@ use crate::{
 const MAX_TRANSFER: usize = 16 * 1024 * 1024;
 
 mod anthropic;
+mod input;
 mod responses;
 mod stream;
 mod transport;
@@ -584,7 +585,7 @@ impl ChatProvider for ProcessProvider {
     events: &EventSink,
   ) -> Result<ProviderReply> {
     // built first so a turn the command cannot take fails before anything is started
-    let prompt = render_prompt(messages, &self.command)?;
+    let prompt = input::render(messages, &self.command, input::reads_json(&self.args))?;
     let mut child = Command::new(&self.command)
       .args(self.args())
       .current_dir(&self.workspace)
@@ -679,43 +680,6 @@ impl ChatProvider for ProcessProvider {
       usage: reply.usage,
     })
   }
-}
-
-// an image only survives if it is something the command can fetch for itself: inline data has
-// nowhere to go in a text prompt, and dropping it silently would answer a question about a
-// picture nobody sent
-fn render_prompt(messages: &[&Message], command: &str) -> Result<String> {
-  let mut prompt = String::new();
-  for message in messages {
-    let role = match message.role {
-      Role::System => "system",
-      Role::User => "user",
-      Role::Assistant => "assistant",
-      Role::Tool => "tool",
-    };
-    prompt.push_str(role);
-    prompt.push_str(":\n");
-    if let Some(content) = &message.content {
-      prompt.push_str(content);
-      prompt.push('\n');
-    }
-    for call in &message.tool_calls {
-      prompt.push_str(&format!("tool call {}: {}\n", call.name, call.arguments));
-    }
-    for image in &message.images {
-      if image.url.starts_with("data:") {
-        bail!(
-          "{command} takes a text prompt, so the image in this turn cannot be sent. Ask about \
-           it with a provider that accepts images, or give the command the file path instead."
-        );
-      }
-      prompt.push_str("[image: ");
-      prompt.push_str(&image.url);
-      prompt.push_str("]\n");
-    }
-    prompt.push('\n');
-  }
-  Ok(prompt)
 }
 
 #[cfg(test)]

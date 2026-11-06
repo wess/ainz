@@ -17,8 +17,11 @@ Supported release targets:
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
-Assets are named `ainz-VERSION-TARGET.tar.gz` plus `.sha256`; `install.sh` and the Homebrew
-formula both depend on that naming. The formula lives at `wess/homebrew-packages/Formula/ainz.rb`
+Assets are named `ainz-VERSION-TARGET.tar.gz` plus `.sha256`; `install.sh`, `ainz update`, and
+the Homebrew formula all depend on that naming. Installed copies read the `releases/latest`
+redirect and replace themselves within a day of a release, so every published tag reaches users
+without a further step. Updates only move forward, so a bad release is fixed by publishing a
+higher version, not by deleting the tag. The formula lives at `wess/homebrew-packages/Formula/ainz.rb`
 and declares `ripgrep`, which the `search` tool shells out to. After the assets are public, update
 the formula with their exact checksums and validate an installation from the tap. Never publish a
 formula whose URL does not yet exist.

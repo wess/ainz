@@ -545,6 +545,68 @@ async fn process_provider_refuses_inline_image_data_instead_of_dropping_it() {
 }
 
 #[tokio::test]
+async fn an_image_a_text_command_refused_does_not_fail_every_later_turn() {
+  let image = Image {
+    url: "data:image/png;base64,AQID".into(),
+    detail: None,
+  };
+  let earlier = Message::user("what is in this", vec![image]);
+  let reply = cat_provider()
+    .complete(
+      &[&earlier, &Message::text(Role::User, "try this instead")],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap();
+  let content = reply.message.content.unwrap();
+  assert!(content.contains("try this instead"), "{content}");
+  assert!(content.contains("[image: not sent"), "{content}");
+  assert!(!content.contains("AQID"), "{content}");
+}
+
+#[tokio::test]
+async fn a_command_reading_stream_json_is_handed_the_image_itself() {
+  let provider = ProcessProvider::new(
+    "/bin/sh".into(),
+    vec![
+      "-c".into(),
+      "cat".into(),
+      "--input-format".into(),
+      "stream-json".into(),
+    ],
+    "test".into(),
+    std::env::current_dir().unwrap(),
+    PermissionMode::ReadOnly,
+    ProcessOutput::Text,
+  );
+  let image = Image {
+    url: "data:image/png;base64,AQID".into(),
+    detail: None,
+  };
+  let reply = provider
+    .complete(
+      &[&Message::user("what is in this", vec![image])],
+      &[],
+      &EventSink::default(),
+    )
+    .await
+    .unwrap();
+  let line: serde_json::Value = serde_json::from_str(&reply.message.content.unwrap()).unwrap();
+  assert_eq!(line["type"], "user");
+  let content = &line["message"]["content"];
+  assert!(
+    content[0]["text"]
+      .as_str()
+      .unwrap()
+      .contains("what is in this")
+  );
+  assert_eq!(content[1]["type"], "image");
+  assert_eq!(content[1]["source"]["media_type"], "image/png");
+  assert_eq!(content[1]["source"]["data"], "AQID");
+}
+
+#[tokio::test]
 async fn provider_shows_the_sentence_from_an_error_body() {
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
   let address = listener.local_addr().unwrap();

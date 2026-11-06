@@ -57,7 +57,7 @@ async fn schedule(session: &Session, config: &Config) -> Result<Option<String>> 
       .await?
       .into_std()
       .await;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut child = Command::new(ainz::update::executable()?)
       .arg("--workspace")
       .arg(&session.workspace)
       .args(["improve", "worker"])
