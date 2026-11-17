@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ChatProvider, ProviderReply, Wire, arguments, default_header, read_events};
+use super::{
+  ChatProvider, ProviderReply, Wire, arguments, default_header, read_events, wire::CUT_OFF,
+};
 use crate::{
   event::{Event, EventSink},
   protocol::{Message, Role, Thinking, ToolCall, ToolSpec, Usage},
@@ -193,6 +195,7 @@ struct StreamState {
   calls: BTreeMap<usize, (String, String, String)>,
   usage: Usage,
   finished: bool,
+  truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -298,20 +301,26 @@ impl StreamState {
           .as_deref()
           .unwrap_or("the provider reported an error")
       ),
-      WireEvent::MessageDelta {
-        delta: Some(Stop {
-          stop_reason: Some(reason),
-        }),
-        ..
-      } if matches!(reason.as_str(), "max_tokens" | "refusal") => {
-        bail!("model reply ended with {reason}")
-      }
       WireEvent::MessageStart {
         message: WireMessage { usage: Some(usage) },
-      }
-      | WireEvent::MessageDelta {
-        usage: Some(usage), ..
       } => self.count(usage),
+      WireEvent::MessageDelta { delta, usage } => {
+        if let Some(usage) = usage {
+          self.count(usage);
+        }
+        match delta.and_then(|delta| delta.stop_reason).as_deref() {
+          Some("refusal") => bail!("model reply ended with refusal"),
+          // kept and marked rather than failed, so the run can carry on from where it stopped
+          Some("max_tokens") if !self.truncated => {
+            self.truncated = true;
+            self.text.push_str(CUT_OFF);
+            events.emit(Event::TextDelta {
+              text: CUT_OFF.into(),
+            });
+          }
+          _ => {}
+        }
+      }
       WireEvent::ContentBlockStart {
         index,
         content_block,
@@ -379,8 +388,14 @@ impl StreamState {
         })
       })
       .collect::<Result<Vec<_>>>()?;
-    let thinking = (!self.thinking.is_empty() || !self.redacted.is_empty()).then_some(Thinking {
-      text: self.thinking,
+    // thinking the limit cut off before it was signed cannot go back to the provider, which
+    // refuses an unsigned block
+    let text = match self.signature {
+      None if self.truncated => String::new(),
+      _ => self.thinking,
+    };
+    let thinking = (!text.is_empty() || !self.redacted.is_empty()).then_some(Thinking {
+      text,
       signature: self.signature,
       redacted: self.redacted,
     });
@@ -391,6 +406,7 @@ impl StreamState {
         tool_calls,
       ),
       usage: self.usage,
+      truncated: self.truncated,
     })
   }
 }
@@ -448,6 +464,37 @@ mod tests {
     assert_eq!(blocks[0]["type"], "redacted_thinking");
     assert_eq!(blocks[0]["data"], "sealed");
     assert_eq!(blocks[1]["type"], "tool_use");
+  }
+
+  #[test]
+  fn a_max_tokens_stop_keeps_the_reply_and_flags_it() {
+    let reply = replay(&[
+      r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"half"}}"#,
+      r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":32}}"#,
+      r#"{"type":"message_stop"}"#,
+    ])
+    .unwrap();
+    assert!(reply.truncated);
+    assert_eq!(reply.usage.output_tokens, 32);
+    assert!(reply.message.content.unwrap().ends_with(CUT_OFF));
+  }
+
+  #[test]
+  fn thinking_cut_off_before_its_signature_is_not_sent_back() {
+    let reply = replay(&[
+      r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+      r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+      r#"{"type":"message_stop"}"#,
+    ])
+    .unwrap();
+    assert!(reply.message.thinking.is_none());
+  }
+
+  #[test]
+  fn a_refusal_still_ends_the_turn() {
+    let error =
+      replay(&[r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#]).unwrap_err();
+    assert!(error.to_string().contains("refusal"), "{error}");
   }
 
   #[test]

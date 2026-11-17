@@ -1,5 +1,9 @@
 # Plugins
 
+These are packaged, approved, and sandboxed tools. To configure Ainz itself (options,
+keymaps, commands, panels, the status bar), and to add tools of your own with your full
+authority, use [Lua configuration](lua.md) instead.
+
 Ainz supports two complementary formats:
 
 - Native `plugin.toml` packages expose trusted process tools, Lua scripts, or capability-scoped WebAssembly

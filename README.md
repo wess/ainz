@@ -390,6 +390,29 @@ one schema. See [`docs/mcp.md`](docs/mcp.md).
 ainz mcp add synapse --required -- /absolute/path/to/synapse mcp
 ```
 
+## Lua configuration
+
+Like Neovim, Ainz runs your own `init.lua` from its config directory. Scripts set options, map
+keys, add slash commands, answer events, open columns beside the transcript, build an
+irssi-style status bar and topic, and give the model tools:
+
+```lua
+ainz.opt.ui.vim = true
+ainz.statusbar.item("clock", function() return "%Y" .. os.date("%H:%M") .. "%n" end)
+ainz.statusbar.set({ "clock", "model", "mode", "context" })
+local log = ainz.panel.open({ side = "right", title = "tools", follow = true })
+ainz.on("tool_start", function(call) log:append("%c" .. call.name .. "%n " .. (call.subject or "")) end)
+ainz.on("pre_tool", function(call)
+  if (call.subject or ""):find("git push", 1, true) then return false, "pushing is mine" end
+end)
+```
+
+`plugin/*.lua` and `pack/*/start/*` packages load after it, and `require` finds modules in
+`lua/`. `/source` reloads, `/lua CODE` runs Lua in the session, and `ainz --clean` starts
+without any of it. Options a script sets never reach `config.toml`. Without an `init.lua` no
+Lua runtime is created. See [`docs/lua.md`](docs/lua.md) and the BitchX-style
+[`examples/init.lua`](examples/init.lua).
+
 ## Plugins
 
 Native plugins are discovered from the config directory's `plugins/` folder and from

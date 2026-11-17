@@ -50,6 +50,9 @@ pub struct Image {
   pub url: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub detail: Option<String>,
+  /// The file it came from, so a command that reads text can be handed the picture as a path.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<std::path::PathBuf>,
 }
 
 impl Image {
@@ -83,6 +86,7 @@ impl Image {
     Ok(Self {
       url: format!("data:{media_type};base64,{}", STANDARD.encode(data)),
       detail: None,
+      path: std::path::absolute(path).ok(),
     })
   }
 }

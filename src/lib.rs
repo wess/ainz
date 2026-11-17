@@ -20,12 +20,16 @@ pub mod mcp;
 pub mod memory;
 mod network;
 mod output;
+mod overlay;
 mod permission;
 pub mod plugin;
 mod process;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;
+pub mod sandbox;
+#[cfg(feature = "lua")]
+pub mod script;
 pub mod session;
 pub mod skill;
 mod sse;
@@ -65,6 +69,7 @@ pub use session::{Session, SessionInfo, SessionMatch, SessionStore};
 pub use skill::SkillCatalog;
 pub use subagent::{
   SubagentHandler, SubagentRegistry, SubagentRequest, SubagentResult, subagent_tool,
+  subagent_tool_with_models,
 };
 pub use synapse::Synapse;
 pub use todo::{Todo, TodoStatus};

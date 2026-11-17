@@ -82,6 +82,14 @@ impl Input {
     self.cursor = start;
   }
 
+  /// Removes everything from `start` up to the caret, as a placeholder is taken in one go.
+  pub fn cut_back_to(&mut self, start: usize) {
+    if start < self.cursor && self.text.is_char_boundary(start) {
+      self.text.replace_range(start..self.cursor, "");
+      self.cursor = start;
+    }
+  }
+
   pub fn delete(&mut self) {
     let end = self.next_char();
     self.text.replace_range(self.cursor..end, "");
@@ -158,6 +166,14 @@ impl Input {
   }
 
   /// Takes the line to send, and remembers it for the next walk back.
+  /// Empties the line without adding it to history: what a script typed, or a draft set aside.
+  pub fn take(&mut self) -> String {
+    let text = std::mem::take(&mut self.text);
+    self.cursor = 0;
+    self.recalled = None;
+    text
+  }
+
   pub fn submit(&mut self) -> String {
     self.mode = Mode::Insert;
     let text = std::mem::take(&mut self.text);

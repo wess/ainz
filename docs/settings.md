@@ -11,6 +11,10 @@ Use Up/Down to select a row and Enter or Left/Right to change its value. Read th
 beside the row before changing it. Close settings to save. Runtime setup changes apply when
 chat reopens; background hosting applies at the next launch.
 
+**Connection → Subagent models** lets the agent pick a model from the active provider's saved
+list for each subagent. See [named agents](agents.md#choosing-a-model-for-each-child) for
+`model_hints`.
+
 **Memory → Automatic improvement** enables background experiments after saved runs. Turn it
 on once, then use Ainz normally; result notices appear in the conversation. `/improve` reviews
 the latest patch and proposed skills, and `/improve approve` accepts the reviewed result. See
@@ -36,9 +40,14 @@ Turn off all fields to hide the bar. For a quick change:
 
 Available fields: `provider`, `model`, `mode`, `memory`, `tokens`, `inputtokens`,
 `outputtokens`, `context`, `todos`, `agents`, `workspace`, `session`, `activity`, `attention`,
-and `branch`. Context shows the configured token limit. Branch reads local repository metadata,
+and `branch`. Context shows the share of the context window the last request took, as the
+provider counted it, or the configured limit before the first request. The wide default bar
+shows it too. Branch reads local repository metadata,
 including worktrees, and stays empty outside a repository. Ainz does not run a Git command to
 read it. Attention counts approvals and unseen results in other live sessions.
+
+A script can add items of its own, arrange them among these, or draw the whole bar. See
+[status bar and topic](lua.md#status-bar-and-topic).
 
 With no override, Ainz keeps its responsive status layout. Narrow terminals clip custom fields
 from the right, so put the fields you need most first.

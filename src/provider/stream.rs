@@ -37,21 +37,24 @@ pub(super) struct StreamState {
   result: Option<String>,
   usage: Usage,
   failure: Option<String>,
+  /// The final result has arrived; a command still reading stdin can be let go.
+  pub done: bool,
 }
 
 impl StreamState {
-  pub fn push(&mut self, line: &str, events: &EventSink) {
+  /// Reads one line, and hands back a request the command is now waiting on an answer to.
+  pub fn push(&mut self, line: &str, events: &EventSink) -> Option<Value> {
     // anything that is not a JSON object is the command talking to a human; skip it
-    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-      return;
-    };
+    let value = serde_json::from_str::<Value>(line.trim()).ok()?;
     match field(&value, "type") {
       Some("stream_event") => self.delta(value.get("event"), events),
       Some("assistant") => tool_starts(&value, events),
       Some("user") => tool_ends(&value, events),
       Some("result") => self.result(&value),
+      Some("control_request") => return Some(value),
       _ => {}
     }
+    None
   }
 
   fn delta(&mut self, event: Option<&Value>, events: &EventSink) {
@@ -72,6 +75,7 @@ impl StreamState {
   }
 
   fn result(&mut self, value: &Value) {
+    self.done = true;
     if let Some(text) = field(value, "result") {
       self.result = Some(text.into());
     }

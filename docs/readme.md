@@ -19,6 +19,7 @@ commands and configuration in one place.
 | [Memory](memory.md) | Recall, session search, and proposed skills |
 | [Improvement](improve.md) | Learn from runs, propose harness patches, and verify behavior |
 | [Import](import.md) | Reuse existing tool servers and extensions |
+| [Lua configuration](lua.md) | init.lua: options, keymaps, commands, events, panels, status bar, tools |
 | [Plugins](plugins.md) | Lua, component, and process plugins |
 | [MCP](mcp.md) | Stdio, Streamable HTTP, SSE, and remote sign-in |
 | [Agents](agents.md) | Named subagent definitions and constraints |

@@ -13,8 +13,15 @@ pub(super) struct Output {
   pub stderr: String,
 }
 
-pub(super) async fn run(mut command: Command, seconds: u64) -> Result<Output> {
-  let mut child = command
+pub(super) async fn run(command: Command, seconds: u64) -> Result<Output> {
+  // a build directory the case was pointed at lies outside its workspace, and has to be written
+  let writable: Vec<std::path::PathBuf> = command
+    .as_std()
+    .get_envs()
+    .filter(|(key, _)| *key == "CARGO_TARGET_DIR")
+    .filter_map(|(_, value)| value.map(std::path::PathBuf::from))
+    .collect();
+  let mut child = crate::sandbox::confine(command, &writable)?
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use ainz::{
   Event, SubagentRegistry, SubagentRequest, SubagentResult,
   protocol::Usage,
-  subagent_tool,
+  subagent_tool, subagent_tool_with_models,
   tool::{Risk, ToolContext},
 };
 use serde_json::{Value, json};
@@ -157,6 +157,7 @@ async fn cancelling_collection_keeps_the_child_addressable() {
     name: "worker".into(),
     prompt: "work".into(),
     role: None,
+    model: None,
   });
   assert!(
     tokio::time::timeout(
@@ -203,10 +204,84 @@ async fn dropping_the_registry_aborts_the_tasks_it_owns() {
     name: "worker".into(),
     prompt: "work".into(),
     role: None,
+    model: None,
   });
   started.notified().await;
   drop(registry);
   tokio::time::timeout(std::time::Duration::from_millis(250), stopped.notified())
     .await
     .unwrap();
+}
+
+type Picked = Arc<Mutex<Vec<Option<String>>>>;
+
+fn routing(models: &[(&str, &str)]) -> (Arc<dyn ainz::tool::Tool>, Picked) {
+  let picked = Arc::new(Mutex::new(Vec::new()));
+  let seen = picked.clone();
+  let tool = subagent_tool_with_models(
+    SubagentRegistry::new(Arc::new(move |request: SubagentRequest| {
+      seen.lock().unwrap().push(request.model.clone());
+      Box::pin(async move {
+        Ok(SubagentResult {
+          session_id: uuid::Uuid::now_v7(),
+          name: request.name,
+          output: "done".into(),
+          usage: Usage::default(),
+        })
+      })
+    })),
+    false,
+    models
+      .iter()
+      .map(|(model, hint)| (model.to_string(), hint.to_string()))
+      .collect(),
+  );
+  (tool, picked)
+}
+
+fn context() -> ToolContext {
+  ToolContext::new(std::env::temp_dir(), uuid::Uuid::now_v7(), 4096)
+}
+
+#[tokio::test]
+async fn delegation_offers_the_saved_models_and_hands_on_the_one_picked() {
+  let (tool, picked) = routing(&[("small", "cheap lookups"), ("large", "")]);
+  let spec = tool.spec();
+  assert_eq!(
+    spec.parameters["properties"]["model"]["enum"],
+    json!(["large", "small"])
+  );
+  assert!(spec.description.contains("small: cheap lookups."));
+
+  tool
+    .execute(&context(), json!({"prompt": "find it", "model": "small"}))
+    .await
+    .unwrap();
+  tool
+    .execute(&context(), json!({"prompt": "inherit"}))
+    .await
+    .unwrap();
+
+  assert_eq!(*picked.lock().unwrap(), [Some("small".into()), None]);
+}
+
+#[tokio::test]
+async fn a_model_that_is_not_saved_is_refused_before_anything_starts() {
+  let (tool, picked) = routing(&[("small", ""), ("large", "")]);
+
+  let error = tool
+    .execute(&context(), json!({"prompt": "go", "model": "imaginary"}))
+    .await
+    .unwrap_err();
+
+  assert!(error.to_string().contains("not one of"), "{error}");
+  assert!(picked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn without_routing_the_tool_offers_no_model() {
+  let (tool, _) = routing(&[]);
+  let spec = tool.spec();
+  assert!(spec.parameters["properties"].get("model").is_none());
+  assert!(!spec.description.contains("model parameter"));
 }

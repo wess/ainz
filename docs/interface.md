@@ -75,8 +75,28 @@ adds a newline. `/vim` enables modal editing.
 
 `/` opens command search; `@` completes workspace paths. Pressing `Esc` twice while idle rewinds
 the last prompt and returns it for editing. Drag across transcript text to use your terminal's
-normal selection and copy commands. An image pasted or dropped onto the prompt attaches to the
-next message.
+normal selection and copy commands.
+
+### Images
+
+`Ctrl+V` attaches the image on the clipboard, such as a screenshot. `Cmd+V` pastes text only,
+because the terminal handles it before Ainz sees it. Dragging image files onto the prompt, or
+pasting their paths, attaches them too. Each image appears as `[Image #1]` where the cursor
+was, with a count at the right of the prompt. Write around the placeholder, or delete it to
+drop the image; one backspace at its end removes all of it. The prompt sends the images whose
+placeholders remain. `/image PATH PROMPT` attaches an image and sends the prompt in one step.
+
+On macOS the clipboard is read with `osascript`. On Linux it is read with `wl-paste` or
+`xclip`, whichever is installed. A copied image file is attached directly. Clipboard images
+are written to `ainz/clipboard` under your cache directory, readable only by you.
+
+### Goals
+
+`/goal TEXT` sets an objective and starts on it. After each turn that does not end with the
+model saying `GOAL MET` or `GOAL BLOCKED: reason`, another turn follows automatically, up to
+25. A goal pauses when a turn fails or is cancelled, when you have started typing, or when
+it reaches 25 turns. `/goal` shows the current goal, `/goal continue` resumes it (with 25 more
+turns if it ran out), and `/goal clear` drops it.
 
 ## Customize the session
 
@@ -87,6 +107,11 @@ files, so artwork installed while Ainz is running is available immediately.
 
 Use the [masthead studio](https://wess.io/ainz/masthead/) to draw or extend a header and copy an
 installation command. See [headers](headers.md) for files, paths, and limits.
+
+[Lua configuration](lua.md) customizes the session in code: options, keymaps, slash
+commands, columns beside the transcript, the status bar, and the topic line. `/source`
+reloads your scripts, `/lua CODE` runs Lua in the session, and `/trust` lets a project's
+`.ainz/init.lua` run.
 
 `/settings`, `/config`, and F2 open [settings](settings.md), with sections, search, status-bar
 customization, and shortcut recording. `/model` opens provider setup. `/inline` chooses the

@@ -1,8 +1,10 @@
 use std::{
   collections::{BTreeMap, hash_map::RandomState},
   hash::{BuildHasher, Hasher},
-  path::PathBuf,
-  process::Stdio,
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+  },
   time::Duration,
 };
 
@@ -11,28 +13,31 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, header::RETRY_AFTER};
 use serde::Deserialize;
-use tokio::{
-  io::{AsyncWriteExt, BufReader},
-  process::Command,
-};
 
 use crate::{
-  config::{PermissionMode, ProcessOutput},
+  agent::Approver,
+  config::PermissionMode,
   event::{Event, EventSink},
-  process::GroupGuard,
-  protocol::{Message, Role, ToolSpec, Usage},
+  protocol::{Message, ToolSpec, Usage},
   sse::SseDecoder,
 };
 
 const MAX_TRANSFER: usize = 16 * 1024 * 1024;
 
+/// What a chat-completions reply may run to unless a profile says otherwise. A request that
+/// names no limit gets the server's, and a LiteLLM proxy in front of Claude picks 4,096.
+pub const OUTPUT_LIMIT: usize = 32_000;
+
 mod anthropic;
+mod bridge;
 mod input;
+mod process;
 mod responses;
 mod stream;
 mod transport;
 pub(crate) mod wire;
 pub use anthropic::AnthropicProvider;
+pub use process::ProcessProvider;
 pub use responses::ResponsesProvider;
 use transport::{Wire, default_header, read_events};
 use wire::error_message;
@@ -52,16 +57,16 @@ fn arguments(raw: &str) -> serde_json::Value {
     })
 }
 
-use stream::{Completion, StreamState, next_line};
 use wire::{
-  ChatRequest, PartialCall, StreamOptions, WireTool, parse_data, parse_response, wire_error,
-  wire_message,
+  ChatRequest, ChatStream, StreamOptions, WireTool, parse_response, wire_error, wire_message,
 };
 
 #[derive(Clone, Debug)]
 pub struct ProviderReply {
   pub message: Message,
   pub usage: Usage,
+  /// The reply stopped at the provider's output limit rather than finishing.
+  pub truncated: bool,
 }
 
 #[async_trait]
@@ -72,6 +77,27 @@ pub trait ChatProvider: Send + Sync {
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply>;
+
+  /// The same request made from inside a run, which says what mode the run is in and who
+  /// answers for a tool the provider runs itself. Only a command running its own loop has
+  /// tools of its own; a provider that hands its calls back to the agent has nothing to ask.
+  async fn complete_asking(
+    &self,
+    messages: &[&Message],
+    tools: &[ToolSpec],
+    events: &EventSink,
+    _mode: PermissionMode,
+    _asks: &Approver,
+  ) -> Result<ProviderReply> {
+    self.complete(messages, tools, events).await
+  }
+
+  /// Whether the provider runs tools of its own, as a headless coding command does. Such a
+  /// reply that broke off may already have acted, so it is never simply asked for again, and
+  /// its token counts describe the command's context rather than the one sent to it.
+  fn runs_tools(&self) -> bool {
+    false
+  }
 }
 
 #[derive(Clone)]
@@ -86,22 +112,23 @@ pub enum RuntimeProvider {
 impl RuntimeProvider {
   pub fn with_model(&self, model: String) -> Self {
     match self {
+      // another model may take the limit this one refused
       Self::Http(provider) => Self::Http(HttpProvider {
         model,
+        limited: Arc::new(AtomicBool::new(true)),
         ..provider.clone()
       }),
-      Self::Process(provider) => Self::Process(ProcessProvider {
-        model,
-        ..provider.clone()
-      }),
+      Self::Process(provider) => Self::Process(provider.with_model(model)),
       Self::Anthropic(provider) => Self::Anthropic(provider.with_model(model)),
       Self::Responses(provider) => Self::Responses(provider.with_model(model)),
-      Self::Fallback(providers) => Self::Fallback(
-        providers
-          .iter()
-          .map(|(name, provider)| (name.clone(), Box::new(provider.with_model(model.clone()))))
-          .collect(),
-      ),
+      Self::Fallback(providers) => {
+        let mut providers = providers.clone();
+        // a model belongs to its provider; the backups keep the ones configured for them
+        if let Some((_, primary)) = providers.first_mut() {
+          **primary = primary.with_model(model);
+        }
+        Self::Fallback(providers)
+      }
     }
   }
 
@@ -133,7 +160,8 @@ impl RuntimeProvider {
     let key = config.api_key_for(profile).await?;
     Ok(match profile.wire_api {
       WireApi::Chat => {
-        let mut provider = HttpProvider::new(endpoint, model, key, config.provider_retries)?;
+        let mut provider = HttpProvider::new(endpoint, model, key, config.provider_retries)?
+          .with_output_limit(profile.max_output_tokens);
         provider.headers = profile.headers.clone();
         Self::Http(provider)
       }
@@ -209,15 +237,62 @@ impl ChatProvider for RuntimeProvider {
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
+    self.reply(messages, tools, events, None).await
+  }
+
+  async fn complete_asking(
+    &self,
+    messages: &[&Message],
+    tools: &[ToolSpec],
+    events: &EventSink,
+    mode: PermissionMode,
+    asks: &Approver,
+  ) -> Result<ProviderReply> {
+    self
+      .reply(messages, tools, events, Some((mode, asks)))
+      .await
+  }
+
+  fn runs_tools(&self) -> bool {
+    match self {
+      Self::Process(_) => true,
+      Self::Fallback(providers) => providers.iter().any(|(_, provider)| provider.runs_tools()),
+      _ => false,
+    }
+  }
+}
+
+impl RuntimeProvider {
+  async fn reply(
+    &self,
+    messages: &[&Message],
+    tools: &[ToolSpec],
+    events: &EventSink,
+    asking: Option<(PermissionMode, &Approver)>,
+  ) -> Result<ProviderReply> {
     match self {
       Self::Http(provider) => provider.complete(messages, tools, events).await,
       Self::Anthropic(provider) => provider.complete(messages, tools, events).await,
       Self::Responses(provider) => provider.complete(messages, tools, events).await,
+      Self::Process(provider) => match asking {
+        Some((mode, asks)) => {
+          provider
+            .complete_asking(messages, tools, events, mode, asks)
+            .await
+        }
+        None => provider.complete(messages, tools, events).await,
+      },
       Self::Fallback(providers) => {
         let mut errors = Vec::new();
         for (index, (name, provider)) in providers.iter().enumerate() {
           let (buffer, mut received) = EventSink::channel();
-          match provider.complete(messages, tools, &buffer).await {
+          let attempt = match asking {
+            Some((mode, asks)) => {
+              Box::pin(provider.complete_asking(messages, tools, &buffer, mode, asks)).await
+            }
+            None => Box::pin(provider.complete(messages, tools, &buffer)).await,
+          };
+          match attempt {
             Ok(reply) => {
               if index > 0 {
                 events.emit(Event::Notice {
@@ -234,7 +309,6 @@ impl ChatProvider for RuntimeProvider {
         }
         bail!("all configured providers failed: {}", errors.join("; "))
       }
-      Self::Process(provider) => provider.complete(messages, tools, events).await,
     }
   }
 }
@@ -359,6 +433,11 @@ pub struct HttpProvider {
   api_key: Option<String>,
   retries: usize,
   headers: BTreeMap<String, String>,
+  /// The most a reply may run to, in tokens; zero sends no limit.
+  output_limit: usize,
+  /// Cleared once the server refuses the limit, so it is asked without one from then on
+  /// rather than refused again on every request.
+  limited: Arc<AtomicBool>,
 }
 
 impl HttpProvider {
@@ -383,7 +462,15 @@ impl HttpProvider {
       api_key,
       retries,
       headers: BTreeMap::new(),
+      output_limit: OUTPUT_LIMIT,
+      limited: Arc::new(AtomicBool::new(true)),
     })
+  }
+
+  /// A profile's own output limit, or the default when it names none.
+  pub fn with_output_limit(mut self, tokens: Option<usize>) -> Self {
+    self.output_limit = tokens.unwrap_or(OUTPUT_LIMIT);
+    self
   }
 
   pub async fn models(&self) -> Result<Vec<String>> {
@@ -435,6 +522,41 @@ impl ChatProvider for HttpProvider {
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
+    let limit =
+      (self.output_limit > 0 && self.limited.load(Ordering::Relaxed)).then_some(self.output_limit);
+    match self.request(messages, tools, events, limit).await {
+      Err(error) if limit.is_some() && refused_limit(&error) => {
+        self.limited.store(false, Ordering::Relaxed);
+        events.emit(Event::Notice {
+          message: format!(
+            "the provider refused an output limit of {} tokens; asking without one",
+            self.output_limit
+          ),
+        });
+        self.request(messages, tools, events, None).await
+      }
+      reply => reply,
+    }
+  }
+}
+
+/// Whether a request was refused for the output limit it named, as a model with a smaller
+/// ceiling refuses one it cannot honour. A refusal for the whole request being too long also
+/// names the limit, and asking without one would not make that request any shorter.
+fn refused_limit(error: &anyhow::Error) -> bool {
+  let text = format!("{error:#}").to_ascii_lowercase();
+  (text.contains("max_completion_tokens") || text.contains("max_tokens"))
+    && !text.contains("context")
+}
+
+impl HttpProvider {
+  async fn request(
+    &self,
+    messages: &[&Message],
+    tools: &[ToolSpec],
+    events: &EventSink,
+    limit: Option<usize>,
+  ) -> Result<ProviderReply> {
     let request = ChatRequest {
       model: &self.model,
       messages: messages
@@ -447,6 +569,7 @@ impl ChatProvider for HttpProvider {
       },
       tools: tools.iter().map(WireTool::new).collect(),
       tool_choice: (!tools.is_empty()).then_some("auto"),
+      max_completion_tokens: limit,
     };
     // serialized once; a retry sends the same bytes again rather than encoding them anew
     let body = bytes::Bytes::from(serde_json::to_vec(&request)?);
@@ -474,10 +597,7 @@ impl ChatProvider for HttpProvider {
 
     let mut stream = response.bytes_stream();
     let mut decoder = SseDecoder::default();
-    let mut content = String::new();
-    let mut calls: BTreeMap<usize, PartialCall> = BTreeMap::new();
-    let mut usage = Usage::default();
-    let mut finished = false;
+    let mut reply = ChatStream::default();
     let mut done = false;
     let mut received = 0;
     'stream: while let Some(chunk) = stream.next().await {
@@ -487,8 +607,7 @@ impl ChatProvider for HttpProvider {
         bail!("model stream exceeds the transfer limit");
       }
       for data in decoder.push(&chunk) {
-        finished |= parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
-        if data.trim() == "[DONE]" {
+        if reply.push(&data, events)? {
           done = true;
           break 'stream;
         }
@@ -496,189 +615,10 @@ impl ChatProvider for HttpProvider {
     }
     if !done {
       for data in decoder.finish() {
-        finished |= parse_data(&data, &mut content, &mut calls, &mut usage, events)?;
+        reply.push(&data, events)?;
       }
     }
-
-    if !finished {
-      bail!("model stream ended before completion");
-    }
-    let tool_calls = calls
-      .into_values()
-      .map(PartialCall::finish)
-      .collect::<Result<_>>()?;
-    Ok(ProviderReply {
-      message: Message {
-        role: Role::Assistant,
-        content: (!content.is_empty()).then_some(content),
-        tool_calls,
-        tool_call_id: None,
-        images: Vec::new(),
-        thinking: None,
-        response_items: Vec::new(),
-        response_model: None,
-      },
-      usage,
-    })
-  }
-}
-
-#[derive(Clone)]
-pub struct ProcessProvider {
-  command: String,
-  args: Vec<String>,
-  model: String,
-  workspace: PathBuf,
-  permissions: PermissionMode,
-  output: ProcessOutput,
-}
-
-impl ProcessProvider {
-  pub fn new(
-    command: String,
-    args: Vec<String>,
-    model: String,
-    workspace: PathBuf,
-    permissions: PermissionMode,
-    output: ProcessOutput,
-  ) -> Self {
-    Self {
-      command,
-      args,
-      model,
-      workspace,
-      permissions,
-      output,
-    }
-  }
-
-  fn args(&self) -> Vec<String> {
-    let workspace = self.workspace.to_string_lossy();
-    let sandbox = match self.permissions {
-      PermissionMode::Auto => "workspace-write",
-      PermissionMode::Ask | PermissionMode::ReadOnly => "read-only",
-    };
-    let permission = match self.permissions {
-      PermissionMode::Auto => "acceptEdits",
-      PermissionMode::Ask | PermissionMode::ReadOnly => "plan",
-    };
-    self
-      .args
-      .iter()
-      .map(|arg| {
-        arg
-          .replace("{model}", &self.model)
-          .replace("{workspace}", &workspace)
-          .replace("{sandbox}", sandbox)
-          .replace("{permission}", permission)
-      })
-      .collect()
-  }
-}
-
-#[async_trait]
-impl ChatProvider for ProcessProvider {
-  async fn complete(
-    &self,
-    messages: &[&Message],
-    _tools: &[ToolSpec],
-    events: &EventSink,
-  ) -> Result<ProviderReply> {
-    // built first so a turn the command cannot take fails before anything is started
-    let prompt = input::render(messages, &self.command, input::reads_json(&self.args))?;
-    let mut child = Command::new(&self.command)
-      .args(self.args())
-      .current_dir(&self.workspace)
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .kill_on_drop(true)
-      .process_group(0)
-      .spawn()
-      .with_context(|| format!("start provider command {}", self.command))?;
-    let _guard = GroupGuard::new(child.id());
-    let mut stdin = child
-      .stdin
-      .take()
-      .context("provider command stdin was unavailable")?;
-    let stdout = child
-      .stdout
-      .take()
-      .context("provider command stdout was unavailable")?;
-    let stderr = child
-      .stderr
-      .take()
-      .context("provider command stderr was unavailable")?;
-    // the prompt is fed while output drains, so a chatty command cannot fill its pipe and stall.
-    // a write error is left to the exit status: a command that quit early explains itself on stderr
-    let feed = async move {
-      drop(stdin.write_all(prompt.as_bytes()).await);
-      drop(stdin.shutdown().await);
-    };
-    // stderr drains on its own task for the same reason the prompt is fed on one
-    let errors = tokio::spawn(async move { crate::output::capture(stderr, MAX_TRANSFER).await });
-    let mut stream = StreamState::default();
-    let read = async {
-      let mut reader = BufReader::new(stdout);
-      let mut buffered = String::new();
-      if self.output == ProcessOutput::StreamJson {
-        // a line is acted on and dropped, so only its length costs memory: a limit on the whole
-        // report would be a limit on how long the command may work, and every screenshot it
-        // reads is a megabyte of that report
-        while let Some(line) = next_line(&mut reader, MAX_TRANSFER)
-          .await
-          .context("read provider output")?
-        {
-          stream.push(&String::from_utf8_lossy(&line), events);
-        }
-      } else {
-        // the other modes want the whole of stdout, so read it in one piece
-        let captured = crate::output::capture(reader, MAX_TRANSFER)
-          .await
-          .context("read provider output")?;
-        if captured.truncated {
-          bail!("provider output exceeds the transfer limit");
-        }
-        buffered = String::from_utf8(captured.bytes).context("provider output was not UTF-8")?;
-      }
-      anyhow::Ok(buffered)
-    };
-    let (_, buffered) = tokio::join!(feed, read);
-    let buffered = buffered?;
-    let status = child.wait().await.context("wait for provider command")?;
-    let errors = errors.await.context("read provider stderr")??;
-    let errors = String::from_utf8_lossy(&errors.bytes);
-    if !status.success() {
-      // a command that dies early may explain itself on either pipe
-      let detail = match errors.trim() {
-        "" => buffered.trim(),
-        error => error,
-      };
-      bail!("provider command failed ({status}): {detail}");
-    }
-
-    let reply = match self.output {
-      ProcessOutput::Text => Completion::whole(buffered.trim().to_string()),
-      ProcessOutput::JsonResult => Completion::whole(
-        serde_json::from_str::<serde_json::Value>(buffered.trim())
-          .context("invalid provider JSON output")?
-          .get("result")
-          .and_then(serde_json::Value::as_str)
-          .context("provider JSON output had no result string")?
-          .to_string(),
-      ),
-      ProcessOutput::StreamJson => stream.finish()?,
-    };
-    // text that already reached the screen as it arrived must not be sent a second time
-    if !reply.text.is_empty() && !reply.streamed {
-      events.emit(Event::TextDelta {
-        text: reply.text.clone(),
-      });
-    }
-    Ok(ProviderReply {
-      message: Message::text(Role::Assistant, reply.text),
-      usage: reply.usage,
-    })
+    reply.finish()
   }
 }
 

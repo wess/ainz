@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::{
   ChatProvider, MAX_TRANSFER, ProviderReply, Wire, arguments, default_header, error_message,
-  read_events,
+  read_events, wire::CUT_OFF,
 };
 use crate::{
   event::{Event, EventSink},
@@ -95,6 +95,11 @@ impl ChatProvider for ResponsesProvider {
     read_events(response, |data| {
       let value: Value = serde_json::from_str(data).context("invalid Responses stream event")?;
       match value["type"].as_str() {
+        // a reply the output limit stopped is kept and marked, like on the other wires
+        Some("response.incomplete") if cut_off(&value["response"]) => {
+          completed = Some(value["response"].clone());
+          return Ok(true);
+        }
         Some("error" | "response.failed" | "response.incomplete") => {
           let failure = value.get("response").unwrap_or(&value);
           bail!("model stream failed: {}", failure_message(failure));
@@ -167,18 +172,33 @@ fn input(messages: &[&Message], model: &str) -> Result<Vec<Value>> {
   Ok(items)
 }
 
+/// Whether a response stopped because it reached its output limit rather than for any other
+/// reason, which is the one kind of unfinished reply worth keeping.
+fn cut_off(response: &Value) -> bool {
+  response["status"].as_str() == Some("incomplete")
+    && response
+      .pointer("/incomplete_details/reason")
+      .and_then(Value::as_str)
+      == Some("max_output_tokens")
+}
+
 fn reply(value: Value, model: &str, events: &EventSink, streamed: bool) -> Result<ProviderReply> {
-  if value["status"].as_str() != Some("completed") {
+  let truncated = cut_off(&value);
+  if value["status"].as_str() != Some("completed") && !truncated {
     bail!("model reply failed: {}", failure_message(&value));
   }
-  let output = value["output"]
-    .as_array()
-    .context("Responses reply has no output")?;
+  let output = match value["output"].as_array() {
+    Some(output) => output,
+    // stopped before it said anything: there is nothing to keep, so it is the failure it says
+    None if truncated => bail!("model reply failed: {}", failure_message(&value)),
+    None => bail!("Responses reply has no output"),
+  };
   let mut text = String::new();
   let mut calls = Vec::new();
   for item in output {
     if let Some(status) = item["status"].as_str()
       && status != "completed"
+      && !(truncated && status == "incomplete")
     {
       bail!("model output item is {status}");
     }
@@ -216,14 +236,29 @@ fn reply(value: Value, model: &str, events: &EventSink, streamed: bool) -> Resul
     }
   }
   if text.is_empty() && calls.is_empty() {
-    bail!("model reply had no answer or tool calls");
+    bail!(
+      "model reply had no answer or tool calls: {}",
+      failure_message(&value)
+    );
+  }
+  if truncated {
+    text.push_str(CUT_OFF);
+    if streamed {
+      events.emit(Event::TextDelta {
+        text: CUT_OFF.into(),
+      });
+    }
   }
   if !streamed && !text.is_empty() {
     events.emit(Event::TextDelta { text: text.clone() });
   }
   let mut message = Message::assistant((!text.is_empty()).then_some(text), None, calls);
-  message.response_items = output.clone();
-  message.response_model = Some(model.into());
+  // unfinished output items cannot be replayed, so a cut-off reply goes back as its text and
+  // calls instead
+  if !truncated {
+    message.response_items = output.clone();
+    message.response_model = Some(model.into());
+  }
   let usage = &value["usage"];
   let count = |key: &str| usage[key].as_u64().unwrap_or(0);
   Ok(ProviderReply {
@@ -235,6 +270,7 @@ fn reply(value: Value, model: &str, events: &EventSink, streamed: bool) -> Resul
         .as_f64()
         .or_else(|| usage["cost"].as_f64()),
     },
+    truncated,
   })
 }
 
@@ -249,4 +285,58 @@ fn failure_message(value: &Value) -> String {
     return error_message(&value.to_string());
   }
   format!("response {}", value["status"].as_str().unwrap_or("failed"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn incomplete(output: Value) -> Value {
+    json!({
+      "status": "incomplete",
+      "incomplete_details": {"reason": "max_output_tokens"},
+      "output": output,
+      "usage": {"input_tokens": 10, "output_tokens": 32},
+    })
+  }
+
+  #[test]
+  fn a_reply_stopped_at_its_output_limit_is_kept_and_flagged() {
+    let value = incomplete(json!([
+      {"type": "reasoning", "status": "completed", "encrypted_content": "sealed"},
+      {"type": "message", "status": "incomplete", "content": [{"type": "output_text", "text": "half"}]},
+    ]));
+    let reply = reply(value, "m", &EventSink::default(), false).unwrap();
+    assert!(reply.truncated);
+    assert!(reply.message.content.unwrap().starts_with("half"));
+    // unfinished items are not sent back as they are
+    assert!(reply.message.response_items.is_empty());
+  }
+
+  #[test]
+  fn a_call_cut_off_mid_arguments_reaches_the_model_as_one_that_did_not_survive() {
+    let value = incomplete(json!([
+      {"type": "function_call", "status": "incomplete", "call_id": "c1", "name": "write",
+       "arguments": "{\"path\": \"a\", \"content\": \"ha"},
+    ]));
+    let reply = reply(value, "m", &EventSink::default(), false).unwrap();
+    assert!(reply.truncated);
+    let call = &reply.message.tool_calls[0];
+    assert!(
+      call
+        .arguments
+        .get(crate::protocol::INVALID_ARGUMENTS)
+        .is_some()
+    );
+  }
+
+  #[test]
+  fn an_incomplete_reply_for_another_reason_still_fails() {
+    let value = json!({
+      "status": "incomplete",
+      "incomplete_details": {"reason": "content_filter"},
+      "output": [{"type": "message", "status": "incomplete", "content": [{"type": "output_text", "text": "x"}]}],
+    });
+    assert!(reply(value, "m", &EventSink::default(), false).is_err());
+  }
 }

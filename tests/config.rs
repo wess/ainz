@@ -205,6 +205,76 @@ output = "stream_json"
   );
 }
 
+#[tokio::test]
+async fn a_claude_preset_from_before_the_permission_bridge_gains_it_and_others_are_left_alone() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(
+    &path,
+    r#"
+provider = "claude"
+model = "sonnet"
+
+[providers.claude]
+kind = "process"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--include-partial-messages", "--no-session-persistence", "--model", "{model}", "--permission-mode", "{permission}"]
+output = "stream_json"
+
+[providers.mine]
+kind = "process"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--model", "{model}"]
+output = "stream_json"
+"#,
+  )
+  .await
+  .unwrap();
+
+  let loaded = Config::load_from(&path).await.unwrap();
+
+  let preset = ainz::config::ProviderConfig::claude_code().args;
+  assert_eq!(loaded.providers["claude"].args, preset);
+  assert!(
+    preset
+      .windows(2)
+      .any(|pair| pair == ["--permission-prompt-tool", "stdio"])
+  );
+  assert!(!loaded.providers["mine"].args.contains(&"stdio".to_string()));
+}
+
+#[tokio::test]
+async fn a_profile_s_output_limit_round_trips_and_only_applies_to_chat() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(
+    &path,
+    r#"
+provider = "proxy"
+model = "m"
+
+[providers.proxy]
+kind = "http"
+endpoint = "http://127.0.0.1:4000/v1"
+max_output_tokens = 64000
+
+[providers.messages]
+kind = "http"
+wire_api = "messages"
+endpoint = "https://api.anthropic.com/v1"
+max_output_tokens = 64000
+"#,
+  )
+  .await
+  .unwrap();
+
+  let loaded = Config::load_from(&path).await.unwrap();
+
+  assert_eq!(loaded.providers["proxy"].max_output_tokens, Some(64_000));
+  assert!(loaded.providers["proxy"].validate("proxy").is_ok());
+  assert!(loaded.providers["messages"].validate("messages").is_err());
+}
+
 #[test]
 fn a_standing_rule_decides_before_anyone_is_asked() {
   let rules = ainz::PermissionRules {
@@ -252,4 +322,68 @@ async fn permission_rules_round_trip() {
 
   assert_eq!(loaded.rules.allow, ["shell(cargo *)"]);
   assert!(loaded.rules.deny.is_empty());
+}
+
+#[tokio::test]
+async fn a_session_s_scripts_and_flags_stay_out_of_config_toml() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(&path, "model = \"from-file\"\nmax_steps = 10\n")
+    .await
+    .unwrap();
+  let mut config = Config::load_from(&path).await.unwrap();
+  // what init.lua or --model set for this session
+  config.model = "from-init-lua".into();
+  config.settle();
+  // what the person then changed in /settings
+  config.ui.vim = true;
+  config.save_to(&path).await.unwrap();
+
+  let saved = Config::load_from(&path).await.unwrap();
+  assert_eq!(saved.model, "from-file");
+  assert!(saved.ui.vim);
+  assert_eq!(saved.max_steps, 10);
+}
+
+#[tokio::test]
+async fn an_option_a_script_changes_mid_session_is_not_saved_either() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(&path, "model = \"m\"\n").await.unwrap();
+  let mut config = Config::load_from(&path).await.unwrap();
+  config.settle();
+  let mut scripted = config.clone();
+  scripted.ui.bell = false;
+  config.adopt(scripted);
+  config.max_steps = 77;
+  config.save_to(&path).await.unwrap();
+
+  let saved = Config::load_from(&path).await.unwrap();
+  assert!(saved.ui.bell, "the script's change belonged to the session");
+  assert_eq!(saved.max_steps, 77);
+}
+
+#[tokio::test]
+async fn a_codex_preset_from_before_the_git_check_was_skipped_gains_it() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("config.toml");
+  tokio::fs::write(
+    &path,
+    r#"
+provider = "codex"
+model = "gpt"
+
+[providers.codex]
+kind = "process"
+command = "codex"
+args = ["exec", "--ephemeral", "--color", "never", "--sandbox", "{sandbox}", "-C", "{workspace}", "--model", "{model}", "-"]
+"#,
+  )
+  .await
+  .unwrap();
+  let loaded = Config::load_from(&path).await.unwrap();
+  assert_eq!(
+    loaded.providers["codex"].args,
+    ainz::config::ProviderConfig::codex().args
+  );
 }

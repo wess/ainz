@@ -1,4 +1,14 @@
-use std::{future::Future, panic::AssertUnwindSafe, path::PathBuf, pin::Pin, sync::Arc};
+use std::{
+  future::Future,
+  panic::AssertUnwindSafe,
+  path::PathBuf,
+  pin::Pin,
+  sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+  },
+  time::Duration,
+};
 
 use anyhow::{Result, anyhow, bail};
 use futures_util::FutureExt;
@@ -9,7 +19,7 @@ use crate::{
   control::RunInbox,
   event::{Event, EventSink},
   protocol::{Image, Message, Role, ToolCall, ToolSpec, Usage},
-  provider::ChatProvider,
+  provider::{ChatProvider, ProviderReply},
   session::{Context, Session},
   tool::{Risk, ToolSet},
 };
@@ -30,7 +40,7 @@ mod step;
 mod tool;
 
 use lifecycle::RunState;
-use step::{Action, Effect, Turn, step};
+use step::{Action, CONTINUATIONS, Effect, Turn, step};
 
 pub use options::RunOptions;
 
@@ -40,6 +50,9 @@ pub struct Agent<P> {
   workspace: PathBuf,
   events: EventSink,
   approver: Approver,
+  /// Bytes per token as the provider last counted them, stored as `f64` bits. It outlives a
+  /// run, because the next run sends the same history to the same model.
+  bytes_per_token: AtomicU64,
 }
 
 impl<P: ChatProvider> Agent<P> {
@@ -56,7 +69,12 @@ impl<P: ChatProvider> Agent<P> {
       workspace,
       events,
       approver,
+      bytes_per_token: AtomicU64::new(context::BYTES_PER_TOKEN.to_bits()),
     }
+  }
+
+  pub fn provider(&self) -> &P {
+    &self.provider
   }
 
   pub async fn run(
@@ -123,9 +141,14 @@ impl<P: ChatProvider> Agent<P> {
     let specs = self.tools.specs();
     // neither changes during a run, so neither is measured or rebuilt on every step
     let fixed = options.instructions.len() + tool_bytes(&specs);
-    context::admit(&prompt, options, fixed)?;
+    context::admit(&prompt, options, fixed, self.bytes_per_token())?;
     session.append(prompt);
     let system = Message::text(Role::System, &options.instructions);
+    state.asks = Some(tool::asking(
+      self.workspace.clone(),
+      options,
+      &self.approver,
+    ));
     state.planning = self.tools.get(crate::todo::TOOL).is_some();
     if state.planning {
       state.plan = plan::recalled(session.context()?.messages);
@@ -143,19 +166,31 @@ impl<P: ChatProvider> Agent<P> {
         );
       }
       effect = match effect {
-        Effect::Ask => {
+        Effect::Ask | Effect::Continue => {
+          let continuing = effect == Effect::Continue;
+          if continuing {
+            self.events.emit(Event::Notice {
+              message: "the reply reached its output limit; continuing automatically".into(),
+            });
+          }
           let reply = self
-            .ask(session, options, &system, &specs, fixed, state)
+            .ask(session, options, &system, &specs, fixed, continuing, state)
             .await?;
-          final_text = reply.content.clone().unwrap_or_default();
-          let calls = reply.tool_calls.len();
-          state.pending = reply.tool_calls.iter().cloned().collect();
-          session.append(reply);
-          step(&mut turn, Action::Replied { calls })
+          final_text = reply.message.content.clone().unwrap_or_default();
+          let calls = reply.message.tool_calls.len();
+          state.pending = reply.message.tool_calls.iter().cloned().collect();
+          session.append(reply.message);
+          step(
+            &mut turn,
+            Action::Replied {
+              calls,
+              truncated: reply.truncated,
+            },
+          )
         }
         Effect::RunTools => {
-          self.run_tools(session, options, state).await?;
-          step(&mut turn, Action::ToolsDone)
+          let progress = self.run_tools(session, options, state).await?;
+          step(&mut turn, Action::ToolsDone { progress })
         }
         Effect::Drain => {
           let steering = inbox
@@ -181,10 +216,20 @@ impl<P: ChatProvider> Agent<P> {
           });
           return Ok(final_text);
         }
+        Effect::Stall => {
+          self.events.emit(Event::Notice {
+            message: format!(
+              "paused after {CONTINUATIONS} automatic continuations hit the output limit \
+               without a successful tool call; send a message to carry on"
+            ),
+          });
+          return Ok(final_text);
+        }
       };
     }
   }
 
+  #[allow(clippy::too_many_arguments)]
   async fn ask(
     &self,
     session: &mut Session,
@@ -192,28 +237,49 @@ impl<P: ChatProvider> Agent<P> {
     system: &Message,
     specs: &[ToolSpec],
     fixed: usize,
+    continuing: bool,
     state: &mut RunState,
-  ) -> Result<Message> {
+  ) -> Result<ProviderReply> {
+    // the instruction to carry on goes out with this one request and is not kept
+    let continued;
+    let (system, fixed) = if continuing {
+      continued = Message::text(
+        Role::System,
+        format!("{}\n\n{}", options.instructions, context::CONTINUE),
+      );
+      (&continued, fixed + context::CONTINUE.len() + 2)
+    } else {
+      (system, fixed)
+    };
+    let asks = state.asks.clone().unwrap_or_else(deny_all);
     let mut tails = context::TAILS.into_iter();
+    let mut resumed = 0;
     loop {
-      self.fit(session, options, fixed, &mut state.usage).await?;
+      let bytes = self.fit(session, options, fixed, &mut state.usage).await?;
       let context = session.context()?;
       let mut messages = Vec::with_capacity(context.len() + 1);
       messages.push(system);
       messages.extend(context.iter());
       state.checkpoint()?;
       // a provider that panics fails the run cleanly; the session it was handed is still whole
-      let reply = AssertUnwindSafe(self.provider.complete(&messages, specs, &self.events))
+      let request =
+        self
+          .provider
+          .complete_asking(&messages, specs, &self.events, options.permissions, &asks);
+      let reply = AssertUnwindSafe(request)
         .catch_unwind()
         .await
         .map_err(|panic| anyhow!("the provider failed: {}", tool::panic_message(&*panic)))?;
       match reply {
         Ok(reply) => {
           accumulate(&mut state.usage, &reply.usage);
-          return Ok(reply.message);
+          self.measure(bytes, &reply.usage, options);
+          return Ok(reply);
         }
-        // the estimate came in low, which only the provider can say: give up more of the tail
+        // the estimate came in low, which only the provider can say: believe it, and give up
+        // more of the tail
         Err(error) if context::too_long(&error) => {
+          self.learn(self.bytes_per_token() * 0.75);
           let mut archived = false;
           while !archived && let Some(preserve) = tails.next() {
             archived = self
@@ -224,6 +290,20 @@ impl<P: ChatProvider> Agent<P> {
             return Err(error);
           }
         }
+        // a command that runs its own tools may have acted before it failed, so only a reply
+        // that is nothing but words is asked for again
+        Err(error)
+          if resumed < context::RESUMES.len()
+            && !self.provider.runs_tools()
+            && context::interrupted(&error) =>
+        {
+          // what already streamed stays on screen, so say why it is about to repeat
+          self.events.emit(Event::Notice {
+            message: format!("the reply broke off ({error:#}); asking again"),
+          });
+          tokio::time::sleep(Duration::from_secs(context::RESUMES[resumed])).await;
+          resumed += 1;
+        }
         Err(error) => return Err(error),
       }
     }
@@ -231,26 +311,31 @@ impl<P: ChatProvider> Agent<P> {
 
   /// Compacts when the history has grown past the threshold or would leave no room for the
   /// reply. When the preserved tail is itself what does not fit, compaction runs again keeping
-  /// less of it, down to the latest prompt or the latest round of tool results.
+  /// less of it, down to the latest prompt or the latest round of tool results. Returns the
+  /// size of what will be sent, in bytes.
   async fn fit(
     &self,
     session: &mut Session,
     options: &RunOptions,
     fixed: usize,
     usage: &mut Usage,
-  ) -> Result<()> {
+  ) -> Result<usize> {
     let limit = context::room(options);
-    let mut estimate = tokens(fixed, &session.context()?);
+    let per_token = self.bytes_per_token();
+    let mut bytes = sent(fixed, &session.context()?);
+    let mut estimate = context::tokens(bytes, per_token);
     if (estimate >= options.compact_at_tokens || estimate > limit)
       && self
         .compact(session, options, usage, options.preserve_messages)
         .await?
     {
-      estimate = tokens(fixed, &session.context()?);
+      bytes = sent(fixed, &session.context()?);
+      estimate = context::tokens(bytes, per_token);
     }
     for preserve in context::TAILS {
       if estimate > limit && self.compact(session, options, usage, preserve).await? {
-        estimate = tokens(fixed, &session.context()?);
+        bytes = sent(fixed, &session.context()?);
+        estimate = context::tokens(bytes, per_token);
       }
     }
     if estimate > limit {
@@ -261,12 +346,45 @@ impl<P: ChatProvider> Agent<P> {
         options.context_tokens
       );
     }
-    Ok(())
+    Ok(bytes)
+  }
+
+  fn bytes_per_token(&self) -> f64 {
+    f64::from_bits(self.bytes_per_token.load(Ordering::Relaxed))
+  }
+
+  /// Clamped, because one odd reply (a provider that counts only the fresh part of a cached
+  /// prompt, say) must not teach the estimate something absurd.
+  fn learn(&self, per_token: f64) {
+    self
+      .bytes_per_token
+      .store(per_token.clamp(1.5, 4.5).to_bits(), Ordering::Relaxed);
+  }
+
+  /// What the provider counted against what was sent, so the next estimate is the provider's
+  /// rather than a guess, and the context left is what the provider says it is. A command that
+  /// runs its own loop counts its own context, which says nothing about this one.
+  fn measure(&self, bytes: usize, usage: &Usage, options: &RunOptions) {
+    let counted = match self.provider.runs_tools() {
+      true => 0,
+      false => usage.input_tokens as usize,
+    };
+    if counted > 0 && bytes > 0 {
+      self.learn(bytes as f64 / counted as f64);
+    }
+    let used = match counted {
+      0 => context::tokens(bytes, self.bytes_per_token()),
+      counted => counted,
+    };
+    self.events.emit(Event::Context {
+      used,
+      limit: options.context_tokens,
+    });
   }
 }
 
-fn tokens(fixed: usize, context: &Context<'_>) -> usize {
-  (fixed + context.iter().map(message_bytes).sum::<usize>()).div_ceil(4)
+fn sent(fixed: usize, context: &Context<'_>) -> usize {
+  fixed + context.iter().map(message_bytes).sum::<usize>()
 }
 
 /// The part of a call a rule is written against: the command, the path, whatever names what

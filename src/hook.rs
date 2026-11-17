@@ -38,19 +38,37 @@ impl HookEvent {
   }
 }
 
+/// A check made in process before a tool call runs, in every mode, the way a `pre_tool` hook
+/// is but without starting anything: `Err` refuses the call with the reason given.
+pub type ToolGate = Arc<dyn Fn(&ToolCall) -> Result<(), String> + Send + Sync>;
+
 /// Runs the hooks a config defines. Cheap to clone (an `Arc` around the config), and cheap to
 /// hold when nothing is configured — nothing here does any work until an event with a matching,
 /// non-empty hook list actually fires.
 #[derive(Clone, Default)]
-pub struct HookRunner(Arc<BTreeMap<String, Vec<HookDef>>>);
+pub struct HookRunner {
+  defs: Arc<BTreeMap<String, Vec<HookDef>>>,
+  gates: Arc<Vec<ToolGate>>,
+}
 
 impl HookRunner {
   pub fn new(hooks: BTreeMap<String, Vec<HookDef>>) -> Self {
-    Self(Arc::new(hooks))
+    Self {
+      defs: Arc::new(hooks),
+      gates: Arc::default(),
+    }
+  }
+
+  /// The same hooks, with an in-process check before every tool call as well.
+  pub fn with_gate(mut self, gate: ToolGate) -> Self {
+    let mut gates = (*self.gates).clone();
+    gates.push(gate);
+    self.gates = Arc::new(gates);
+    self
   }
 
   fn defs(&self, event: HookEvent) -> &[HookDef] {
-    self.0.get(event.key()).map(Vec::as_slice).unwrap_or(&[])
+    self.defs.get(event.key()).map(Vec::as_slice).unwrap_or(&[])
   }
 
   pub async fn session_start(&self, workspace: &Path, session_id: Uuid, events: &EventSink) {
@@ -120,6 +138,15 @@ impl HookRunner {
     call: &ToolCall,
     events: &EventSink,
   ) -> Result<(), String> {
+    for gate in self.gates.iter() {
+      if let Err(reason) = gate(call) {
+        let message = format!("blocked before running: {reason}");
+        events.emit(Event::Error {
+          message: message.clone(),
+        });
+        return Err(message);
+      }
+    }
     for def in self.defs(HookEvent::PreTool) {
       if !matches_tool(def.matcher.as_deref(), &call.name) {
         continue;

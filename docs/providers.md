@@ -117,7 +117,7 @@ directly, never through a shell. Arguments support four placeholders:
 - `{model}`: active model
 - `{workspace}`: canonical workspace path
 - `{sandbox}`: `read-only` or `workspace-write`
-- `{permission}`: `plan` or `acceptEdits`
+- `{permission}`: `plan`, `default`, or `acceptEdits`
 
 ```sh
 ainz providers add runner \
@@ -139,10 +139,72 @@ come back with the result. The other two modes stay silent until the command exi
 The Claude Code preset uses the streaming mode. A profile saved by an earlier version on the
 buffered `--output-format json` arguments is moved onto it when the config loads.
 
+### Claude Code asks through Ainz
+
+The preset also passes `--permission-prompt-tool stdio`. Instead of refusing a tool call it
+has no one to ask about, `claude -p` sends the request back to Ainz and waits. Ainz decides
+it the same way it decides its own calls: standing rules first, then the mode, then the
+approval prompt in the buffer. Claude's tool names are translated first (`Bash` is `shell`,
+`Edit` is `edit`, `WebFetch` is `fetch`, `mcp__server__tool` is `mcp`), so a rule such as
+`shell(git status*)` matches the call it was written for.
+
+Claude decides some calls before it asks anyone. Anything allowed in your own Claude
+settings (`permissions.allow` in `~/.claude/settings.json`, or a `defaultMode` of `auto` or
+`bypassPermissions`) runs without reaching Ainz. So do the commands Claude treats as safe on
+its own, such as a plain `echo`. To make Ainz the only one deciding, add
+`--setting-sources project,local` to the profile's arguments. That leaves out your user-level
+Claude settings, including the hooks and MCP servers defined there.
+
+In ask mode a bridged command runs in Claude's `default` permission mode and asks. Without the
+bridge it would have no way to ask, so it runs in `plan` mode instead. Auto mode passes
+`acceptEdits`; read-only passes `plan`. A profile saved on the previous preset gains the flag
+when the config loads. A hand-written profile is left alone.
+
 Process providers are adapters around complete coding agents, not raw model APIs. Their own
 tools and session behavior remain authoritative; Ainz does not pass them its tool schemas.
-They omit image content from the rendered transcript, and report token usage only in the
-streaming mode.
+They report token usage only in the streaming mode.
+
+Images go to a command in the form it reads. A stream-json command such as Claude Code gets
+the image itself. A text command such as Codex gets `[image file: PATH]`, which its own model
+opens: the file the image was attached from, or, for a pasted image or one in a resumed session,
+a copy written once to `ainz/images` under your cache directory, readable only by you.
+
+The Codex preset passes `--skip-git-repo-check`, because Ainz has already chosen the workspace
+and Codex otherwise refuses to run outside a git checkout it trusts. A profile saved on the
+previous preset gains the flag when the config loads.
+
+## When a reply stops early
+
+A Chat Completions request asks for replies of up to 32,000 tokens. A request that names no
+limit gets the server's, and a LiteLLM proxy in front of Claude picks 4,096. Set
+`max_output_tokens` on a profile to change it, or `0` to send no limit:
+
+```toml
+[providers.litellm]
+max_output_tokens = 64000
+```
+
+`ainz providers add NAME --max-output-tokens N` sets it at creation. If a model refuses the
+limit, for example one whose ceiling is 16,384, the request is sent again without it once,
+and later requests leave it out. The Messages wire always sends its own limit, and Responses
+leaves the limit to the model.
+
+A reply that reaches its output limit is kept and marked `[cut off: this reply reached its
+length limit]`, and the run continues by itself. The next request tells the model to carry on
+where it stopped and to send any call it was cut off in the middle of in smaller pieces. The
+continuation keeps the run's permissions and instructions, and counts toward the step limit
+and `budget_usd`. After three continuations in a row without a successful tool call, the run
+pauses and says so. Steering takes precedence, and cancelling still stops the run.
+
+A reply that breaks off partway, through a dropped connection, an overloaded upstream, or a
+stream that ends early, is requested again after 2 and then 8 seconds. A notice explains
+why the text is repeated. Process providers are never retried this way, because the
+command may already have acted.
+
+Context use is estimated from the bytes sent until the provider reports a token count. After
+that, the ratio the provider reported sizes the next request, and the status bar's `ctx` field
+shows the share of the window the last request took. A refusal for length lowers the
+estimate before the history is compacted and the request is retried.
 
 ## Native APIs and fallback
 

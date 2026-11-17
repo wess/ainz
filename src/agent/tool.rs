@@ -1,10 +1,10 @@
-use std::{collections::VecDeque, panic::AssertUnwindSafe, sync::Arc};
+use std::{collections::VecDeque, panic::AssertUnwindSafe, path::Path, sync::Arc};
 
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use super::{plan, *};
 use crate::{
-  PermissionMode,
+  PermissionMode, PermissionRules,
   protocol::INVALID_ARGUMENTS,
   tool::{Tool, ToolContext, truncate},
 };
@@ -17,18 +17,66 @@ enum Admission {
   Refused(String),
 }
 
+/// Who may run a call: a standing rule first, in every mode, because it is the same decision
+/// made once already; then the mode; then the person. An `Err` is a call that cannot be judged,
+/// such as a path outside the workspace, and is refused with the reason.
+async fn permitted(
+  workspace: &Path,
+  rules: &PermissionRules,
+  mode: PermissionMode,
+  approver: &Approver,
+  call: &ToolCall,
+  risk: Risk,
+) -> Result<bool, String> {
+  let subject = crate::permission::subject(workspace, call)
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+  let rules = crate::permission::normalize(rules, workspace, &call.name)
+    .await
+    .map_err(|error| format!("invalid permission rule: {error:#}"))?;
+  Ok(match (rules.decide(&call.name, subject.as_deref()), mode) {
+    (Some(decided), _) => decided,
+    (None, PermissionMode::Auto) => true,
+    (None, PermissionMode::ReadOnly) => risk == Risk::Read,
+    (None, PermissionMode::Ask) => risk == Risk::Read || approver(call, risk).await,
+  })
+}
+
+/// The approver for a call a provider runs itself, as a headless command asks about one: the
+/// run's rules and mode decide it the same way they decide the agent's own calls.
+pub(super) fn asking(workspace: PathBuf, options: &RunOptions, approver: &Approver) -> Approver {
+  let rules = options.rules.clone();
+  let mode = options.permissions;
+  let approver = approver.clone();
+  Arc::new(move |call: &ToolCall, risk: Risk| {
+    let (workspace, rules, approver, call) = (
+      workspace.clone(),
+      rules.clone(),
+      approver.clone(),
+      call.clone(),
+    );
+    Box::pin(async move {
+      permitted(&workspace, &rules, mode, &approver, &call, risk)
+        .await
+        .unwrap_or(false)
+    })
+  })
+}
+
 impl<P: ChatProvider> Agent<P> {
   /// Runs the calls in `state.pending`, recording each result in the session in the order the
   /// model made them. Calls that only read run side by side; anything else runs on its own,
   /// in order, because a write and the read after it must not race. Who may run what is
   /// settled one call at a time before anything starts, so an approval prompt never has a
   /// second one racing it.
+  /// Returns whether any call ran and succeeded, which is what counts as progress.
   pub(super) async fn run_tools(
     &self,
     session: &mut Session,
     options: &RunOptions,
     state: &mut RunState,
-  ) -> Result<()> {
+  ) -> Result<bool> {
+    let mut progress = false;
     while !state.pending.is_empty() {
       let batch = self.batch(&state.pending);
       let calls: Vec<ToolCall> = state.pending.iter().take(batch).cloned().collect();
@@ -54,6 +102,7 @@ impl<P: ChatProvider> Agent<P> {
         let Some((output, error, executed)) = state.finished.get(&call.id) else {
           continue;
         };
+        progress |= *executed && !*error;
         if *executed {
           options
             .hooks
@@ -80,7 +129,7 @@ impl<P: ChatProvider> Agent<P> {
       }
       state.checkpoint()?;
     }
-    Ok(())
+    Ok(progress)
   }
 
   // how many calls from the front of the queue may run at once
@@ -133,24 +182,19 @@ impl<P: ChatProvider> Agent<P> {
     if let Err(error) = tool.validate(&call.arguments) {
       return refuse(format!("invalid arguments: {error:#}"));
     }
-    let subject = match crate::permission::subject(&self.workspace, call).await {
-      Ok(subject) => subject,
-      Err(error) => return refuse(format!("{error:#}")),
-    };
     let risk = tool.risk(&call.arguments);
-    // a standing rule answers before anyone is asked, in every mode: it is the same decision,
-    // made once already
-    let rules =
-      match crate::permission::normalize(&options.rules, &self.workspace, &call.name).await {
-        Ok(rules) => rules,
-        Err(error) => return refuse(format!("invalid permission rule: {error:#}")),
-      };
-    let ruled = rules.decide(&call.name, subject.as_deref());
-    let allowed = match (ruled, options.permissions) {
-      (Some(decided), _) => decided,
-      (None, PermissionMode::Auto) => true,
-      (None, PermissionMode::ReadOnly) => risk == Risk::Read,
-      (None, PermissionMode::Ask) => risk == Risk::Read || (self.approver)(call, risk).await,
+    let allowed = match permitted(
+      &self.workspace,
+      &options.rules,
+      options.permissions,
+      &self.approver,
+      call,
+      risk,
+    )
+    .await
+    {
+      Ok(allowed) => allowed,
+      Err(reason) => return refuse(reason),
     };
     if !allowed {
       return refuse(format!(

@@ -24,6 +24,10 @@ pub(super) struct ChatRequest<'a> {
   pub tools: Vec<WireTool<'a>>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub tool_choice: Option<&'static str>,
+  // `max_tokens` is refused by OpenAI's reasoning models; LiteLLM maps this one to every
+  // provider's own name for it
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub max_completion_tokens: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -170,7 +174,7 @@ fn arguments(raw: String) -> Value {
 
 // said after a reply the output limit cut short, so neither the person nor the model takes what
 // is there for the whole answer
-const CUT_OFF: &str = "\n\n[cut off: this reply reached its length limit]";
+pub(crate) const CUT_OFF: &str = "\n\n[cut off: this reply reached its length limit]";
 
 // compatible servers send null where OpenAI leaves a field out, hence the Options throughout;
 // strings that are only copied into an accumulator are borrowed from the event instead
@@ -275,6 +279,7 @@ pub(super) fn parse_response(body: &[u8], events: &EventSink) -> Result<Provider
     .next()
     .context("model response had no choices")?;
   let mut content = choice.message.content;
+  let truncated = choice.finish_reason.as_deref() == Some("length");
   match choice.finish_reason.as_deref() {
     Some("content_filter") => bail!("model reply ended with content_filter"),
     Some("length") => content.get_or_insert_default().push_str(CUT_OFF),
@@ -306,68 +311,97 @@ pub(super) fn parse_response(body: &[u8], events: &EventSink) -> Result<Provider
       response_model: None,
     },
     usage: response.usage.map(Usage::from).unwrap_or_default(),
+    truncated,
   })
 }
 
-// true once the reply is complete: a finish reason or [DONE]. a reason this does not know, such
-// as a gateway's end_turn, still ends the reply; only a filtered one is refused, because what is
-// missing from it was removed on purpose. a reply cut off at the output limit is kept and marked,
-// and a call it was in the middle of reaches the model as a call whose arguments did not survive
-pub(super) fn parse_data(
-  data: &str,
-  content: &mut String,
-  calls: &mut BTreeMap<usize, PartialCall>,
-  usage: &mut Usage,
-  events: &EventSink,
-) -> Result<bool> {
-  let data = data.trim();
-  if data == "[DONE]" {
-    return Ok(true);
-  }
-  if data.is_empty() {
-    return Ok(false);
-  }
-  let chunk: StreamChunk = match serde_json::from_str(data) {
-    Ok(chunk) => chunk,
-    Err(error) => {
-      // an error object whose fields clash with a chunk's shape still deserves its sentence
-      if let Ok(value) = serde_json::from_str::<Value>(data) {
-        check_error(&value)?;
+/// A chat-completions stream read one event at a time. The reply is complete once a finish
+/// reason or `[DONE]` arrives. A reason this does not know, such as a gateway's end_turn, still
+/// ends the reply; only a filtered one is refused, because what is missing from it was removed
+/// on purpose. A reply cut off at the output limit is kept, marked, and flagged, and a call it
+/// was in the middle of reaches the model as a call whose arguments did not survive.
+#[derive(Default)]
+pub(super) struct ChatStream {
+  content: String,
+  calls: BTreeMap<usize, PartialCall>,
+  usage: Usage,
+  finished: bool,
+  truncated: bool,
+}
+
+impl ChatStream {
+  /// Reads one event. True at `[DONE]`, after which nothing more needs reading.
+  pub(super) fn push(&mut self, data: &str, events: &EventSink) -> Result<bool> {
+    let data = data.trim();
+    if data == "[DONE]" {
+      self.finished = true;
+      return Ok(true);
+    }
+    if data.is_empty() {
+      return Ok(false);
+    }
+    let chunk: StreamChunk = match serde_json::from_str(data) {
+      Ok(chunk) => chunk,
+      Err(error) => {
+        // an error object whose fields clash with a chunk's shape still deserves its sentence
+        if let Ok(value) = serde_json::from_str::<Value>(data) {
+          check_error(&value)?;
+        }
+        return Err(error).with_context(|| format!("invalid stream event: {}", excerpt(data)));
       }
-      return Err(error).with_context(|| format!("invalid stream event: {}", excerpt(data)));
+    };
+    if chunk.error.is_some() || chunk.kind.as_deref() == Some("error") {
+      bail!("model reply failed: {}", error_message(data));
     }
-  };
-  if chunk.error.is_some() || chunk.kind.as_deref() == Some("error") {
-    bail!("model reply failed: {}", error_message(data));
-  }
-  if let Some(wire) = chunk.usage {
-    *usage = wire.into();
-  }
-  let mut finished = false;
-  for choice in chunk.choices.into_iter().flatten() {
-    let reason = choice.finish_reason.as_deref();
-    if reason == Some("content_filter") {
-      bail!("model reply ended with content_filter");
+    if let Some(wire) = chunk.usage {
+      self.usage = wire.into();
     }
-    // the last piece of text can share its event with the finish reason, and comes before it
-    if let Some(delta) = choice.delta {
-      if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
-        content.push_str(&text);
-        events.emit(Event::TextDelta { text });
+    for choice in chunk.choices.into_iter().flatten() {
+      let reason = choice.finish_reason.as_deref();
+      if reason == Some("content_filter") {
+        bail!("model reply ended with content_filter");
       }
-      for delta in delta.tool_calls.into_iter().flatten() {
-        call(calls, delta);
+      // the last piece of text can share its event with the finish reason, and comes before it
+      if let Some(delta) = choice.delta {
+        if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
+          self.content.push_str(&text);
+          events.emit(Event::TextDelta { text });
+        }
+        for delta in delta.tool_calls.into_iter().flatten() {
+          call(&mut self.calls, delta);
+        }
       }
+      if reason == Some("length") && !self.truncated {
+        self.truncated = true;
+        self.content.push_str(CUT_OFF);
+        events.emit(Event::TextDelta {
+          text: CUT_OFF.into(),
+        });
+      }
+      self.finished |= reason.is_some();
     }
-    if reason == Some("length") {
-      content.push_str(CUT_OFF);
-      events.emit(Event::TextDelta {
-        text: CUT_OFF.into(),
-      });
-    }
-    finished |= reason.is_some();
+    Ok(false)
   }
-  Ok(finished)
+
+  pub(super) fn finish(self) -> Result<ProviderReply> {
+    if !self.finished {
+      bail!("model stream ended before completion");
+    }
+    let tool_calls = self
+      .calls
+      .into_values()
+      .map(PartialCall::finish)
+      .collect::<Result<_>>()?;
+    Ok(ProviderReply {
+      message: Message::assistant(
+        (!self.content.is_empty()).then_some(self.content),
+        None,
+        tool_calls,
+      ),
+      usage: self.usage,
+      truncated: self.truncated,
+    })
+  }
 }
 
 // servers that leave out `index` send each call whole, so a new id is a new call rather than

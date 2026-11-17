@@ -59,6 +59,7 @@ impl ChatProvider for Script {
 fn script(calls: Vec<ToolCall>) -> Script {
   Script(Mutex::new(VecDeque::from([
     ProviderReply {
+      truncated: false,
       message: Message {
         role: Role::Assistant,
         content: None,
@@ -72,6 +73,7 @@ fn script(calls: Vec<ToolCall>) -> Script {
       usage: Usage::default(),
     },
     ProviderReply {
+      truncated: false,
       message: Message::text(Role::Assistant, "done"),
       usage: Usage::default(),
     },

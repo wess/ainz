@@ -23,6 +23,7 @@ enum Row {
   Wire,
   Reasoning,
   Fallback,
+  SubagentModels,
   Permissions,
   Memory,
   RecallOnStart,
@@ -43,11 +44,12 @@ enum Row {
   Binding(Action),
 }
 
-const ROWS: [Row; 21] = [
+const ROWS: [Row; 22] = [
   Row::Provider,
   Row::Wire,
   Row::Reasoning,
   Row::Fallback,
+  Row::SubagentModels,
   Row::Permissions,
   Row::Memory,
   Row::RecallOnStart,
@@ -79,6 +81,7 @@ impl Row {
       Self::Wire => "Provider API",
       Self::Reasoning => "Reasoning effort",
       Self::Fallback => "Fallback providers",
+      Self::SubagentModels => "Subagent models",
       Self::Permissions => "Permissions",
       Self::Memory => "Memory",
       Self::RecallOnStart => "Recall at session start",
@@ -122,6 +125,7 @@ impl Row {
           config.fallback_providers.join(", ")
         }
       }
+      Self::SubagentModels => on_off(config.subagent_models),
       Self::Provider => format!(
         "{} · {}",
         config.provider.as_deref().unwrap_or("default"),
@@ -176,6 +180,14 @@ impl Row {
       Self::Wire => ("The selected provider’s protocol".into(), "Chat uses Chat Completions; Responses supports encrypted reasoning; Messages uses the native Messages API. This edits a saved HTTP profile.".into()),
       Self::Reasoning => ("For Responses providers".into(), "Choose a reasoning effort supported by your model. Default leaves the decision to the provider.".into()),
       Self::Fallback => ("Explicit backup profiles in order".into(), "Enter configured provider names separated by commas. Each backup can have its own default model. Empty disables fallback. Failed attempts are buffered, so only a successful reply reaches the transcript.".into()),
+      Self::SubagentModels => (
+        "A model for each child".into(),
+        "Lets the agent pick a model from the active provider's saved list for each subagent, \
+         so a lookup can go to a small model and a design question to a strong one. Add a few \
+         words for each in model_hints under the provider in config.toml to say what it is \
+         for. Off by default; needs two or more saved models."
+          .into(),
+      ),
       Self::Provider => (
         "Where completions come from".into(),
         "Open the provider setup to add or switch a provider and choose its model.".into(),
@@ -349,6 +361,7 @@ impl Row {
         }
       }
       Self::Roster => config.ui.roster_visible = !config.ui.roster_visible,
+      Self::SubagentModels => config.subagent_models = !config.subagent_models,
       Self::Bell => config.ui.bell = !config.ui.bell,
       Self::Vim => config.ui.vim = !config.ui.vim,
       Self::Inline => config.ui.inline = !config.ui.inline,
@@ -374,9 +387,12 @@ impl Row {
 impl Row {
   fn section(self) -> &'static str {
     match self {
-      Self::Provider | Self::Permissions | Self::Wire | Self::Reasoning | Self::Fallback => {
-        "Connection"
-      }
+      Self::Provider
+      | Self::Permissions
+      | Self::Wire
+      | Self::Reasoning
+      | Self::Fallback
+      | Self::SubagentModels => "Connection",
       Self::Memory
       | Self::RecallOnStart
       | Self::RememberOnCompact

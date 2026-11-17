@@ -108,6 +108,30 @@ pub fn builtins() -> Vec<SlashCommand> {
       "help",
     ),
     (
+      "goal",
+      "/goal [TEXT|continue|clear]",
+      "Keep working toward an objective across turns until it is met",
+      "prompt",
+    ),
+    (
+      "lua",
+      "/lua [CODE]",
+      "Run Lua in your scripts' runtime, or list what they loaded",
+      "config",
+    ),
+    (
+      "source",
+      "/source",
+      "Run init.lua and your plugins again",
+      "config",
+    ),
+    (
+      "trust",
+      "/trust",
+      "Let this workspace's .ainz/init.lua run",
+      "config",
+    ),
+    (
       "header",
       "/header <mascot|NAME|random|builtin>",
       "Preview and remember the empty-screen header",

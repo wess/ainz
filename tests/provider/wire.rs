@@ -2,32 +2,13 @@ use super::*;
 
 fn replay(lines: &[&str]) -> Result<ProviderReply> {
   let events = EventSink::default();
-  let mut content = String::new();
-  let mut calls = BTreeMap::new();
-  let mut usage = Usage::default();
-  let mut finished = false;
+  let mut stream = ChatStream::default();
   for line in lines {
-    finished |= parse_data(line, &mut content, &mut calls, &mut usage, &events)?;
+    if stream.push(line, &events)? {
+      break;
+    }
   }
-  if !finished {
-    bail!("model stream ended before completion");
-  }
-  Ok(ProviderReply {
-    message: Message {
-      role: Role::Assistant,
-      content: (!content.is_empty()).then_some(content),
-      tool_calls: calls
-        .into_values()
-        .map(PartialCall::finish)
-        .collect::<Result<_>>()?,
-      tool_call_id: None,
-      images: Vec::new(),
-      thinking: None,
-      response_items: Vec::new(),
-      response_model: None,
-    },
-    usage,
-  })
+  stream.finish()
 }
 
 #[test]
@@ -97,9 +78,28 @@ fn arguments_that_are_json_but_not_an_object_are_kept_as_invalid() {
 fn a_reply_cut_off_at_the_length_limit_is_kept_and_marked() {
   let reply =
     replay(&[r#"{"choices":[{"delta":{"content":"half"},"finish_reason":"length"}]}"#]).unwrap();
+  assert!(reply.truncated);
   let content = reply.message.content.unwrap();
   assert!(content.starts_with("half"));
   assert!(content.ends_with(CUT_OFF));
+}
+
+#[test]
+fn a_completed_reply_quoting_the_cutoff_marker_is_not_cut_off() {
+  let quoted = serde_json::json!({
+    "choices": [{"delta": {"content": format!("the marker reads{CUT_OFF}")}, "finish_reason": "stop"}],
+  })
+  .to_string();
+  let reply = replay(&[&quoted]).unwrap();
+  assert!(!reply.truncated);
+}
+
+#[test]
+fn a_whole_reply_cut_off_at_its_length_limit_is_flagged() {
+  let body = br#"{"choices":[{"message":{"content":"half"},"finish_reason":"length"}]}"#;
+  let reply = parse_response(body, &EventSink::default()).unwrap();
+  assert!(reply.truncated);
+  assert!(reply.message.content.unwrap().ends_with(CUT_OFF));
 }
 
 #[test]

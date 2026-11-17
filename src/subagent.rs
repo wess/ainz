@@ -36,6 +36,9 @@ pub struct SubagentRequest {
   pub name: String,
   pub prompt: String,
   pub role: Option<String>,
+  /// The model the parent picked for this child; `None` inherits the parent's. A named agent
+  /// type's own model takes precedence.
+  pub model: Option<String>,
 }
 
 pub type SubagentFuture = Pin<Box<dyn Future<Output = Result<SubagentResult>> + Send + 'static>>;
@@ -168,12 +171,27 @@ impl Drop for SubagentRegistry {
 }
 
 pub fn subagent_tool(registry: Arc<SubagentRegistry>, mesh: bool) -> Arc<dyn Tool> {
-  Arc::new(SubagentTool { registry, mesh })
+  subagent_tool_with_models(registry, mesh, BTreeMap::new())
+}
+
+/// The same tool, offering a model for each child: the active provider's saved models, each
+/// with a hint about what it is for. Empty offers none, and every child inherits the parent's.
+pub fn subagent_tool_with_models(
+  registry: Arc<SubagentRegistry>,
+  mesh: bool,
+  models: BTreeMap<String, String>,
+) -> Arc<dyn Tool> {
+  Arc::new(SubagentTool {
+    registry,
+    mesh,
+    models,
+  })
 }
 
 struct SubagentTool {
   registry: Arc<SubagentRegistry>,
   mesh: bool,
+  models: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -183,8 +201,31 @@ struct SubagentArgs {
   prompt: Option<String>,
   role: Option<String>,
   name: Option<String>,
+  model: Option<String>,
   #[serde(default)]
   background: bool,
+}
+
+impl SubagentTool {
+  fn routing(&self) -> String {
+    if self.models.is_empty() {
+      return String::new();
+    }
+    let hints: String = self
+      .models
+      .iter()
+      .filter(|(_, hint)| !hint.trim().is_empty())
+      .map(|(model, hint)| format!(" {model}: {}.", hint.trim().trim_end_matches('.')))
+      .collect();
+    format!(
+      " Pick a model for each delegation with the model parameter.{hints} Match the model to \
+       the task: a small inexpensive one for bounded lookups, summaries, and mechanical edits; \
+       a capable coding model for implementation and tests; a strong reasoning model for \
+       design, hard debugging, and security review. Do not assume a name you have no hint for \
+       is cheap or capable; leave model out to use your own when unsure. A named agent type's \
+       model takes precedence."
+    )
+  }
 }
 
 #[async_trait]
@@ -196,22 +237,31 @@ impl Tool for SubagentTool {
     } else {
       ""
     };
+    let mut parameters = json!({
+      "type": "object", "properties": {
+        "action": {"type": "string", "enum": ["delegate", "collect", "list"]},
+        "prompt": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "description": "Optional named agent type from the discovered agent catalog"},
+        "name": {"type": "string"},
+        "background": {"type": "boolean"}
+      }, "additionalProperties": false
+    });
+    if !self.models.is_empty() {
+      parameters["properties"]["model"] = json!({
+        "type": "string", "enum": self.models.keys().collect::<Vec<_>>(),
+        "description": "Model suited to this task; leave out to use your own."
+      });
+    }
     ToolSpec {
       name: "subagent".into(),
       description: format!(
         "Delegate a focused task to a durable child session. `delegate` runs one and returns \
          its answer; add background to start it and keep working, then `collect` it by name. \
-         `list` shows what is still running.{mesh}"
+         `list` shows what is still running. Give the child everything it needs in the prompt: \
+         it cannot see this conversation.{mesh}{}",
+        self.routing()
       ),
-      parameters: json!({
-        "type": "object", "properties": {
-          "action": {"type": "string", "enum": ["delegate", "collect", "list"]},
-          "prompt": {"type": "string", "minLength": 1},
-          "role": {"type": "string", "description": "Optional named agent type from the discovered agent catalog"},
-          "name": {"type": "string"},
-          "background": {"type": "boolean"}
-        }, "additionalProperties": false
-      }),
+      parameters,
     }
   }
 
@@ -225,11 +275,17 @@ impl Tool for SubagentTool {
     let output = match action {
       "delegate" => {
         let prompt = args.prompt.context("prompt is required")?;
+        if let Some(model) = &args.model
+          && !self.models.contains_key(model)
+        {
+          bail!("model {model} is not one of the active provider's saved models");
+        }
         let request = SubagentRequest {
           parent_id: context.session_id,
           name: self.registry.next_name(),
           prompt,
           role: args.role,
+          model: args.model,
         };
         if args.background {
           let name = self.registry.start(request);

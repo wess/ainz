@@ -10,6 +10,28 @@ pub(super) const TAILS: [usize; 2] = [2, 1];
 /// and low for JSON, and a summary request that comes in low is refused like any other.
 const SUMMARY_BYTES_PER_TOKEN: usize = 3;
 
+/// Bytes to the token before the provider has said otherwise. Close for English prose; code
+/// and JSON run lower, which is what the provider's own count corrects.
+pub(super) const BYTES_PER_TOKEN: f64 = 4.0;
+
+/// How long to wait before each further attempt at a reply that broke off partway. Two is
+/// enough to ride out a dropped connection or a moment of overload, and few enough that a
+/// provider that is really down says so within seconds.
+pub(super) const RESUMES: [u64; 2] = [2, 8];
+
+/// Said to the model for the one request after a reply was cut off at its output limit.
+pub(super) const CONTINUE: &str = "Your previous reply reached its output limit and was cut off. \
+  Continue from exactly where it stopped: your next words follow on directly from its last \
+  words. Do not start over, do not repeat anything already written, and do not mention the \
+  cut-off. If a tool call was rejected because its arguments were incomplete, send that call \
+  again in smaller pieces; do not repeat tool calls that succeeded. Keep to the user's latest \
+  instructions and permission requirements, and do not ask the user to say continue.";
+
+/// An estimate of how many tokens `bytes` comes to.
+pub(super) fn tokens(bytes: usize, per_token: f64) -> usize {
+  (bytes as f64 / per_token).ceil() as usize
+}
+
 /// What a request may carry once the reply has its room. A request whose prompt fits but
 /// whose answer cannot is refused just the same.
 pub(super) fn room(options: &RunOptions) -> usize {
@@ -19,9 +41,14 @@ pub(super) fn room(options: &RunOptions) -> usize {
 /// Refuses a prompt no compaction could send. It stays out of the session because anything
 /// kept there goes out with every request after it, and each of those would fail the same
 /// way; compacting the history first would give that history up for nothing.
-pub(super) fn admit(prompt: &Message, options: &RunOptions, fixed: usize) -> Result<()> {
+pub(super) fn admit(
+  prompt: &Message,
+  options: &RunOptions,
+  fixed: usize,
+  per_token: f64,
+) -> Result<()> {
   let limit = room(options);
-  let estimate = (fixed + message_bytes(prompt)).div_ceil(4);
+  let estimate = tokens(fixed + message_bytes(prompt), per_token);
   if estimate > limit {
     bail!(
       "that message is about {estimate} tokens and only {limit} fit in a {} token context with \
@@ -48,6 +75,24 @@ pub(super) fn too_long(error: &anyhow::Error) -> bool {
     "maximum context",
     "too many tokens",
     "request too large",
+  ]
+  .iter()
+  .any(|phrase| text.contains(phrase))
+}
+
+/// Whether a reply broke off after it had started: the provider layer retries a request that
+/// never got an answer, but nothing below here retries one whose answer stopped halfway.
+pub(super) fn interrupted(error: &anyhow::Error) -> bool {
+  let text = format!("{error:#}").to_ascii_lowercase();
+  [
+    "read model stream",
+    "ended before completion",
+    "overloaded",
+    "connection reset",
+    "connection closed",
+    "broken pipe",
+    "timed out",
+    "error decoding response body",
   ]
   .iter()
   .any(|phrase| text.contains(phrase))
@@ -92,6 +137,10 @@ impl<P: ChatProvider> Agent<P> {
         .complete(&[&instructions, &request], &[], &EventSink::default())
         .await?;
       accumulate(total, &reply.usage);
+      // half a summary in place of the history would lose the other half for good
+      if reply.truncated {
+        bail!("context compaction reached its output limit; the conversation was kept as it was");
+      }
       summary = reply.message.content.unwrap_or_default();
       if summary.trim().is_empty() {
         bail!("context compaction returned an empty summary");
@@ -115,7 +164,27 @@ impl<P: ChatProvider> Agent<P> {
 
 #[cfg(test)]
 mod tests {
-  use super::too_long;
+  use super::{interrupted, too_long};
+
+  #[test]
+  fn a_reply_that_broke_off_is_told_apart_from_one_that_was_refused() {
+    for text in [
+      "read model stream: error decoding response body",
+      "model stream ended before completion",
+      "provider reported an error: Overloaded",
+      "read model stream: connection reset by peer",
+      "read model stream: operation timed out",
+    ] {
+      assert!(interrupted(&anyhow::anyhow!(text.to_string())), "{text}");
+    }
+    for text in [
+      "model request failed: 401 Unauthorized",
+      "model reply ended with refusal",
+      "prompt is too long: 214000 tokens > 200000 maximum",
+    ] {
+      assert!(!interrupted(&anyhow::anyhow!(text.to_string())), "{text}");
+    }
+  }
 
   #[test]
   fn a_refusal_for_length_is_recognised_in_each_provider_s_words() {

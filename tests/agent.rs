@@ -45,6 +45,7 @@ async fn agent_runs_tools_until_a_final_message() {
   let temp = tempfile::tempdir().unwrap();
   let replies = VecDeque::from([
     ProviderReply {
+      truncated: false,
       message: Message {
         role: Role::Assistant,
         content: None,
@@ -66,6 +67,7 @@ async fn agent_runs_tools_until_a_final_message() {
       },
     },
     ProviderReply {
+      truncated: false,
       message: Message::text(Role::Assistant, "done"),
       usage: Usage {
         input_tokens: 15,
@@ -119,6 +121,7 @@ impl ChatProvider for SteeringProvider {
     if call == 1 {
       tokio::time::sleep(std::time::Duration::from_millis(20)).await;
       Ok(ProviderReply {
+        truncated: false,
         message: Message::text(Role::Assistant, "first"),
         usage: Usage::default(),
       })
@@ -127,6 +130,7 @@ impl ChatProvider for SteeringProvider {
         message.role == Role::User && message.content.as_deref() == Some("change direction")
       }));
       Ok(ProviderReply {
+        truncated: false,
         message: Message::text(Role::Assistant, "steered"),
         usage: Usage::default(),
       })
@@ -196,6 +200,7 @@ async fn agent_compacts_before_the_context_limit() {
   let temp = tempfile::tempdir().unwrap();
   let provider = ScriptedProvider(Mutex::new(VecDeque::from([
     ProviderReply {
+      truncated: false,
       message: Message::text(Role::Assistant, "earlier work summarized"),
       usage: Usage {
         input_tokens: 80,
@@ -204,6 +209,7 @@ async fn agent_compacts_before_the_context_limit() {
       },
     },
     ProviderReply {
+      truncated: false,
       message: Message::text(Role::Assistant, "continued"),
       usage: Usage {
         input_tokens: 30,
@@ -269,6 +275,7 @@ async fn agent_compacts_before_the_context_limit() {
 
 fn calls(calls: Vec<ToolCall>) -> ProviderReply {
   ProviderReply {
+    truncated: false,
     message: Message {
       role: Role::Assistant,
       content: None,
@@ -363,6 +370,7 @@ async fn reads_in_one_reply_keep_their_order_in_the_session() {
         call("4", "read", json!({"path": "d"})),
       ]),
       ProviderReply {
+        truncated: false,
         message: Message::text(Role::Assistant, "done"),
         usage: Usage::default(),
       },
@@ -399,6 +407,7 @@ async fn arguments_that_did_not_parse_are_answered_not_fatal() {
         json!({ainz::protocol::INVALID_ARGUMENTS: "{\"path\": \"x\", \"content\": \"cut"}),
       )]),
       ProviderReply {
+        truncated: false,
         message: Message::text(Role::Assistant, "retried"),
         usage: Usage::default(),
       },
@@ -453,6 +462,7 @@ async fn a_tool_that_panics_fails_its_call_and_the_run_goes_on() {
     scripted(vec![
       calls(vec![call("1", "panics", json!({}))]),
       ProviderReply {
+        truncated: false,
         message: Message::text(Role::Assistant, "recovered"),
         usage: Usage::default(),
       },

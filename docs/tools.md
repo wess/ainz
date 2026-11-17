@@ -45,7 +45,8 @@ guess. Files above 16 MiB are refused. Risk: write.
 COMMAND` in the workspace, in its own process group so a timeout takes the whole tree down.
 Stdout and stderr are drained as they arrive and interleaved in arrival order, bounded chunks reported
 as `ToolDelta` events. Capture and progress stop growing at the configured output limit while
-the pipes continue draining. Untruncated replies end with `[exit N]`. Risk: execute.
+the pipes continue draining. Untruncated replies end with `[exit N]`. Under `AINZ_SANDBOX`
+the shell runs inside the [sandbox](permissions.md#sandbox). Risk: execute.
 
 **`fetch`** — `url` (required), `max_bytes` (default: the configured tool-output limit). A GET
 over `http(s)` only; it refuses `localhost`, loopback, and the private and link-local ranges

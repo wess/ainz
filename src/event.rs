@@ -36,6 +36,11 @@ pub enum Event {
   TurnEnd {
     usage: Usage,
   },
+  // how much of the context window the request just answered took, out of how much there is
+  Context {
+    used: usize,
+    limit: usize,
+  },
   // the whole plan, each time the model changes it
   Todos {
     items: Vec<Todo>,

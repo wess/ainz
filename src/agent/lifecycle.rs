@@ -13,6 +13,8 @@ pub(super) struct RunState {
   // the open plan, kept honest by a reminder when the model stops updating it
   pub planning: bool,
   pub plan: Option<super::plan::Plan>,
+  // who answers for a tool the provider runs itself; built once for the run
+  pub asks: Option<Approver>,
   cancel: Option<tokio::sync::watch::Receiver<bool>>,
 }
 

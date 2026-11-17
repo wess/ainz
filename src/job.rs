@@ -90,9 +90,12 @@ impl JobStore {
       .open(&output_path)?;
     let error = output.try_clone()?;
     let status = status_path.to_string_lossy().into_owned();
-    let child = Command::new("sh")
+    let mut runner = Command::new("sh");
+    runner
       .args(["-c", RUNNER, "ainz-job", &status, &command])
-      .current_dir(workspace)
+      .current_dir(workspace);
+    // the job writes its exit status beside its log, so that directory stays writable too
+    let child = crate::sandbox::confine(runner, std::slice::from_ref(&directory))?
       .stdin(Stdio::null())
       .stdout(Stdio::from(output))
       .stderr(Stdio::from(error))

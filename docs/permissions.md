@@ -69,3 +69,25 @@ line the model happened to run); every other tool remembers its bare name.
 `/rules` (or `/permissions rules`) lists the standing allow and deny rules. `/rules clear` (or
 `/permissions rules clear`) forgets all of them, so every call asks again. There is no CLI or
 in-session way to add a `deny` rule — write one into `config.toml` directly.
+
+The same decision answers a headless `claude -p` that asks before acting. See
+[Claude Code asks through Ainz](providers.md#claude-code-asks-through-ainz).
+
+## Sandbox
+
+Rules and modes decide whether a command runs. `AINZ_SANDBOX` controls what it can touch
+once it runs. It applies to the shell tool, background jobs, hooks, plugin commands, and the
+checks run by improvement and evaluation:
+
+```sh
+AINZ_SANDBOX=workspace ainz   # writes stay in the workspace and the temporary directories
+AINZ_SANDBOX=strict ainz      # that, and no network
+```
+
+It is off by default. A shell confined to the workspace cannot write `~/.cargo`, `~/.npm`, or
+other caches outside it, so builds that write there fail under it. Reads are not confined.
+On macOS the boundary is `/usr/bin/sandbox-exec`; on Linux it is `/usr/bin/bwrap`. If a
+policy is set but cannot be provided (no confiner installed, another platform, or a value
+that is not `off`, `workspace`, or `strict`), commands are refused rather than run
+unconfined. `ainz doctor` shows the policy in force. Process providers such as `claude` and
+`codex` apply their own sandboxes and are not wrapped.

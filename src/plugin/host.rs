@@ -57,9 +57,9 @@ impl Host {
   // NB: process_exec is full user authority: the shell inherits the host environment
   pub(super) async fn host_run(&mut self, command: &str) -> Result<String> {
     self.require(Capability::ProcessExec)?;
-    let mut child = Command::new("sh")
-      .args(["-c", command])
-      .current_dir(&self.workspace)
+    let mut shell = Command::new("sh");
+    shell.args(["-c", command]).current_dir(&self.workspace);
+    let mut child = crate::sandbox::confine(shell, &[])?
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())

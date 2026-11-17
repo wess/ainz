@@ -43,6 +43,9 @@ use super::{
 use crate::app::{expand_prompt, make_agent_with};
 
 mod activity;
+mod attach;
+mod goal;
+mod lua;
 mod mcp;
 mod themes;
 mod title;
@@ -70,6 +73,8 @@ pub(crate) struct ChatOutcome {
 enum UiEvent {
   Agent(Event),
   Approval(Approval),
+  // the clipboard's picture, read off the event loop because the clipboard can be slow
+  Picture(std::result::Result<PathBuf, String>),
 }
 
 struct Approval {
@@ -92,6 +97,10 @@ enum Wake {
   Branch(Option<String>),
   Improvement(bool),
   Update(Option<String>),
+  // a script asked for this to be sent as if typed
+  Submit(String),
+  // a script's timer is due
+  Timer,
 }
 
 struct CommandData {
@@ -285,6 +294,8 @@ struct AgentView {
   usage: Usage,
   // the plan as this agent's last todo call left it; each view has its own
   todos: Vec<ainz::Todo>,
+  // tokens the last request took and the window it had, once a request has said
+  context: Option<(usize, usize)>,
 }
 
 impl AgentView {
@@ -316,6 +327,7 @@ impl AgentView {
       assistant: None,
       usage: Usage::default(),
       todos: Vec::new(),
+      context: None,
     }
   }
 }
@@ -375,8 +387,15 @@ struct ChatState {
   rewinding: bool,
   // vim's `d`, waiting for what to delete
   pending_delete: bool,
-  // an image pasted or dropped in, waiting for the message it belongs to
-  pending_image: Option<PathBuf>,
+  // pictures pasted or dropped in, by the number their placeholder in the line carries
+  attached: Vec<(usize, PathBuf)>,
+  pictures: usize,
+  // an objective each turn is followed by another toward, until it is met
+  goal: Option<goal::Goal>,
+  // what the person's scripts asked for and have not had yet
+  scripted: lua::Scripted,
+  // the terminal's size at the last frame, for scripts that ask
+  size: Cell<(u16, u16)>,
   files: Vec<String>,
   workspace: PathBuf,
   // how much of the transcript has already been handed to the terminal's scrollback
@@ -421,7 +440,11 @@ impl Default for ChatState {
       expanded: false,
       rewinding: false,
       pending_delete: false,
-      pending_image: None,
+      attached: Vec::new(),
+      pictures: 0,
+      goal: None,
+      scripted: lua::Scripted::default(),
+      size: Cell::new((0, 0)),
       files: Vec::new(),
       workspace: PathBuf::new(),
       flushed: 0,
@@ -431,6 +454,23 @@ impl Default for ChatState {
 }
 
 impl ChatState {
+  /// Puts a picture's placeholder in the line where the caret is; the picture goes with the
+  /// prompt for as long as its placeholder stays in it.
+  fn attach(&mut self, path: PathBuf) {
+    self.pictures += 1;
+    let number = self.pictures;
+    self.attached.push((number, path));
+    let before = &self.input.as_str()[..self.input.cursor()];
+    let gap = match before.chars().last() {
+      Some(last) if !last.is_whitespace() => " ",
+      _ => "",
+    };
+    self
+      .input
+      .insert_str(&format!("{gap}{} ", attach::token(number)));
+    self.command_selected = 0;
+  }
+
   /// A path under the workspace, named by the part that is not the workspace.
   fn relative(&self, subject: &str) -> String {
     let root = self.workspace.to_string_lossy();
@@ -598,6 +638,7 @@ pub(crate) async fn run_chat(
     link,
   )
   .await;
+  lua::emit("exit", serde_json::json!({}));
   leave_terminal(&mut terminal)?;
   result
 }
@@ -679,6 +720,7 @@ async fn run_chat_inner(
   let (tx, mut rx) = mpsc::unbounded_channel();
   let events_tx = tx.clone();
   let events = EventSink::new(move |event| drop(events_tx.send(UiEvent::Agent(event))));
+  let picture_tx = tx.clone();
   let approval_tx = tx;
   // the rules the session is running under, shared so that allowing something always takes
   // effect for the rest of this run rather than the next one
@@ -723,7 +765,7 @@ async fn run_chat_inner(
       "prompt",
     ));
   }
-  commands.sort_by(|left, right| left.name.cmp(&right.name));
+  scripted_commands(&mut commands);
   let store = SessionStore::default_store()?;
   let plugin_catalog = PluginCatalog::discover(&workspace).await?;
   let header_catalog = HeaderCatalog::discover(&workspace).await?;
@@ -835,6 +877,15 @@ async fn run_chat_inner(
       .entries
       .push(Entry::new(EntryKind::System, notice));
   }
+  // what loading the person's scripts had to say, and then the scripts' own start
+  for note in crate::scripting::take_notes() {
+    let kind = match note.starts_with("lua:") {
+      true => EntryKind::Error,
+      false => EntryKind::System,
+    };
+    state.primary.entries.push(Entry::new(kind, note));
+  }
+  lua::emit("start", serde_json::json!({}));
   let mut task: Option<RunTask> = None;
   let mut controller: Option<RunController> = None;
   let mut current_id = session_id;
@@ -867,6 +918,8 @@ async fn run_chat_inner(
   // one.
   let mut painted = Instant::now() - FRAME;
   let mut dirty = true;
+  // the configuration may have changed since scripts last read it
+  let mut touched = true;
   let mut stopping = false;
   let mut resolver = ainz::keybind::Resolver::default();
   let mut monitor = crate::live::attention::monitor().await.ok();
@@ -899,6 +952,48 @@ async fn run_chat_inner(
       apply_event(&mut state, message);
       dirty = true;
     }
+    // the person's scripts: what they see, what they asked for, and what it changes
+    if let Some(script) = lua::script() {
+      if let Some(draft) = state.scripted.stash.take() {
+        state.input.set(draft);
+      }
+      if std::mem::take(&mut touched) {
+        drop(script.sync(config));
+      }
+      dirty |= lua::drain(&mut state);
+      if let Some((next, problems)) = script.options(config) {
+        config.adopt(next);
+        drop(script.sync(config));
+        for problem in problems {
+          state
+            .primary
+            .entries
+            .push(Entry::new(EntryKind::Error, problem));
+        }
+        state.scripted.rebuild = true;
+        dirty = true;
+      }
+      if state.scripted.rebuild && task.is_none() {
+        state.scripted.rebuild = false;
+        scripted_commands(&mut commands);
+        match make_agent_with(&workspace, config, events.clone(), approver.clone()).await {
+          Ok((rebuilt, rebuilt_options)) => {
+            agent = Some(rebuilt);
+            options = rebuilt_options;
+          }
+          Err(error) => state.primary.entries.push(Entry::new(
+            EntryKind::Error,
+            format!("kept the previous setup: {error:#}"),
+          )),
+        }
+      }
+      if state.scripted.quit && task.is_none() {
+        return Ok(ChatOutcome {
+          session: session.take().context("session unavailable")?,
+          next: ChatNext::Quit,
+        });
+      }
+    }
     if let Some(session) = &session {
       live_title = session.title();
       live_label = session.label.clone();
@@ -925,6 +1020,10 @@ async fn run_chat_inner(
       );
     }
     if dirty && painted.elapsed() >= FRAME {
+      // scripts draw from the state as of this frame, and no more often than frames are drawn
+      if lua::script().is_some() {
+        lua::describe(lua::view(&state, config));
+      }
       let drawn = flush_scrollback(terminal, &mut state).and_then(|()| {
         terminal.draw(|frame| {
           state.art_area.set(None);
@@ -960,19 +1059,49 @@ async fn run_chat_inner(
       false => Duration::from_secs(3600),
     };
     let ticking = state.busy() && state.approval.is_none();
-    let wake = tokio::select! {
-      message = rx.recv() => Wake::Agent(message),
-      joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
-      event = input.next() => Wake::Input(event),
-      redraw = async { match link.as_mut() { Some(link) => link.redraw.recv().await, None => std::future::pending().await } }, if link.is_some() => Wake::Redraw(redraw),
-      infos = async { match monitor.as_mut() { Some(monitor) => monitor.updates.recv().await, None => std::future::pending().await } }, if monitor.is_some() => Wake::Live(infos.unwrap_or_default()),
-      name = async { match branch.as_mut() { Some(branch) => branch.updates.recv().await, None => std::future::pending().await } }, if branch.is_some() => Wake::Branch(name.flatten()),
-      changed = async { match improvement_watch.as_mut() { Some((_, updates)) => updates.recv().await, None => std::future::pending().await } }, if improvement_watch.is_some() => Wake::Improvement(changed.is_some()),
-      notice = async { match update_notice.as_mut() { Some(notice) => notice.recv().await, None => std::future::pending().await } }, if update_notice.is_some() => Wake::Update(notice),
-      _ = clock.tick(), if ticking => Wake::Clock,
-      () = tokio::time::sleep(idle) => Wake::Tick,
+    // what a script sends goes when the prompt is free: not over an approval, not into a
+    // subagent's transcript
+    let submit = match state.approval.is_none() && state.active.is_none() {
+      true => state.scripted.outbox.pop_front(),
+      false => None,
     };
+    let due = lua::script().and_then(|script| script.next_timer());
+    let wake = if let Some(text) = submit {
+      Wake::Submit(text)
+    } else {
+      tokio::select! {
+        message = rx.recv() => Wake::Agent(message),
+        joined = join(task.as_mut()), if task.is_some() => Wake::Finished(Box::new(joined)),
+        event = input.next() => Wake::Input(event),
+        redraw = async { match link.as_mut() { Some(link) => link.redraw.recv().await, None => std::future::pending().await } }, if link.is_some() => Wake::Redraw(redraw),
+        infos = async { match monitor.as_mut() { Some(monitor) => monitor.updates.recv().await, None => std::future::pending().await } }, if monitor.is_some() => Wake::Live(infos.unwrap_or_default()),
+        name = async { match branch.as_mut() { Some(branch) => branch.updates.recv().await, None => std::future::pending().await } }, if branch.is_some() => Wake::Branch(name.flatten()),
+        changed = async { match improvement_watch.as_mut() { Some((_, updates)) => updates.recv().await, None => std::future::pending().await } }, if improvement_watch.is_some() => Wake::Improvement(changed.is_some()),
+        notice = async { match update_notice.as_mut() { Some(notice) => notice.recv().await, None => std::future::pending().await } }, if update_notice.is_some() => Wake::Update(notice),
+        _ = clock.tick(), if ticking => Wake::Clock,
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(due.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600)))), if due.is_some() => Wake::Timer,
+        () = tokio::time::sleep(idle) => Wake::Tick,
+      }
+    };
+    if matches!(wake, Wake::Input(_) | Wake::Finished(_)) {
+      touched = true;
+    }
     let mut key = match wake {
+      Wake::Submit(text) => {
+        state.scripted.stash = Some(state.input.take());
+        state.input.set(text);
+        state.scripted.synthetic = true;
+        dirty = true;
+        crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+      }
+      Wake::Timer => {
+        if let Some(script) = lua::script() {
+          lua::describe(lua::view(&state, config));
+          script.fire_timers();
+        }
+        dirty = true;
+        continue;
+      }
       Wake::Update(notice) => {
         update_notice = None;
         if let Some(notice) = notice {
@@ -1115,12 +1244,42 @@ async fn run_chat_inner(
           drop(std::io::Write::write_all(&mut out, b"\x07"));
           drop(std::io::Write::flush(&mut out));
         }
+        let reply = match (&result, state.cancelled) {
+          (Ok(reply), false) => Some(reply.as_str()),
+          _ => None,
+        };
+        let pursuit = goal::after(&mut state.goal, reply, !state.input.as_str().is_empty());
+        lua::turn_end(&result, state.cancelled);
         state.finish_run(result);
         if stopping {
           return Ok(ChatOutcome {
             session: session.take().context("session unavailable")?,
             next: ChatNext::Quit,
           });
+        }
+        match pursuit {
+          Some(goal::Next::Note(note)) => {
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::System, note));
+          }
+          Some(goal::Next::Run { prompt, shown }) => {
+            state
+              .primary
+              .entries
+              .push(Entry::new(EntryKind::System, shown));
+            task = Some(launch(
+              &mut agent,
+              &mut session,
+              &mut controller,
+              &options,
+              &mut state,
+              prompt,
+              Vec::new(),
+            ));
+          }
+          None => {}
         }
         continue;
       }
@@ -1133,20 +1292,15 @@ async fn run_chat_inner(
         state.header_preview = false;
         if state.active.is_none() && state.approval.is_none() {
           // a terminal pastes an image as its path, which is a file to attach rather than
-          // text to type; dragging one into the window arrives the same way
-          match image_path(&text) {
-            Some(path) => {
-              state.primary.entries.push(Entry::new(
-                EntryKind::System,
-                format!("attached {}; it goes with the next message", path.display()),
-              ));
-              state.pending_image = Some(path);
-            }
+          // text to type; dragging several into the window arrives the same way
+          let pictures = attach::paths(&text);
+          if pictures.is_empty() {
             // a paste keeps its line breaks; the prompt grows to hold them
-            None => {
-              let text = text.replace("\r\n", "\n").replace('\r', "\n");
-              state.input.insert_str(text.trim_end_matches('\n'));
-            }
+            let text = text.replace("\r\n", "\n").replace('\r', "\n");
+            state.input.insert_str(text.trim_end_matches('\n'));
+          }
+          for path in pictures {
+            state.attach(path);
           }
           state.command_selected = 0;
         }
@@ -1184,7 +1338,11 @@ async fn run_chat_inner(
       }
       // the layout depends on the size; an idle session would otherwise show a garbled screen
       // until the next key
-      Wake::Input(Some(Ok(InputEvent::Resize(..)))) => {
+      Wake::Input(Some(Ok(InputEvent::Resize(width, height)))) => {
+        lua::emit(
+          "resize",
+          serde_json::json!({ "width": width, "height": height }),
+        );
         dirty = true;
         continue;
       }
@@ -1206,7 +1364,19 @@ async fn run_chat_inner(
     };
     state.header_preview = false;
     use ainz::keybind::{Action as KeyAction, Match};
+    // a key a script mapped answers first; a chord a script finishes waits on its first key
+    if state.approval.is_none() && !state.scripted.synthetic && lua::press(&mut state, key) {
+      resolver.clear();
+      continue;
+    }
     let action = resolver.resolve(&config.ui.keybindings, key, state.approval.is_some());
+    if action == Match::Prefix {
+      state.scripted.prefix = Some(ainz::keybind::normalize(key));
+    }
+    if action == Match::None && state.approval.is_none() && lua::starts_chord(key) {
+      state.scripted.prefix = Some(ainz::keybind::normalize(key));
+      continue;
+    }
     match action {
       Match::Prefix => continue,
       Match::Action(action) if action.live() => {
@@ -1374,6 +1544,13 @@ async fn run_chat_inner(
           set_roster(&mut state, config, visible).await;
         }
         KeyCode::Char('o') => state.expanded = !state.expanded,
+        // the clipboard's picture; cmd+v is the terminal's own paste and only ever brings text
+        KeyCode::Char('v') if state.active.is_none() && !state.busy() => {
+          let sender = picture_tx.clone();
+          tokio::spawn(async move {
+            drop(sender.send(UiEvent::Picture(attach::clipboard().await)));
+          });
+        }
         KeyCode::Char('c') => match &controller {
           Some(controller) if !state.cancelled => {
             controller.cancel();
@@ -1408,7 +1585,10 @@ async fn run_chat_inner(
       }
       continue;
     }
-    let suggestion_count = suggestions(&state, &commands).len();
+    let suggestion_count = match state.scripted.synthetic {
+      true => 0,
+      false => suggestions(&state, &commands).len(),
+    };
     if suggestion_count > 0 {
       match key.code {
         KeyCode::Up => {
@@ -1461,7 +1641,10 @@ async fn run_chat_inner(
         state.command_selected = 0;
       }
       KeyCode::Backspace => {
-        state.input.backspace();
+        match attach::token_before(state.input.as_str(), state.input.cursor()) {
+          Some(start) => state.input.cut_back_to(start),
+          None => state.input.backspace(),
+        }
         state.command_selected = 0;
       }
       KeyCode::Delete => {
@@ -1536,7 +1719,11 @@ async fn run_chat_inner(
         state.input.insert('\n');
       }
       KeyCode::Enter if state.active.is_none() && !state.input.as_str().trim().is_empty() => {
-        let input = state.input.submit();
+        // what a script sent stays out of the person's history
+        let input = match std::mem::take(&mut state.scripted.synthetic) {
+          true => state.input.take(),
+          false => state.input.submit(),
+        };
         let live_action = match input.trim() {
           "/detach" => Some(crate::live::Action::Detach),
           "/sessions" => Some(crate::live::Action::Sessions),
@@ -1692,6 +1879,9 @@ async fn run_chat_inner(
             }
           }
         }
+        if lua::command(&mut state, &input, config) {
+          continue;
+        }
         let command_result = match command(
           &input,
           session.as_mut().unwrap(),
@@ -1710,6 +1900,29 @@ async fn run_chat_inner(
           }
         };
         match command_result {
+          CommandResult::Goal(args) => match goal::command(&mut state.goal, &args) {
+            goal::Next::Note(note) => {
+              state
+                .primary
+                .entries
+                .push(Entry::new(EntryKind::System, note));
+            }
+            goal::Next::Run { prompt, shown } => {
+              state
+                .primary
+                .entries
+                .push(Entry::new(EntryKind::User, shown));
+              task = Some(launch(
+                &mut agent,
+                &mut session,
+                &mut controller,
+                &options,
+                &mut state,
+                prompt,
+                Vec::new(),
+              ));
+            }
+          },
           CommandResult::Improve(action) => {
             let text = crate::command::improve::chat(&workspace, config, &action).await;
             if config.improve.enabled && improvement_watch.is_none() {
@@ -1894,7 +2107,25 @@ async fn run_chat_inner(
             continue;
           }
           CommandResult::Prompt { prompt, image } => {
-            let image = image.or_else(|| state.pending_image.take());
+            // what /image named, then each picture whose placeholder is still in the line
+            let paths: Vec<PathBuf> = image
+              .into_iter()
+              .chain(attach::kept(&prompt, std::mem::take(&mut state.attached)))
+              .collect();
+            // a script may rewrite what is sent, or keep it from being sent
+            let prompt = match lua::script() {
+              None => prompt,
+              Some(script) => match script.prompt(prompt) {
+                Some(prompt) => prompt,
+                None => {
+                  state.primary.entries.push(Entry::new(
+                    EntryKind::System,
+                    "a prompt handler kept that from being sent".into(),
+                  ));
+                  continue;
+                }
+              },
+            };
             let expanded = match expand_prompt(&prompt, &prompts).await {
               Ok(expanded) => expanded,
               // the draft goes back in the line so it can be fixed rather than retyped
@@ -1911,49 +2142,88 @@ async fn run_chat_inner(
               .primary
               .entries
               .push(Entry::new(EntryKind::User, expanded.clone()));
-            let images = match image {
-              Some(path) => match Image::from_path(&path).await {
-                Ok(image) => vec![image],
+            let mut images = Vec::with_capacity(paths.len());
+            for path in &paths {
+              match Image::from_path(path).await {
+                Ok(image) => images.push(image),
                 Err(error) => {
                   state
                     .primary
                     .entries
                     .push(Entry::new(EntryKind::Error, format!("{error:#}")));
-                  continue;
+                  break;
                 }
-              },
-              None => Vec::new(),
-            };
-            let local_agent = agent.take().unwrap();
-            let mut local_session = session.take().unwrap();
-            let (run_controller, mut inbox) = run_control();
-            controller = Some(run_controller);
-            let run_options = options.clone();
-            state.begin_run();
-            task = Some(tokio::spawn(async move {
-              let result = if images.is_empty() {
-                local_agent
-                  .run_controlled(&mut local_session, expanded, run_options, &mut inbox)
-                  .await
-              } else {
-                local_agent
-                  .run_controlled_with_images(
-                    &mut local_session,
-                    expanded,
-                    images,
-                    run_options,
-                    &mut inbox,
-                  )
-                  .await
-              };
-              (local_agent, local_session, result)
-            }));
+              }
+            }
+            if images.len() < paths.len() {
+              continue;
+            }
+            task = Some(launch(
+              &mut agent,
+              &mut session,
+              &mut controller,
+              &options,
+              &mut state,
+              expanded,
+              images,
+            ));
           }
         }
       }
       _ => {}
     }
   }
+}
+
+/// Starts a run on the prompt. The run holds the agent and the session until it returns them.
+fn launch(
+  agent: &mut Option<Agent<RuntimeProvider>>,
+  session: &mut Option<Session>,
+  controller: &mut Option<ainz::RunController>,
+  options: &ainz::RunOptions,
+  state: &mut ChatState,
+  prompt: String,
+  images: Vec<Image>,
+) -> RunTask {
+  let local_agent = agent.take().unwrap();
+  let mut local_session = session.take().unwrap();
+  let (run_controller, mut inbox) = run_control();
+  *controller = Some(run_controller);
+  let run_options = options.clone();
+  state.begin_run();
+  tokio::spawn(async move {
+    let result = if images.is_empty() {
+      local_agent
+        .run_controlled(&mut local_session, prompt, run_options, &mut inbox)
+        .await
+    } else {
+      local_agent
+        .run_controlled_with_images(&mut local_session, prompt, images, run_options, &mut inbox)
+        .await
+    };
+    (local_agent, local_session, result)
+  })
+}
+
+/// The palette with the commands scripts define, which /source may have changed.
+fn scripted_commands(commands: &mut Vec<SlashCommand>) {
+  commands.retain(|command| command.source != "lua");
+  for (name, desc) in lua::commands() {
+    if commands.iter().any(|command| command.name == name) {
+      continue;
+    }
+    let description = match desc.is_empty() {
+      true => "A command from your scripts".to_string(),
+      false => desc,
+    };
+    commands.push(SlashCommand::new(
+      &name,
+      format!("/{name} [ARGS]"),
+      description,
+      "lua",
+    ));
+  }
+  commands.sort_by(|left, right| left.name.cmp(&right.name));
 }
 
 async fn join(task: Option<&mut RunTask>) -> Result<RunOutput> {
@@ -1997,6 +2267,7 @@ async fn remember(state: &mut ChatState, config: &Config) {
 
 enum CommandResult {
   Improve(String),
+  Goal(String),
   Quit,
   Configure,
   Settings,
@@ -2028,6 +2299,8 @@ fn command(
   let input = input.trim();
   match input {
     "/improve" => Ok(CommandResult::Improve(String::new())),
+    "/goal" => Ok(CommandResult::Goal(String::new())),
+    input if input.starts_with("/goal ") => Ok(CommandResult::Goal(input[6..].trim().into())),
     input if input.starts_with("/improve ") => Ok(CommandResult::Improve(input[9..].trim().into())),
     "/exit" | "/quit" => Ok(CommandResult::Quit),
     "/model" | "/provider" => Ok(CommandResult::Configure),
@@ -2161,6 +2434,7 @@ fn command(
            y n a      allow, refuse, or keep the answer at a permission prompt\n\
            ctrl+a/e   line start/end         ctrl+w       delete word\n\
            ctrl+k     cut after cursor       alt+←/→      move a word\n\
+           ctrl+v     attach the clipboard's image; drag image files in to attach them\n\
            wheel      scroll the transcript\n\
            ctrl+end   latest output          shift+↑/↓    scroll a line\n\
            ctrl+home  oldest output\n\
@@ -2381,10 +2655,18 @@ fn apply_event(state: &mut ChatState, message: UiEvent) {
       None => state.approval = Some(approval),
     },
     UiEvent::Agent(event) => apply_agent_event(state, None, event),
+    UiEvent::Picture(Ok(path)) => state.attach(path),
+    UiEvent::Picture(Err(reason)) => state.primary.entries.push(Entry::new(
+      EntryKind::Error,
+      format!("nothing attached: {reason}"),
+    )),
   }
 }
 
 fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Event) {
+  if session_id.is_none() {
+    lua::event(&event);
+  }
   match event {
     Event::SubagentEvent { session_id, event } => {
       apply_agent_event(state, Some(&session_id), *event);
@@ -2534,10 +2816,13 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       .view_mut(session_id)
       .entries
       .push(Entry::new(EntryKind::Error, message)),
-    Event::Notice { message } => state
-      .view_mut(session_id)
-      .entries
-      .push(Entry::new(EntryKind::System, message)),
+    // text after a notice, such as a reply asked for again, starts its own message below it
+    Event::Notice { message } => {
+      let view = state.view_mut(session_id);
+      view.finish_message();
+      view.entries.push(Entry::new(EntryKind::System, message));
+    }
+    Event::Context { used, limit } => state.view_mut(session_id).context = Some((used, limit)),
     Event::TurnEnd { usage } => {
       let view = state.view_mut(session_id);
       view.usage.input_tokens += usage.input_tokens;
@@ -2614,6 +2899,7 @@ fn render(
   workspace: &std::path::Path,
   commands: &[SlashCommand],
 ) {
+  state.size.set((frame.area().width, frame.area().height));
   let status_rows = if config.ui.status_line.as_ref().is_some_and(Vec::is_empty) {
     0
   } else {
@@ -2649,18 +2935,44 @@ fn render(
     Constraint::Length(prompt_rows),
   ])
   .areas(frame.area());
-  title::render(frame, header, state, session_id, workspace);
-  let transcript = if state.roster && body.width >= 72 {
-    let width = match state.roster_source {
-      RosterSource::Local => 24,
-      RosterSource::Mesh => 34,
-    };
-    let [transcript, roster] = Layout::horizontal([Constraint::Min(30), Constraint::Length(width)])
+  // a script may draw the topic line itself
+  match lua::script().and_then(|script| script.topic()) {
+    Some(line) => frame.render_widget(
+      Paragraph::new(lua::styled(&line, Style::default().fg(INK))),
+      header,
+    ),
+    None => title::render(frame, header, state, session_id, workspace),
+  }
+  // columns a script opened sit either side of the transcript; the roster shares the right
+  let (left, right) = lua::panels(body.width);
+  let body = match left.is_empty() {
+    true => body,
+    false => {
+      let [column, rest] =
+        Layout::horizontal([Constraint::Length(lua::column(&left)), Constraint::Min(30)])
+          .spacing(1)
+          .areas(body);
+      lua::render_column(frame, column, &left, false);
+      rest
+    }
+  };
+  let roster = state.roster && body.width >= 72;
+  let transcript = if roster || !right.is_empty() {
+    let width = match (roster, state.roster_source) {
+      (false, _) => 0,
+      (true, RosterSource::Local) => 24,
+      (true, RosterSource::Mesh) => 34,
+    }
+    .max(lua::column(&right));
+    let [transcript, column] = Layout::horizontal([Constraint::Min(30), Constraint::Length(width)])
       .spacing(1)
       .areas(body);
-    match state.roster_source {
-      RosterSource::Local => render_roster(frame, roster, state),
-      RosterSource::Mesh => render_mesh_roster(frame, roster, state),
+    let rest = lua::render_column(frame, column, &right, roster);
+    if roster {
+      match state.roster_source {
+        RosterSource::Local => render_roster(frame, rest, state),
+        RosterSource::Mesh => render_mesh_roster(frame, rest, state),
+      }
     }
     transcript
   } else {
@@ -3229,46 +3541,92 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       format!(" │ todo {done}/{total}")
     }
   };
+  // what the last request took of the window, which is what compaction is waiting on
+  let context = match view.context {
+    Some((used, limit)) if limit > 0 => format!(
+      "ctx {}% of {}",
+      (used * 100 / limit).min(100),
+      compact_count(limit as u64)
+    ),
+    _ => format!("ctx {}", compact_count(config.context_tokens as u64)),
+  };
   let attention = match state.attention {
     (0, 0, 0) => String::new(),
     (approval, failed, done) => format!("attention {approval} ask / {failed} failed / {done} done"),
   };
+  use ainz::config::StatusItem;
+  let builtin = |item: StatusItem| -> String {
+    match item {
+      StatusItem::Provider => provider.into(),
+      StatusItem::Model => model.clone(),
+      StatusItem::Mode => permissions.into(),
+      StatusItem::Memory => config.memory.backend.label().into(),
+      StatusItem::Tokens => format!("Σ{total} tok"),
+      StatusItem::InputTokens => format!("in {input}"),
+      StatusItem::OutputTokens => format!("out {output}"),
+      StatusItem::Context => context.clone(),
+      StatusItem::Todos => plan.trim_start_matches(" │ ").into(),
+      StatusItem::Agents => format!("agents {running}/{total_agents}"),
+      StatusItem::Workspace => state
+        .workspace
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned(),
+      StatusItem::Session => state.session_name.clone().unwrap_or_default(),
+      StatusItem::Activity => if state.approval.is_some() {
+        "needs approval"
+      } else if state.busy() {
+        "running"
+      } else {
+        "ready"
+      }
+      .into(),
+      StatusItem::Attention => attention.clone(),
+      StatusItem::Branch => state.branch.clone().unwrap_or_default(),
+    }
+  };
+  let bar = Style::default()
+    .fg(Color::White)
+    .bg(BLUE)
+    .add_modifier(Modifier::BOLD);
+  // a script may draw the whole bar, or arrange its own items among the built-in ones the way
+  // an irssi statusbar does
+  if let Some(script) = lua::script() {
+    if let Some(line) = script.statusline() {
+      frame.render_widget(Paragraph::new(lua::styled(&line, bar)).style(bar), area);
+      return;
+    }
+    if let Some(names) = script.bar() {
+      let mut spans = vec![Span::styled(" ", bar)];
+      let mut first = true;
+      for name in names {
+        let line = match script.item(&name) {
+          Some(line) => lua::styled(&line, bar),
+          None => match StatusItem::parse(&name).map(&builtin) {
+            Some(text) => Line::from(Span::styled(text, bar)),
+            None => continue,
+          },
+        };
+        if line.width() == 0 {
+          continue;
+        }
+        if !first {
+          spans.push(Span::styled(" │ ", bar));
+        }
+        first = false;
+        spans.extend(line.spans);
+      }
+      spans.push(Span::styled(" ", bar));
+      frame.render_widget(Paragraph::new(Line::from(spans)).style(bar), area);
+      return;
+    }
+  }
   let text = if let Some(items) = &config.ui.status_line {
-    use ainz::config::StatusItem;
     let fields: Vec<String> = items
       .iter()
       .filter_map(|item| {
-        let text = match item {
-          StatusItem::Provider => provider.into(),
-          StatusItem::Model => model.clone(),
-          StatusItem::Mode => permissions.into(),
-          StatusItem::Memory => config.memory.backend.label().into(),
-          StatusItem::Tokens => format!("Σ{total} tok"),
-          StatusItem::InputTokens => format!("in {input}"),
-          StatusItem::OutputTokens => format!("out {output}"),
-          StatusItem::Context => {
-            format!("limit {} tok", compact_count(config.context_tokens as u64))
-          }
-          StatusItem::Todos => plan.trim_start_matches(" │ ").into(),
-          StatusItem::Agents => format!("agents {running}/{total_agents}"),
-          StatusItem::Workspace => state
-            .workspace
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-          StatusItem::Session => state.session_name.clone().unwrap_or_default(),
-          StatusItem::Activity => if state.approval.is_some() {
-            "needs approval"
-          } else if state.busy() {
-            "running"
-          } else {
-            "ready"
-          }
-          .into(),
-          StatusItem::Attention => attention.clone(),
-          StatusItem::Branch => state.branch.clone().unwrap_or_default(),
-        };
+        let text = builtin(*item);
         (!text.is_empty()).then_some(text)
       })
       .collect();
@@ -3278,7 +3636,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   } else if area.width >= 108 {
     format!(
       " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
-       {total}{cost} │ agents {running}/{total_agents}{plan} │ {} local · {} mesh ",
+       {total}{cost} │ {context} │ agents {running}/{total_agents}{plan} │ {} local · {} mesh ",
       ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Roster),
       ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::MeshRoster)
     )
@@ -3290,15 +3648,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
   } else {
     format!(" {} │ Σ{total} tok ", config.model)
   };
-  frame.render_widget(
-    Paragraph::new(text).style(
-      Style::default()
-        .fg(Color::White)
-        .bg(BLUE)
-        .add_modifier(Modifier::BOLD),
-    ),
-    area,
-  );
+  frame.render_widget(Paragraph::new(text).style(bar), area);
 }
 
 // what the call is actually doing, the way the coding agents put it: shell(git status).
@@ -3321,16 +3671,6 @@ fn watch_update(config: &Config) -> Option<tokio::sync::mpsc::Receiver<String>> 
 }
 
 /// A pasted path to an image, however the terminal spelled it: quoted, escaped, or a file URL.
-fn image_path(text: &str) -> Option<PathBuf> {
-  const KINDS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
-  let text = text.trim().trim_matches(['"', '\'']);
-  let text = text.strip_prefix("file://").unwrap_or(text);
-  let cleaned = text.replace("\\ ", " ");
-  let path = PathBuf::from(&cleaned);
-  let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-  (KINDS.contains(&extension.as_str()) && path.is_file()).then_some(path)
-}
-
 fn approval_rule(approval: &Approval) -> String {
   ainz::PermissionRules::rule_for(
     &approval.call.name,
@@ -3673,14 +4013,15 @@ fn render_input(frame: &mut Frame, area: Rect, state: &ChatState) {
     return;
   }
   state.prompt_area.set(area);
-  if let Some(path) = &state.pending_image {
-    let name = path
-      .file_name()
-      .map(|name| name.to_string_lossy().to_string())
-      .unwrap_or_default();
+  let pictures = state
+    .attached
+    .iter()
+    .filter(|(number, _)| state.input.as_str().contains(&attach::token(*number)))
+    .count();
+  if pictures > 0 {
     frame.render_widget(
       Paragraph::new(Line::styled(
-        format!(" 🖼 {name}"),
+        format!(" 🖼 {pictures}"),
         Style::default().fg(MAGENTA),
       ))
       .alignment(Alignment::Right),

@@ -35,6 +35,7 @@ impl ChatProvider for Provider {
       });
     }
     Ok(ProviderReply {
+      truncated: false,
       message,
       usage: Default::default(),
     })

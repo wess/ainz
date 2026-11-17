@@ -55,6 +55,7 @@ impl ChatProvider for Window {
       .as_deref()
       .is_some_and(|text| text.starts_with("Summarize the session"));
     Ok(ProviderReply {
+      truncated: false,
       message: Message::text(
         Role::Assistant,
         if summarising {

@@ -107,6 +107,8 @@ class Terminal:
                     TERM="xterm-256color",
                     NO_COLOR="",
                     AINZ_CONFIG=os.path.join(root, config),
+                    # a real ~/.config/ainz/init.lua must never run under a check
+                    XDG_CONFIG_HOME=os.path.join(root, ".xdg"),
                     PATH=os.path.join(root, ".fixtures") + os.pathsep + os.environ.get("PATH", ""),
                 ),
             )
@@ -418,24 +420,87 @@ def check_new_surface(binary, root):
         term.body()[-300:],
     )
 
-    # a pasted image path attaches rather than typing itself into the line
+    # a pasted image path attaches as a placeholder rather than typing itself into the line
     picture = os.path.join(root, "shot.png")
     open(picture, "wb").write(b"\x89PNG\r\n\x1a\n")
     term.send(f"{ESC}[200~{picture}{ESC}[201~", settle=0.8)
-    check("a pasted image attaches", "attached" in term.body(), term.body()[-300:])
+    check("a pasted image attaches", "[Image #1]" in term.prompt(), term.prompt())
     check("and does not land in the line", picture not in term.prompt(), term.prompt())
-    check("the prompt shows it", "shot.png" in term.body(), term.body()[-200:])
+    check("the prompt counts it", "🖼 1" in term.prompt(), term.prompt())
 
     # an ordinary paste is still text
     term.send(f"{ESC}[200~just words{ESC}[201~", settle=0.6)
     # the attachment marker sits at the right of the same row, so this is a contains
-    check("a text paste still types", "> just words" in term.prompt(), term.prompt())
+    check("a text paste still types", "[Image #1] just words" in term.prompt(), term.prompt())
+
+    # one backspace at the end of a placeholder takes all of it, and the picture with it
     term.send(CTRL_U + CTRL_K)
+    term.send(f"{ESC}[200~{picture}{ESC}[201~", settle=0.6)
+    term.send("\x7f\x7f", settle=0.6)
+    check("backspace removes a placeholder whole", "Image" not in term.prompt(), term.prompt())
+    check("and the picture goes with it", "🖼" not in term.prompt(), term.prompt())
+    term.send(CTRL_U + CTRL_K)
+
+    # a goal keeps taking turns on its own; the fake provider never says it is met, so it runs
+    # to the ceiling and pauses there rather than for ever
+    term.send("/goal finish the thing" + ENTER, settle=1.0)
+    term.pump(8.0)
+    body = term.body()
+    check("a goal is set and started", "goal: finish the thing" in body, body[-400:])
+    check("it takes the next turns by itself", "goal · turn 25 of 25" in body, body[-400:])
+    check("and pauses at its ceiling", "goal paused after 25 turns" in body, body[-400:])
+    term.send("/goal clear" + ENTER, settle=0.8)
+    check("clearing it says so", "goal cleared" in term.body(), term.body()[-300:])
 
     term.send("/help" + ENTER, settle=1.0)
     body = term.body()
     for command in ["/rules", "/vim", "/inline"]:
         check(f"{command} is in the help", command in body, body[-500:])
+    term.close()
+
+
+INIT = """\
+ainz.opt.ui.roster_visible = false
+local left = ainz.panel.open({ side = "left", width = 20, title = "notes" })
+left:set({ "%Gleft panel%n", "second line" })
+local log = ainz.panel.open({ side = "right", width = 22, title = "log", follow = true })
+for i = 1, 60 do log:append("entry " .. i) end
+ainz.statusbar.item("hello", function(s) return "hi " .. s.model end)
+ainz.statusbar.set({ "hello", "mode" })
+ainz.topic.render(function(s) return "%_#ainz%_ topic from lua · " .. s.mode end)
+ainz.command("shout", function(e) ainz.notify(e.args:upper()) end, { desc = "say it louder" })
+ainz.keymap.set("ctrl+g", function() ainz.notify("ctrl g pressed") end)
+ainz.on("turn_end", function(e) log:append(e.ok and "turn ok" or "turn failed") end)
+"""
+
+
+def check_scripts(binary, root):
+    """init.lua: options, a panel each side, an irssi-style bar, the topic, a command, a key."""
+    print("\nscripts")
+    home = os.path.join(root, "scripted")
+    os.makedirs(home)
+    open(os.path.join(home, "config.toml"), "w").write(CONFIG.format(inline="false"))
+    open(os.path.join(home, "init.lua"), "w").write(INIT)
+    term = Terminal(binary, home, "config.toml")
+    term.pump(6.0)
+    body = term.body()
+    rows = term.screen.display
+    check("a left panel is drawn", "left panel" in body and "notes" in body, body[:600])
+    check("a following panel shows its end", "entry 60" in body and "entry 1\n" not in body, body[:900])
+    check("an option set in init.lua applies", " agents " not in body, body[:600])
+    bar = next((row for row in rows if "hi test" in row), "")
+    check("the bar is the script's items", "hi test │ read-only" in bar, bar)
+    check("the topic is the script's", "topic from lua · read-only" in rows[0], rows[0])
+    term.send("/shout hello" + ENTER, settle=1.0)
+    check("a script's command runs", "HELLO" in term.body(), term.body()[-500:])
+    term.send("\x07", settle=0.8)
+    check("a script's keymap runs", "ctrl g pressed" in term.body(), term.body()[-500:])
+    term.send("/lua 1 + 2" + ENTER, settle=0.8)
+    check("/lua shows a value", any(row.strip().endswith("3") for row in term.screen.display), term.body()[-400:])
+    term.send("a question" + ENTER, settle=2.5)
+    check("an event reaches the script", "turn ok" in term.body(), term.body()[:900])
+    term.send("/source" + ENTER, settle=1.5)
+    check("/source runs the scripts again", "scripts sourced" in term.body(), term.body()[-400:])
     term.close()
 
 
@@ -451,6 +516,7 @@ def main():
         check_setup(binary, root)
         check_model_list(binary, root)
         check_new_surface(binary, root)
+        check_scripts(binary, root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\n{checks - len(failures)}/{checks} checks passed")

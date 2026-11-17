@@ -28,9 +28,11 @@ fn default_timeout() -> u64 {
 pub(super) async fn execute(context: &ToolContext, value: Value) -> Result<String> {
   let args: ShellArgs = serde_json::from_value(value)?;
   let timeout_ms = args.timeout_ms.clamp(100, 300_000);
-  let mut child = Command::new("sh")
+  let mut command = Command::new("sh");
+  command
     .args(["-c", &args.command])
-    .current_dir(&context.workspace)
+    .current_dir(&context.workspace);
+  let mut child = crate::sandbox::confine(command, &[])?
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())

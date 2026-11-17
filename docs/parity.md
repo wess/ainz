@@ -1,8 +1,9 @@
 # Solar CLI comparison
 
-Compared the local Solar CLI checkout at `/Users/wess/Desktop/solar/cli` on October 19, 2026.
-This compares general agent capabilities. CUI, Lyntris, HyperGiant gateway/team setup,
-enterprise machine policy, FIPS TLS, and enterprise auditing are outside Ainz's scope.
+Compared the local Solar CLI checkout at `/Users/wess/Desktop/solar/cli` on October 19, 2026,
+and again on November 17, 2026. This compares general agent capabilities. CUI, Lyntris,
+HyperGiant gateway/team setup, Jira tickets, enterprise machine policy, FIPS TLS, and
+enterprise auditing are outside Ainz's scope.
 
 Ainz keeps its BitchX/irssi interface: timestamped nick lines, hanging wraps, channel topics,
 blue status bar, guardian roster, and switchable agent buffers. Alignment means matching
@@ -15,11 +16,17 @@ capabilities under that interface.
 | Native Messages | Added streaming, native authentication, images, tool calls, signed/redacted thinking, and usage |
 | Native Responses | Added streaming/JSON replies, images, tools, reasoning effort, encrypted reasoning replay, and resumable output items |
 | Provider retry and recovery | Existing transient retries; added explicit fallback chains with per-profile models and isolated failed-attempt events |
+| Output limits | Added automatic continuation after a reply hits its limit (three in a row without progress pauses), a 32k Chat Completions cap with `max_output_tokens`, and a second request for a reply that broke off partway |
+| Context estimate | Added a bytes-per-token ratio learned from the provider's count and a `ctx` status field |
+| Headless Claude Code permissions | Added `--permission-prompt-tool stdio`: Claude's requests are decided by Ainz's rules, mode, and approval prompt |
 | Provider diagnostics | Existing discovery diagnostics; added `doctor --check-provider` with a 45-second timeout and no retry or fallback |
 | Workspace tools, plans, durable jobs | Existing; added shell commands for job start/list/status/output/stop |
 | Session trees, rewind, compaction, export | Existing; added named checkpoints and restore |
 | Detach, attach, session switching, attention, notifications | Existing |
-| Synchronous and background subagents | Existing; added named agent definitions with instructions, tool filters, model, permission, and turn limits |
+| Synchronous and background subagents | Existing; added named agent definitions with instructions, tool filters, model, permission, and turn limits; opt-in per-child model choice with `model_hints` |
+| Unattended objectives | Added `/goal` with a 25-turn ceiling |
+| Images on the prompt | Added `Ctrl+V` clipboard images, several dragged files, and `[Image #N]` placeholders |
+| OS sandbox | Added `AINZ_SANDBOX` (`workspace` or `strict`) using `sandbox-exec` or `bwrap`, without Solar's machine-policy floor |
 | Instructions, skills, templates, hooks, standing rules | Existing; Ainz retains its own hook and permission configuration format |
 | Local/Synapse memory, session search, proposed skills, mesh | Existing |
 | MCP stdio and Streamable HTTP | Existing; added remote-server CLI commands and remote launch-profile entries |
@@ -47,7 +54,9 @@ capabilities under that interface.
 
 ## Validation
 
-`tests/parity.rs` checks native requests, tool state after persistence, fallback event isolation,
+`tests/recovery.rs`, `tests/limit.rs`, `tests/bridge.rs`, and the sandbox tests (including a
+kernel check on macOS that writes outside the workspace and strict-mode connections are
+refused) cover the November additions. `tests/parity.rs` checks native requests, tool state after persistence, fallback event isolation,
 per-profile fallback models, named-agent discovery/tool restrictions, checkpoint behavior, and
 cost budgets. MCP's SSE and OAuth modules include local protocol tests. These do not prove
 access to a real cloud model or successful sign-in with a third-party service.

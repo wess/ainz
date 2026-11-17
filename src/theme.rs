@@ -74,6 +74,26 @@ impl Theme {
     Ok(theme)
   }
 
+  /// Changes one role's colour, as a script's `ainz.highlight` does.
+  pub fn set(&mut self, role: &str, color: Color) -> Result<()> {
+    let index = COLORS
+      .iter()
+      .position(|(name, _)| *name == role)
+      .with_context(|| {
+        let roles: Vec<&str> = COLORS.iter().map(|(name, _)| *name).collect();
+        format!(
+          "{role} is not a theme colour; use one of {}",
+          roles.join(", ")
+        )
+      })?;
+    self.colors[index] = color;
+    // the default theme is drawn as it is written; once a colour changes it has to be applied
+    if self.name == "default" {
+      self.name = "custom".into();
+    }
+    Ok(())
+  }
+
   pub fn color(&self, role: &str) -> Option<Color> {
     COLORS
       .iter()

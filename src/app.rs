@@ -18,7 +18,7 @@ use ainz::{
   learn::Teacher,
   memory::{MemoryStore, recalled_section},
   protocol::{Image, ToolCall},
-  run_control, subagent_tool, synapse,
+  run_control, subagent_tool_with_models, synapse,
   synapse::Synapse,
   tool::{Risk, ToolSet, builtins},
 };
@@ -201,7 +201,7 @@ pub(crate) async fn make_agent_parts(
       instructions.push_str(&format!("- {}\n", agent.summary()));
     }
   }
-  let options = RunOptions {
+  let mut options = RunOptions {
     instructions,
     memory_nudge: (config.memory.remember_on_compact && !memory.is_off()).then(|| {
       "The transcript above was just compacted. If anything you worked out in it is durable \
@@ -210,6 +210,19 @@ pub(crate) async fn make_agent_parts(
     }),
     ..RunOptions::from(config)
   };
+  // the person's own scripts: tools for the model, and a pre_tool check on every call,
+  // subagents' included
+  if let Some(script) = crate::scripting::current() {
+    for tool in script.tools() {
+      let name = tool.spec().name;
+      if let Err(error) = tools.insert(tool) {
+        events.emit(Event::Error {
+          message: format!("lua tool {name} was not added: {error:#}"),
+        });
+      }
+    }
+    options.hooks = options.hooks.clone().with_gate(script.gate());
+  }
   let child_provider = provider.clone();
   let child_tools = tools.clone();
   let child_workspace = workspace.to_path_buf();
@@ -225,15 +238,25 @@ pub(crate) async fn make_agent_parts(
       name,
       prompt,
       role,
+      model,
     } = request;
     let definition = role.as_deref().and_then(|role| agents.get(role)).cloned();
-    let provider = definition
-      .as_ref()
-      .and_then(|agent| agent.model.clone())
-      .map_or_else(
-        || child_provider.clone(),
-        |model| child_provider.with_model(model),
+    // a named type's model is part of what the type is, so a pick that disagrees is refused
+    // rather than quietly replaced
+    let pinned = definition.as_ref().and_then(|agent| agent.model.clone());
+    if let (Some(pinned), Some(asked)) = (&pinned, &model)
+      && pinned != asked
+    {
+      let error = anyhow::anyhow!(
+        "agent type {} uses model {pinned}; leave model out or pick {pinned}",
+        role.as_deref().unwrap_or_default()
       );
+      return Box::pin(async move { Err(error) });
+    }
+    let provider = pinned.or(model).map_or_else(
+      || child_provider.clone(),
+      |model| child_provider.with_model(model),
+    );
     let mut tools = child_tools.clone();
     let workspace = child_workspace.clone();
     let mut options = child_options.clone();
@@ -315,12 +338,39 @@ pub(crate) async fn make_agent_parts(
       })
     })
   });
-  tools.insert(subagent_tool(SubagentRegistry::new(subagents), child_mesh))?;
+  tools.insert(subagent_tool_with_models(
+    SubagentRegistry::new(subagents),
+    child_mesh,
+    subagent_models(config)?,
+  ))?;
   Ok((
     Agent::new(provider, tools, workspace.to_path_buf(), events, approver),
     options,
     mcp,
   ))
+}
+
+/// The models the agent may pick from for a subagent, each with what it is for. Off unless
+/// asked for, and nothing to pick from with only one model saved.
+fn subagent_models(config: &Config) -> Result<std::collections::BTreeMap<String, String>> {
+  if !config.subagent_models {
+    return Ok(Default::default());
+  }
+  let profile = config.active_provider()?;
+  let models: std::collections::BTreeMap<_, _> = profile
+    .models
+    .iter()
+    .chain(std::iter::once(&config.model))
+    .filter(|model| !model.trim().is_empty())
+    .map(|model| {
+      let hint = profile.model_hints.get(model).cloned().unwrap_or_default();
+      (model.clone(), hint)
+    })
+    .collect();
+  Ok(match models.len() {
+    0 | 1 => Default::default(),
+    _ => models,
+  })
 }
 
 pub async fn run_once(

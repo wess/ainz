@@ -351,6 +351,15 @@ pub struct ProviderConfig {
   pub output: ProcessOutput,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub models: Vec<String>,
+  /// What each saved model is good for and what it costs, in a few words, read by the agent
+  /// when it picks a model for a subagent.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub model_hints: BTreeMap<String, String>,
+  /// The most a chat-completions reply may run to, in tokens. A request that leaves it out
+  /// gets whatever the server picks, and a LiteLLM proxy in front of Claude picks 4,096; zero
+  /// sends none.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_output_tokens: Option<usize>,
 }
 
 fn default_api_key_env() -> String {
@@ -381,6 +390,8 @@ impl ProviderConfig {
       args: Vec::new(),
       output: ProcessOutput::Text,
       models: Vec::new(),
+      model_hints: BTreeMap::new(),
+      max_output_tokens: None,
     }
   }
 
@@ -399,6 +410,8 @@ impl ProviderConfig {
       args,
       output,
       models: Vec::new(),
+      model_hints: BTreeMap::new(),
+      max_output_tokens: None,
     }
   }
 
@@ -438,6 +451,9 @@ impl ProviderConfig {
       "codex",
       strings(&[
         "exec",
+        // Ainz has already chosen the workspace; codex refusing one that is not a git checkout
+        // would fail every turn in it
+        "--skip-git-repo-check",
         "--ephemeral",
         "--color",
         "never",
@@ -469,6 +485,8 @@ impl ProviderConfig {
         "{model}",
         "--permission-mode",
         "{permission}",
+        "--permission-prompt-tool",
+        "stdio",
       ]),
       ProcessOutput::StreamJson,
     )
@@ -492,6 +510,9 @@ impl ProviderConfig {
         || self.thinking_tokens > 128_000)
     {
       bail!("provider {name}: thinking_tokens requires Messages and a budget from 1024 to 128000");
+    }
+    if self.max_output_tokens.is_some() && self.wire_api != WireApi::Chat {
+      bail!("provider {name}: max_output_tokens applies to wire_api = chat");
     }
     if self.kind == ProviderKind::Process && self.wire_api != WireApi::Chat {
       bail!("provider {name}: wire_api is only supported for HTTP providers");
@@ -534,6 +555,8 @@ pub struct Config {
   /// turn gives up; other 4xx are never retried
   pub provider_retries: usize,
   pub providers: BTreeMap<String, ProviderConfig>,
+  /// Let the agent pick a model from the active provider's saved list for each subagent.
+  pub subagent_models: bool,
   pub max_steps: usize,
   pub budget_usd: Option<f64>,
   pub max_output_bytes: usize,
@@ -556,6 +579,10 @@ pub struct Config {
   // open is a decision about this run rather than a preference
   #[serde(skip)]
   pub yeet: bool,
+  /// The configuration as this session started using it, once init.lua and flags had their
+  /// say. A save writes only what changed since, so neither ends up in config.toml.
+  #[serde(skip)]
+  pub baseline: Option<serde_json::Value>,
 }
 
 impl Default for Config {
@@ -568,6 +595,7 @@ impl Default for Config {
       api_key_env: default_api_key_env(),
       provider_retries: 3,
       providers: BTreeMap::new(),
+      subagent_models: false,
       max_steps: 32,
       budget_usd: None,
       max_output_bytes: 64 * 1024,
@@ -584,6 +612,7 @@ impl Default for Config {
       hooks: BTreeMap::new(),
       mcp_config: None,
       yeet: false,
+      baseline: None,
     }
   }
 }
@@ -683,7 +712,44 @@ impl Config {
       "--permission-mode",
       "{permission}",
     ];
+    // the saved preset from before permission requests came back: a headless run in ask mode
+    // had nobody to ask, so it planned instead of working
+    const UNBRIDGED_CLAUDE: [&str; 12] = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--no-session-persistence",
+      "--model",
+      "{model}",
+      "--permission-mode",
+      "{permission}",
+    ];
+    // the saved codex preset from before it skipped the git check, which failed every turn in
+    // a workspace that is not a checkout
+    const GIT_ONLY_CODEX: [&str; 11] = [
+      "exec",
+      "--ephemeral",
+      "--color",
+      "never",
+      "--sandbox",
+      "{sandbox}",
+      "-C",
+      "{workspace}",
+      "--model",
+      "{model}",
+      "-",
+    ];
     for provider in self.providers.values_mut() {
+      if provider.kind == ProviderKind::Process
+        && provider.command.as_deref() == Some("codex")
+        && provider.args == GIT_ONLY_CODEX
+      {
+        provider.args = ProviderConfig::codex().args;
+      }
       if provider.kind == ProviderKind::Process
         && provider.command.as_deref() == Some("claude")
         && provider.output == ProcessOutput::JsonResult
@@ -702,7 +768,32 @@ impl Config {
       {
         provider.args = ProviderConfig::claude_code().args;
       }
+      if provider.kind == ProviderKind::Process
+        && provider.command.as_deref() == Some("claude")
+        && provider.output == ProcessOutput::StreamJson
+        && provider.args == UNBRIDGED_CLAUDE
+      {
+        provider.args = ProviderConfig::claude_code().args;
+      }
     }
+  }
+
+  /// From here on, a save writes only what changes after this point.
+  pub fn settle(&mut self) {
+    self.baseline = serde_json::to_value(&*self).ok();
+  }
+
+  /// Takes `next` as the session's configuration without making its differences something to
+  /// save: a script's options belong to the session, like the ones init.lua set at startup.
+  pub fn adopt(&mut self, next: Config) {
+    let baseline = self.baseline.take().map(|mut baseline| {
+      if let (Ok(before), Ok(after)) = (serde_json::to_value(&*self), serde_json::to_value(&next)) {
+        crate::overlay::carry(&mut baseline, &before, &after);
+      }
+      baseline
+    });
+    *self = next;
+    self.baseline = baseline;
   }
 
   pub async fn save(&self) -> Result<()> {
@@ -715,7 +806,20 @@ impl Config {
         .await
         .with_context(|| format!("create {}", parent.display()))?;
     }
-    let text = toml::to_string_pretty(self)?;
+    let text = match &self.baseline {
+      None => toml::to_string_pretty(self)?,
+      Some(baseline) => {
+        let on_disk = match tokio::fs::read_to_string(path).await {
+          Ok(text) => toml::from_str::<Config>(&text)
+            .with_context(|| format!("invalid configuration at {}", path.display()))?,
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+          Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        let mut tree = serde_json::to_value(&on_disk)?;
+        crate::overlay::carry(&mut tree, baseline, &serde_json::to_value(self)?);
+        toml::to_string_pretty(&serde_json::from_value::<Config>(tree)?)?
+      }
+    };
     tokio::fs::write(path, text)
       .await
       .with_context(|| format!("write {}", path.display()))
@@ -759,11 +863,6 @@ impl Config {
   }
 
   pub fn validate(&self) -> Result<()> {
-    if self.improve.enabled {
-      self.improve.validate()?;
-    }
-    #[cfg(feature = "cli")]
-    crate::keybind::validate(&self.ui.keybindings)?;
     if self.model.trim().is_empty() {
       bail!(
         "no model configured; use `ainz providers use NAME MODEL`, set AINZ_MODEL, or set model in {}",
@@ -779,6 +878,17 @@ impl Config {
         .with_context(|| format!("fallback provider {name} is not configured"))?;
       profile.validate(name)?;
     }
+    self.validate_options()
+  }
+
+  /// The checks that hold for any configuration, whatever provider it names: limits that make
+  /// sense on their own.
+  pub fn validate_options(&self) -> Result<()> {
+    if self.improve.enabled {
+      self.improve.validate()?;
+    }
+    #[cfg(feature = "cli")]
+    crate::keybind::validate(&self.ui.keybindings)?;
     if self
       .budget_usd
       .is_some_and(|budget| !budget.is_finite() || budget <= 0.0)

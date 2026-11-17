@@ -24,9 +24,9 @@ pub(super) async fn run_hook(
   let Some((program, args)) = def.command.split_first() else {
     bail!("hook command is empty");
   };
-  let mut child = Command::new(program)
-    .current_dir(workspace)
-    .args(args)
+  let mut command = Command::new(program);
+  command.current_dir(workspace).args(args);
+  let mut child = crate::sandbox::confine(command, &[])?
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())

@@ -121,6 +121,7 @@ async fn provider_sends_multimodal_content_parts() {
     vec![Image {
       url: "data:image/png;base64,AQID".into(),
       detail: Some("high".into()),
+      path: None,
     }],
   );
 
@@ -511,6 +512,7 @@ async fn process_provider_passes_a_fetchable_image_along() {
   let image = Image {
     url: "https://example.test/plot.png".into(),
     detail: None,
+    path: None,
   };
   let reply = cat_provider()
     .complete(
@@ -528,41 +530,30 @@ async fn process_provider_passes_a_fetchable_image_along() {
 }
 
 #[tokio::test]
-async fn process_provider_refuses_inline_image_data_instead_of_dropping_it() {
+async fn a_text_command_is_handed_an_inline_image_as_a_file() {
+  let folder = tempfile::tempdir().unwrap();
   let image = Image {
     url: "data:image/png;base64,AQID".into(),
     detail: None,
+    path: None,
   };
-  let error = cat_provider()
-    .complete(
-      &[&Message::user("what is in this", vec![image])],
-      &[],
-      &EventSink::default(),
-    )
-    .await
-    .unwrap_err();
-  assert!(format!("{error:#}").contains("cannot be sent"), "{error:#}");
-}
-
-#[tokio::test]
-async fn an_image_a_text_command_refused_does_not_fail_every_later_turn() {
-  let image = Image {
-    url: "data:image/png;base64,AQID".into(),
-    detail: None,
-  };
-  let earlier = Message::user("what is in this", vec![image]);
   let reply = cat_provider()
+    .with_images(folder.path().into())
     .complete(
-      &[&earlier, &Message::text(Role::User, "try this instead")],
+      &[
+        &Message::user("what is in this", vec![image]),
+        &Message::text(Role::User, "and this"),
+      ],
       &[],
       &EventSink::default(),
     )
     .await
     .unwrap();
   let content = reply.message.content.unwrap();
-  assert!(content.contains("try this instead"), "{content}");
-  assert!(content.contains("[image: not sent"), "{content}");
+  assert!(content.contains("[image file: "), "{content}");
   assert!(!content.contains("AQID"), "{content}");
+  let written: Vec<_> = std::fs::read_dir(folder.path()).unwrap().collect();
+  assert_eq!(written.len(), 1);
 }
 
 #[tokio::test]
@@ -583,6 +574,7 @@ async fn a_command_reading_stream_json_is_handed_the_image_itself() {
   let image = Image {
     url: "data:image/png;base64,AQID".into(),
     detail: None,
+    path: None,
   };
   let reply = provider
     .complete(

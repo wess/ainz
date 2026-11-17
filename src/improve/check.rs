@@ -39,10 +39,12 @@ pub(super) async fn check(
     "check timeout must be 1..=3600 seconds"
   );
   let started = std::time::Instant::now();
-  let mut child = Command::new("sh")
+  let mut shell = Command::new("sh");
+  shell
     .args(["-c", command])
     .current_dir(workspace)
-    .env("CARGO_TARGET_DIR", build)
+    .env("CARGO_TARGET_DIR", build);
+  let mut child = crate::sandbox::confine(shell, &[build.to_path_buf()])?
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())

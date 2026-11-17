@@ -56,6 +56,7 @@ fn reply(text: &str, tools: bool) -> Option<ProviderReply> {
       .collect();
   }
   Some(ProviderReply {
+    truncated: false,
     message,
     usage: Usage {
       input_tokens: 7,

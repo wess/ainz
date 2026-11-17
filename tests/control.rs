@@ -92,6 +92,7 @@ impl ChatProvider for Echo {
   ) -> anyhow::Result<ProviderReply> {
     tokio::time::sleep(Duration::from_millis(5)).await;
     Ok(ProviderReply {
+      truncated: false,
       message: Message::text(Role::Assistant, "done"),
       usage: Default::default(),
     })

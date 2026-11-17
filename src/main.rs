@@ -10,6 +10,7 @@ mod app;
 mod command;
 mod live;
 mod rpc_cli;
+mod scripting;
 mod tui;
 
 use command::{
@@ -59,6 +60,9 @@ struct Cli {
   /// Run wide open: every tool call is allowed without asking
   #[arg(long, global = true, alias = "yolo")]
   yeet: bool,
+  /// Start without init.lua and its plugins, the way `nvim --clean` does
+  #[arg(long, global = true)]
+  clean: bool,
   #[command(subcommand)]
   command: Option<Command>,
 }
@@ -225,6 +229,27 @@ async fn run() -> Result<()> {
     .unwrap_or(std::env::current_dir()?)
     .canonicalize()?;
   let mut config = Config::load().await?;
+  // a session's scripts run before the flags, so a flag still has the last word, as it does
+  // over init.lua in Neovim
+  let session = cli.print
+    || matches!(
+      &cli.command,
+      None | Some(Command::Ask { .. } | Command::Resume { .. })
+    );
+  if session {
+    scripting::start(&workspace, &mut config, cli.clean);
+    // an interactive session shows these in its buffer; anything else has only stderr
+    let headless = cli.print
+      || !matches!(
+        &cli.command,
+        None | Some(Command::Resume { prompt: None, .. })
+      );
+    if headless {
+      for note in scripting::take_notes() {
+        eprintln!("{note}");
+      }
+    }
+  }
   if let Some(model) = cli.model {
     config.model = model;
   }
@@ -249,6 +274,8 @@ async fn run() -> Result<()> {
     config.permissions = PermissionMode::Auto;
     config.yeet = true;
   }
+  // what scripts and flags changed is this session's; a save writes only what changes next
+  config.settle();
 
   if cli.print && cli.command.is_some() {
     anyhow::bail!("--print cannot be combined with a subcommand");

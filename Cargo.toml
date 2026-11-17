@@ -21,7 +21,7 @@ required-features = ["cli"]
 
 [features]
 default = ["cli", "lua", "wasm"]
-cli = ["dep:clap", "dep:crossterm", "dep:ratatui", "dep:termweave", "dep:unicode-width", "dep:notify"]
+cli = ["lua", "dep:clap", "dep:crossterm", "dep:ratatui", "dep:termweave", "dep:unicode-width", "dep:notify"]
 lua = ["dep:mlua"]
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
@@ -59,6 +59,7 @@ unicode-width = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3.21"
+tokio = { version = "1.47", features = ["test-util"] }
 
 [profile.release]
 lto = "thin"

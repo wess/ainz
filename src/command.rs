@@ -199,6 +199,8 @@ pub enum SynapseCommand {
   },
 }
 
+// parsed once from the command line, so the size of its largest variant costs nothing
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ProviderCommand {
   Fallback {
@@ -228,6 +230,9 @@ pub enum ProviderCommand {
     reasoning_effort: Option<String>,
     #[arg(long)]
     thinking_tokens: Option<usize>,
+    /// The most a chat-completions reply may run to, in tokens; 0 sends no limit
+    #[arg(long)]
+    max_output_tokens: Option<usize>,
     #[arg(long = "known-model")]
     models: Vec<String>,
     #[arg(long)]
@@ -919,6 +924,7 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
       model,
       reasoning_effort,
       thinking_tokens,
+      max_output_tokens,
       models,
       json_result,
       stream_json,
@@ -965,6 +971,7 @@ pub async fn providers(config: &mut Config, command: ProviderCommand) -> Result<
       if let Some(tokens) = thinking_tokens {
         profile.thinking_tokens = tokens;
       }
+      profile.max_output_tokens = max_output_tokens;
       profile.models.extend(models);
       profile.models.sort();
       profile.models.dedup();
@@ -1221,6 +1228,13 @@ pub async fn doctor(workspace: &Path, config: &Config) -> Result<()> {
     if config.yeet { " · yeet" } else { "" }
   );
   println!("sessions   {}", SessionStore::default_path()?.display());
+  println!(
+    "sandbox    {} (set with {})",
+    ainz::sandbox::policy()
+      .map(|policy| policy.label().to_string())
+      .unwrap_or_else(|error| format!("unusable: {error:#}")),
+    ainz::sandbox::VARIABLE
+  );
   let catalog = PluginCatalog::discover(workspace).await?;
   println!(
     "plugins    {} discovered, {} approved",
