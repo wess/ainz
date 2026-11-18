@@ -1,8 +1,13 @@
 # Ainz documentation
 
-Start with [installation](install.md), the [web tutorial](https://wess.io/ainz/tutorial/), or the
+Start with [installation](install.md), the [web tutorials](https://wess.io/ainz/tutorial/), or the
 [terminal interface](interface.md). The [web manual](https://wess.io/ainz/docs/) collects the main
 commands and configuration in one place.
+
+The tutorials cover [getting started](https://wess.io/ainz/tutorial/gettingstarted/),
+[customizing Ainz](https://wess.io/ainz/tutorial/customizing/),
+[writing plugins](https://wess.io/ainz/tutorial/plugins/), and
+[advanced operation](https://wess.io/ainz/tutorial/advanced/).
 
 | Guide | Covers |
 | --- | --- |

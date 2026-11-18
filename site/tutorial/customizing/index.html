@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Customize Ainz themes, mastheads, shortcuts, status fields, and Lua configuration."><title>Customizing Ainz</title><link rel="canonical" href="https://wess.io/ainz/tutorial/customizing/"><link rel="stylesheet" href="../../assets/site.css"><link rel="icon" type="image/svg+xml" sizes="any" href="../../assets/favicon.svg"></head>
+<body><a class="skip" href="#main">skip to content</a><div class="shell">
+<div class="topline"><strong>AINZ :: CUSTOMIZING</strong><nav aria-label="Main navigation"><a href="../../">Home</a><a aria-current="page" href="../">Tutorials</a><a href="../../docs/">Docs</a><a href="../../masthead/">Masthead</a><a href="../../theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+<main id="main" class="content"><header><p class="eyebrow">Tutorial 2 · your terminal</p><h1>Make the harness fit the way you work.</h1><p class="lede">Use the built-in designers for appearance, settings for durable preferences, and Lua for behavior that belongs only to your setup.</p></header>
+<div class="doc">
+<section class="step"><div class="stepnum">01</div><div><h2>Set durable preferences</h2><pre><code>/settings
+/statusline
+/vim</code></pre><p>Settings groups provider, interface, session, key, and memory choices. Changes made there are saved to <code>config.toml</code>. <code>/statusline</code> chooses and orders the built-in fields; <code>/vim</code> switches prompt editing modes.</p></div></section>
+<section class="step"><div class="stepnum">02</div><div><h2>Build a theme</h2><p>Open the <a href="../../theme/">Theme Designer</a>, tune each semantic role against the live transcript preview, and copy its install command. Back in Ainz:</p><pre><code>/themes
+/theme NAME</code></pre><p>Themes are plain TOML. Ainz discovers a newly installed file without restarting, and reports malformed roles in <code>/themes</code>.</p></div></section>
+<section class="step"><div class="stepnum">03</div><div><h2>Draw a masthead</h2><p>Use <a href="../../masthead/">Masthead Studio</a> for ANSI text or half-block pixel art. Install the result globally or in the current project, then select it:</p><pre><code>/headers
+/header NAME</code></pre><p>Headers and themes stay separate, so palette changes do not recolor ANSI artwork that deliberately chose its own colors.</p></div></section>
+<section class="step"><div class="stepnum">04</div><div><h2>Create an init.lua</h2><p>Put <code>init.lua</code> beside <code>config.toml</code>. On macOS that is normally <code>~/Library/Application Support/ainz/</code>; on Linux it is <code>~/.config/ainz/</code>.</p><pre><code>ainz.opt.ui.vim = true
+ainz.opt.max_steps = 48
+
+ainz.keymap.set("ctrl+g", "/goal continue", { desc = "continue goal" })
+
+ainz.command("review", function(e)
+  ainz.send("Review the current changes. " .. e.args)
+end, { desc = "review this checkout" })</code></pre><p>Run <code>/source</code> after editing. <code>ainz --clean</code> starts without scripts when you need to isolate a configuration problem.</p></div></section>
+<section class="step"><div class="stepnum">05</div><div><h2>Shape the live screen</h2><pre><code>ainz.statusbar.item("clock", function()
+  return "%Y" .. os.date("%H:%M") .. "%n"
+end)
+ainz.statusbar.set({ "clock", "model", "mode", "context" })
+
+local log = ainz.panel.open({ side = "right", title = "tools", follow = true })
+ainz.on("tool_start", function(call) log:append(call.name) end)</code></pre><p>Status items and panels update from the running session. The color codes are the same irssi-style codes used throughout Ainz.</p></div></section>
+<section class="step"><div class="stepnum">06</div><div><h2>Share project configuration safely</h2><p>A repository may include <code>.ainz/init.lua</code>. It does not execute merely because the project was cloned.</p><pre><code>/trust
+/source</code></pre><p><code>/trust</code> records the script's current content. Any edit makes it untrusted again. Keep personal configuration in the user config directory and commit only behavior the whole project needs.</p></div></section>
+<div class="nextlesson"><span>Next path</span><a href="../plugins/">Package a tool as an approved plugin</a></div>
+</div></main><div class="statusline"><span>customizing</span><span>6 steps</span><span>complete</span></div><footer><span>Ainz 0.17.0</span><span><a href="../../docs/#lua">Lua reference</a></span></footer></div></body></html>

@@ -1,0 +1,35 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Use Ainz goals, recovery, sandboxes, named agents, automation, and persistent control surfaces."><title>Advanced Ainz features and usage</title><link rel="canonical" href="https://wess.io/ainz/tutorial/advanced/"><link rel="stylesheet" href="../../assets/site.css"><link rel="icon" type="image/svg+xml" sizes="any" href="../../assets/favicon.svg"></head>
+<body><a class="skip" href="#main">skip to content</a><div class="shell">
+<div class="topline"><strong>AINZ :: ADVANCED</strong><nav aria-label="Main navigation"><a href="../../">Home</a><a aria-current="page" href="../">Tutorials</a><a href="../../docs/">Docs</a><a href="../../masthead/">Masthead</a><a href="../../theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+<main id="main" class="content"><header><p class="eyebrow">Tutorial 4 · sustained operation</p><h1>Keep long work bounded and recoverable.</h1><p class="lede">Combine goals, session branches, command confinement, specialized children, hooks, and noninteractive control without giving up visible boundaries.</p></header>
+<div class="doc">
+<section class="step"><div class="stepnum">01</div><div><h2>Run toward an explicit goal</h2><pre><code>/goal make the focused test suite pass
+/goal continue</code></pre><p>A goal continues across turns until the model marks it complete, it reaches 25 turns, or you type. Use the plan and transcript as checkpoints; a goal is persistence, not permission to widen the task.</p></div></section>
+<section class="step"><div class="stepnum">02</div><div><h2>Recover instead of restarting</h2><pre><code>ainz sessions --search "sandbox failure"
+ainz resume SESSION_ID
+ainz resume SESSION_ID --at NODE_ID "try the smaller fix"</code></pre><p>Every completed turn is saved. Resume the active path after interruption, or branch from an earlier node to try another approach while preserving the original work.</p></div></section>
+<section class="step"><div class="stepnum">03</div><div><h2>Confine commands</h2><pre><code>AINZ_SANDBOX=workspace ainz
+AINZ_SANDBOX=strict ainz
+ainz doctor</code></pre><p><code>workspace</code> keeps command writes inside the workspace and temporary directories. <code>strict</code> also cuts network access. Reads are not confined, and builds that need caches outside the workspace may fail. If Ainz cannot provide the requested boundary, it refuses the command instead of silently running it unconfined.</p></div></section>
+<section class="step"><div class="stepnum">04</div><div><h2>Delegate to a named agent</h2><p>Create <code>.ainz/agents/reviewer.md</code>:</p><pre><code>---
+name: reviewer
+description: Review changes without modifying the workspace
+tools: read, list, search
+disallowedTools: shell
+permissionMode: read-only
+maxTurns: 8
+---
+Review the implementation and tests. Report concrete bugs with file references.</code></pre><p>Run <code>ainz agents</code> to confirm discovery. A child cannot widen its parent's permissions or turn limit, and keeps its own switchable buffer and saved session.</p></div></section>
+<section class="step"><div class="stepnum">05</div><div><h2>Put policy before execution</h2><pre><code>-- init.lua
+ainz.on("pre_tool", function(call)
+  if call.name == "shell" and call.subject:find("git push", 1, true) then
+    return false, "pushing is reserved for the operator"
+  end
+end)</code></pre><p>A Lua <code>pre_tool</code> handler runs in every permission mode and for subagents. For repository-owned checks, a process hook can receive the same event as JSON and block by exiting non-zero.</p></div></section>
+<section class="step"><div class="stepnum">06</div><div><h2>Use a persistent control surface</h2><pre><code>ainz ask --json "summarize this workspace"
+ainz rpc --permissions auto</code></pre><p>JSON event mode fits one-shot automation. RPC keeps one initialized session and tool catalog alive while a host sends <code>prompt</code>, <code>steer</code>, <code>cancel</code>, <code>state</code>, and <code>save</code> requests. Neither surface opens an approval prompt, so grant <code>auto</code> only when the host is meant to mutate the workspace, or cover narrower calls with standing rules.</p></div></section>
+<section class="step"><div class="stepnum">07</div><div><h2>Connect memory and improvement carefully</h2><pre><code>ainz synapse connect --mesh
+/improve on
+/improve</code></pre><p>Synapse can share durable memory, guidance, skills, and the agent roster across tools. Automatic improvement is opt-in: it proposes a harness change from saved runs, checks source and behavior in an isolated worktree, then waits for review before installation. Treat a proposal as code review, not as an update notification.</p></div></section>
+<div class="nextlesson"><span>Reference</span><a href="../../docs/">Open the full operator's manual</a></div>
+</div></main><div class="statusline"><span>advanced</span><span>7 steps</span><span>complete</span></div><footer><span>Ainz 0.17.0</span><span><a href="../../docs/#security">security model</a></span></footer></div></body></html>

@@ -30,8 +30,9 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 Release downloads cover Apple Silicon macOS and x86_64 and arm64 Linux. The
 `search` tool shells out to [ripgrep](https://github.com/BurntSushi/ripgrep), so install `rg`
 as well. `ainz update` moves to the latest release, and the interface checks for one daily. See [`docs/install.md`](docs/install.md) for pinned versions, custom install
-directories, Cargo, and uninstalling. The [documentation index](docs/readme.md) lists every guide. The project site has a
-[tutorial](https://wess.io/ainz/tutorial/) and [reference manual](https://wess.io/ainz/docs/).
+directories, Cargo, and uninstalling. The [documentation index](docs/readme.md) lists every guide. The project site has
+[tutorials](https://wess.io/ainz/tutorial/) for first use, customization, plugins, and advanced
+operation, plus a [reference manual](https://wess.io/ainz/docs/).
 
 Ainz was previously called AgentX. On first launch it carries forward the configuration and MCP
 profile from the old user directory, and it keeps discovering sessions, headers, prompts, skills,

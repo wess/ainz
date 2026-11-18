@@ -43,3 +43,18 @@ test("designer modules reference existing controls", async () => {
     }
   }
 });
+
+test("tutorial paths are published and stamped with the package version", async () => {
+  const cargo = await Bun.file("Cargo.toml").text();
+  const version = cargo.match(/^version = "([^"]+)"/m)?.[1];
+  const paths = ["gettingstarted", "customizing", "plugins", "advanced"];
+  const hub = await Bun.file("site/tutorial/index.html").text();
+
+  expect(version).toBeTruthy();
+  for (const path of paths) {
+    expect(hub.includes(`href="${path}/"`), `tutorial hub: ${path}`).toBe(true);
+    const page = await Bun.file(`site/tutorial/${path}/index.html`).text();
+    expect(page.includes(`Ainz ${version}`), `${path}: release version`).toBe(true);
+    expect(page.includes(">Tutorials</a>"), `${path}: tutorial navigation`).toBe(true);
+  }
+});

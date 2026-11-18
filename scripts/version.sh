@@ -10,7 +10,15 @@ version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
   exit 1
 }
 
-for file in docs/install.md site/index.html site/docs/index.html site/tutorial/index.html; do
+for file in \
+  docs/install.md \
+  site/index.html \
+  site/docs/index.html \
+  site/tutorial/index.html \
+  site/tutorial/gettingstarted/index.html \
+  site/tutorial/customizing/index.html \
+  site/tutorial/plugins/index.html \
+  site/tutorial/advanced/index.html; do
   sed -i.bak -E \
     -e "s|--tag v[0-9]+\.[0-9]+\.[0-9]+|--tag v${version}|g" \
     -e "s|AINZ [0-9]+\.[0-9]+\.[0-9]+|AINZ ${version}|g" \

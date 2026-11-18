@@ -62,5 +62,5 @@ files. Confirm the Pages workflow succeeds and check the live designer pages aft
 `ainz.sh` and `www.ainz.sh` deploy separately to gohan. Updating GitHub Pages does not update
 those domains. From `~/Desktop/Dev/devops`, run `bun run scripts/gohan.ts ainz` after every site
 update. It tests the local Ainz site, adjusts the domain paths, uploads a new release directory,
-and switches the current site atomically. Verify the live version and the manual, tutorial,
+and switches the current site atomically. Verify the live version and the manual, tutorials,
 and designer pages on `https://ainz.sh/`. See the DevOps runbook `docs/services/ainz.md`.

@@ -1,0 +1,56 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Write, approve, test, and evolve a capability-scoped Lua plugin for Ainz."><title>Writing plugins for Ainz</title><link rel="canonical" href="https://wess.io/ainz/tutorial/plugins/"><link rel="stylesheet" href="../../assets/site.css"><link rel="icon" type="image/svg+xml" sizes="any" href="../../assets/favicon.svg"></head>
+<body><a class="skip" href="#main">skip to content</a><div class="shell">
+<div class="topline"><strong>AINZ :: PLUGINS</strong><nav aria-label="Main navigation"><a href="../../">Home</a><a aria-current="page" href="../">Tutorials</a><a href="../../docs/">Docs</a><a href="../../masthead/">Masthead</a><a href="../../theme/">Theme Designer</a><a href="https://github.com/wess/ainz">Source</a></nav></div>
+<main id="main" class="content"><header><p class="eyebrow">Tutorial 3 · extension package</p><h1>Give the model one new tool.</h1><p class="lede">Build a Lua plugin that reads a project file, returns structured output, and asks for no more authority than it uses.</p></header>
+<div class="doc">
+<section class="step"><div class="stepnum">01</div><div><h2>Create the bundle</h2><pre><code>mkdir -p .ainz/plugins/projectinfo/lua
+touch .ainz/plugins/projectinfo/plugin.toml
+touch .ainz/plugins/projectinfo/main.lua</code></pre><p>A project plugin travels with the checkout. A user plugin goes in the Ainz config directory's <code>plugins/</code> folder instead.</p></div></section>
+<section class="step"><div class="stepnum">02</div><div><h2>Declare the boundary</h2><pre><code>capabilities = ["workspace_read"]
+
+[plugin]
+name = "projectinfo"
+version = "0.1.0"
+
+[runtime]
+kind = "lua"
+path = "main.lua"
+timeout_ms = 30000
+memory_bytes = 67108864
+fuel = 10000000
+
+[[tools]]
+name = "summary"
+description = "Read a project file and return a short structural summary"
+capabilities = ["workspace_read"]
+parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }</code></pre><p>The exposed tool is named <code>projectinfo_summary</code>. Every tool declares a subset of the bundle's capabilities, so a read-only tool cannot borrow write or process authority.</p></div></section>
+<section class="step"><div class="stepnum">03</div><div><h2>Implement the tool</h2><pre><code>local function lines(text)
+  local count = 0
+  for _ in text:gmatch("[^\n]+") do count = count + 1 end
+  return count
+end
+
+return {
+  summary = function(args)
+    local text = ainz.read(args.path)
+    return { path = args.path, bytes = #text, lines = lines(text) }
+  end,
+}</code></pre><p>The function receives validated arguments as a Lua table. Return a string for plain output or a table for JSON. Use <code>error("message")</code> for a failure the model can act on.</p></div></section>
+<section class="step"><div class="stepnum">04</div><div><h2>Inspect and approve it</h2><pre><code>ainz plugins list
+ainz plugins approve projectinfo</code></pre><p>Approval prints the runtime, directory, and capabilities being trusted. It pins the manifest and every file in the bundle. Start Ainz and ask it to use <code>projectinfo_summary</code> on <code>Cargo.toml</code>.</p></div></section>
+<section class="step"><div class="stepnum">05</div><div><h2>Split reusable code into a module</h2><pre><code>-- lua/text.lua
+local M = {}
+function M.lines(value)
+  local count = 0
+  for _ in value:gmatch("[^\n]+") do count = count + 1 end
+  return count
+end
+return M
+
+-- main.lua
+local text = require("text")</code></pre><p><code>require</code> resolves only inside the approved bundle. There is no ambient module path or native module loading.</p></div></section>
+<section class="step"><div class="stepnum">06</div><div><h2>Reapprove changes deliberately</h2><p>Edit either Lua file and run Ainz again. The plugin returns to pending because its content no longer matches the approved digest.</p><pre><code>ainz plugins approve projectinfo
+ainz plugins revoke projectinfo</code></pre><p>This is the development loop: change, inspect, approve, exercise. Do not use <code>--yeet</code> as the normal plugin workflow; it deliberately bypasses every plugin approval for that run.</p></div></section>
+<section class="step"><div class="stepnum">07</div><div><h2>Choose another runtime when needed</h2><p>Lua plugins are the shortest path for bounded tools. A WebAssembly component is useful when host authority must stay capability-scoped across a compiled boundary. A process plugin fits an existing trusted executable, but it runs with the user's environment and cannot be sandboxed by its manifest. Portable Agent Plugin packages can bundle skills and MCP servers for compatible clients.</p><p>The <a href="../../docs/#extensions">extension reference</a> links to the complete manifests, host functions, wire protocol, and trust model.</p></div></section>
+<div class="nextlesson"><span>Next path</span><a href="../advanced/">Operate goals, sandboxes, agents, and recovery</a></div>
+</div></main><div class="statusline"><span>plugins</span><span>7 steps</span><span>complete</span></div><footer><span>Ainz 0.17.0</span><span><a href="https://github.com/wess/ainz/blob/main/docs/plugins.md">plugin reference</a></span></footer></div></body></html>
