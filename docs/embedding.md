@@ -16,20 +16,22 @@ ainz = { path = "../ainz", default-features = false }
 | Features | Includes |
 | --- | --- |
 | none | Agent loop, provider adapters, tools, sessions, controls, memory, MCP, process plugins |
-| `cli` | CLI binary, terminal UI, headers, themes, Markdown rendering |
-| `lua` | Sandboxed Lua plugin execution |
+| `cli` | CLI binary, terminal UI, headers, themes, Markdown rendering; includes `lua` |
+| `lua` | Sandboxed Lua plugin execution, and the `script` runtime behind [init.lua](lua.md) |
 | `wasm` | WebAssembly component plugin execution |
 | default | `cli`, `lua`, `wasm` |
 
-Each feature is independent. A library host can enable Lua without the CLI or WebAssembly.
+`lua` and `wasm` are independent of each other and of the CLI: a library host can enable Lua
+without the terminal or WebAssembly. The CLI includes Lua, because the interface is configured
+with it.
 The catalog still discovers disabled runtime kinds and checks their content fingerprints;
 attempting to load an approved plugin for an unavailable runtime returns a feature-specific
 error. It never executes it through a fallback runtime.
 
-For a CLI with Lua and process plugins:
+For a CLI without the component runtime:
 
 ```sh
-cargo build --release --no-default-features --features cli,lua
+cargo build --release --no-default-features --features cli
 ```
 
 The default CLI build retains all runtimes. Feature removal changes dependencies and available
@@ -102,6 +104,37 @@ unique temporary file, syncs the data, atomically replaces the checkpoint, and s
 directory. Concurrent saves cannot mix their files, but the last writer wins: serialize writers
 when preserving every update matters. A crash can leave temporary files, which discovery
 ignores. A save interrupted after replacement may already have committed; reload to inspect it.
+
+## Providers and the run
+
+A `ChatProvider` implements `complete`. Two methods have defaults, so an existing provider keeps
+working unchanged:
+
+- `complete_asking` receives the run's permission mode and an approver. Only a provider that
+  runs tools of its own, as a headless coding command does, needs it; `ProcessProvider` uses it
+  to answer the command's permission requests.
+- `runs_tools` returns true for such a provider. The agent then never sends a request again
+  after it broke off, because the command may already have acted, and does not learn a token
+  estimate from counts that describe the command's own context.
+
+A `ProviderReply` carries `truncated`, true when the reply stopped at the provider's output
+limit. The agent keeps a truncated reply and asks the provider to continue, up to three times in
+a row without a successful tool call. A reply that fails while streaming (a dropped connection,
+an overloaded upstream, a stream that ends early) is requested again after 2 and 8 seconds and
+reported as a `notice` event. After each reply the agent emits `context` with the tokens the
+request took and the window size.
+
+`HookRunner::with_gate` adds an in-process check before every tool call, in every permission
+mode. It refuses a call with `Err(reason)`; the CLI uses it for Lua `pre_tool` handlers.
+
+## Scripts
+
+With `lua`, `ainz::script::Script` is the runtime the CLI uses for [init.lua](lua.md). A host
+loads it with `Script::load(sources, workspace, &mut config)`; `script::files::discover` finds
+the sources the way the CLI does. The runtime never touches a user interface: what a script asks
+for is queued as `Effect`s for the host to carry out, and panels, status items, keymaps, and
+commands are read from it when the host needs them. `Script::tools` returns the tools scripts
+defined, and `Script::gate` a `pre_tool` check for `HookRunner::with_gate`.
 
 ## Runnable example
 

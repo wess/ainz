@@ -92,3 +92,7 @@ Setup screens keep the built-in colors. Themes do not change nick formats, times
 layout. Inline output already flushed into terminal scrollback retains its earlier colors;
 new output uses the selected theme. ANSI artwork is independent: use the
 [Masthead Studio](https://wess.io/ainz/masthead/) and [header guide](headers.md) to customize it.
+
+A [Lua script](lua.md#format-codes) can change a role for the session with
+`ainz.highlight("accent", "#ff8800")`, and colour what it draws in panels and the status bar with
+`%{accent}`, so that text follows `/theme` like everything else.

@@ -11,15 +11,16 @@ a completed performance evaluation.
 
 | Area | Present | Next evidence needed |
 | --- | --- | --- |
-| Coding loop | Workspace tools, shell, permissions, provider retries, context compaction | Held-out tasks scored for correct changes, verification, retries, tokens, and elapsed time |
+| Coding loop | Workspace tools, shell, permissions, provider retries, context compaction, continuation after an output-limit cut-off, requesting a broken-off reply again, a context estimate learned from provider counts | Held-out tasks scored for correct changes, verification, retries, tokens, and elapsed time |
 | Terminal | IRC rows, terminal Markdown, streaming tools, persistent completion/cancel/failure indicators, per-message row cache with capped repaints | Output floods, resize latency, keyboard responsiveness under load |
 | Recovery | Branching sessions, atomic synced checkpoints, cancellation through compaction/approvals/tools/hooks, retained usage and completed tool results | Crash recovery during a tool, forced task-abort recovery, save failure recovery in each surface |
 | Embedding | Public provider/tool interfaces, host events and sessions, independent CLI/Lua/Wasm features | Stable lifecycle envelope, bounded event delivery, documented compatibility policy |
-| Extensions | Content-pinned plugins, lazy MCP tool catalog, skills, hooks, subagents | Hung/disconnected extension soak tests and resource accounting per child |
+| Extensions | Content-pinned plugins, lazy MCP tool catalog, skills, hooks, subagents, Lua configuration (init.lua, panels, status bar, tools, `pre_tool`) | Hung/disconnected extension soak tests and resource accounting per child; a long-running script measured against frame time |
+| Isolation | Opt-in OS sandbox for model-run commands (`sandbox-exec`, `bwrap`), kernel-checked on macOS and Linux | Per-tool sandbox policy, network allowlists |
 | Memory | Local and shared memory, prior-session search, proposed reusable skills | Retrieval usefulness, stale memory correction, prompt budget measurements |
 | Unattended work | Durable shell jobs, saved sessions, opt-in PTY hosts, detach/reconnect, session switching and attention | Crash and reboot recovery, recurring schedules, restart policy |
 | Review | File edits and conversation rewind | Change inspector and file checkpoints with conflict-aware restore |
-| Providers | Streaming HTTP and process adapters | Explicit capability negotiation and provider-specific conformance fixtures |
+| Providers | Streaming HTTP and process adapters; headless commands' permission requests answered by the run's rules; checked live against a real gateway and real coding CLIs | Explicit capability negotiation and provider-specific conformance fixtures |
 
 ## Work order
 
@@ -133,6 +134,38 @@ validation, and preservation of artwork colors. `python3 tests/tui/themes.py` ex
 selection, reload, persistence, rejection, and reset in a real pseudo-terminal.
 `bun test tests/site` checks designer exports, exact installation contents, overwrite protection,
 and local links. Theme files add no scripting engine; the default palette skips the remapping pass.
+
+## Script checks
+
+`cargo test --lib script` covers options, keymaps, commands, events, timers, panels, status
+items, tools, `require`, reloading, and a runaway callback being stopped; it also loads
+[`examples/init.lua`](../examples/init.lua) so the example cannot drift from the API.
+`cargo test --test scripted` runs the binary with an init.lua whose tool answers a model and
+whose `pre_tool` handler refuses a call. `scripts/tui-check.py` drives a scripted session in a
+real terminal: panels on both sides, the bar and topic, a command, a keymap, an event, `/lua`,
+and `/source`. Without an init.lua no Lua runtime is created, so none of this costs an
+unscripted session anything; a script's state is described to it once per drawn frame, not per
+streamed token.
+
+## Checks against real services
+
+Some behaviour only shows against the real thing, so these are ignored by default and run on
+request:
+
+```sh
+cargo test --test bridge -- --ignored   # the claude CLI asking through the permission bridge
+cargo test --test codex -- --ignored    # the codex CLI opening a pasted image
+cargo test --bin ainz clipboard -- --ignored   # the real clipboard; restores its text
+```
+
+The sandbox's kernel checks run in the normal suite wherever `sandbox-exec` or `bwrap` exists.
+On a Mac, the Linux side can be checked in a container:
+
+```sh
+docker run --rm --privileged -v "$PWD":/src:ro -w /src rust:latest bash -c \
+  'apt-get update -qq && apt-get install -y -qq bubblewrap curl && \
+   CARGO_TARGET_DIR=/tmp/target cargo test --lib --no-default-features sandbox'
+```
 
 ## Live session checks
 

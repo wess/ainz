@@ -81,7 +81,9 @@ ainz providers add claude --preset claude-code --known-model sonnet
 The config file lives in the platform config directory: `~/Library/Application Support/ainz/config.toml`
 on macOS, `~/.config/ainz/config.toml` on Linux. `AINZ_CONFIG` overrides the path, and
 `AINZ_MODEL`, `AINZ_ENDPOINT`, `AINZ_PROVIDER`, `AINZ_API_KEY`, `AINZ_MEMORY`, and
-`AINZ_SYNAPSE` override values.
+`AINZ_SYNAPSE` override values. An `init.lua` beside `config.toml` configures the session in
+code; see [Lua configuration](#lua-configuration). `AINZ_INIT` names another one, and
+`AINZ_INIT=NONE` or `--clean` runs without it.
 
 ```toml
 provider = "ollama"
@@ -120,14 +122,21 @@ the default. Notifications start off. See [background sessions](docs/sessions.md
 
 Without a `provider`, the legacy top-level `endpoint` and `api_key_env` keys describe one HTTP
 provider. HTTP profiles use Ainz's own model and tool loop. Process profiles run a coding CLI's
-own loop and return its final response as one assistant turn; in `ask` and `read_only` modes
-they run read-only, and `auto` permits workspace edits. See
-[`docs/providers.md`](docs/providers.md).
+own loop and return its final response as one assistant turn. In `ask` mode the Claude Code
+preset sends its permission requests back to Ainz, which answers them with your rules and
+approval prompt; other commands run read-only in `ask` and `read_only`, and `auto` permits
+workspace edits. Pasted images reach a text-input command as files it can open.
+
+A reply that reaches its output limit is kept and continued automatically, and one that breaks
+off partway is requested again. Chat Completions requests ask for up to 32,000 output tokens,
+since a gateway otherwise picks its own, often 4,096; `max_output_tokens` on a profile changes
+it. See [`docs/providers.md`](docs/providers.md).
 
 ## Use
 
 ```sh
 ainz                                    # interactive
+ainz --clean                            # without init.lua and its plugins
 ainz "inspect the failing tests"         # send the first request immediately
 cat build.log | ainz -p "explain this"    # include piped input and exit
 ainz -c                                 # continue the latest saved conversation
@@ -169,6 +178,12 @@ status line says `yeet` while it is on. Choosing a mode with `/permissions` or i
 ends it early. It runs code you have not vetted, which is what the
 name is for.
 
+`AINZ_SANDBOX=workspace` confines what the model runs (the shell tool, jobs, hooks, plugin
+commands, and checks) to writing the workspace and temporary directories, using `sandbox-exec`
+on macOS and `bwrap` on Linux; `strict` also cuts the network. It is off by default, because
+builds that write caches outside the workspace fail under it. See
+[`docs/permissions.md`](docs/permissions.md#sandbox).
+
 In a terminal, Ainz runs a Ratatui interface with a streaming transcript, permission prompts
 that show the tool's arguments, tool activity, and a subagent roster on the right. Type `/` to open the
 command palette and fuzzy-search commands and prompt templates, and `@` to complete a path in
@@ -182,7 +197,10 @@ written, `Left`/`Right` and `Alt+←`/`Alt+→` move by character and word, `Ctr
 its ends, `Ctrl+U`/`Ctrl+K`/`Ctrl+W` cut, and `Shift+Enter` — or a trailing backslash — adds a
 newline. `Esc` twice steps back to the last prompt and puts it in the line to be changed, taking
 the session from there. `/vim` turns on modal editing. The wheel, `Shift+↑`/`Shift+↓` and
-`PageUp`/`PageDown` scroll the transcript. Reading earlier output holds your place while new
+`PageUp`/`PageDown` scroll the transcript. `Ctrl+V` attaches the image on the clipboard, and
+dragged image files attach too, each as an `[Image #N]` placeholder that one backspace removes.
+`/goal TEXT` keeps taking turns toward an objective until the model says it is met, up to 25.
+Reading earlier output holds your place while new
 text arrives; `Ctrl+End` returns to the latest output. `Ctrl+O` expands captured tool output,
 including while a tool is running. The mouse selects a field or a menu row in setup screens. In
 chat, drag across transcript text to use the terminal's normal selection and copy commands.
@@ -226,8 +244,7 @@ also works during compaction, approvals, tools, and hooks.
 
 A long command reports itself while it runs rather than after: the call grows a line showing the
 last thing it wrote, and `Ctrl+O` opens the whole of it. A run of more than
-ten seconds rings the terminal when it finishes. An image pasted or dragged into the prompt
-attaches to the next message.
+ten seconds rings the terminal when it finishes.
 
 `Ctrl+L` toggles the roster
 and remembers the choice, `Ctrl+1` selects the primary transcript, `Ctrl+2` through `Ctrl+9`
@@ -259,9 +276,9 @@ Artwork keeps its original colors. See [themes](docs/themes.md) for roles, paths
 The unit tests cover the model behind the prompt; what a keystroke actually draws needs a
 terminal, so `scripts/tui-check.py` drives a real one. It opens a pty of its own, builds a
 throwaway workspace with a fake provider, and checks history, the cursor keys, `@`
-completion, the rewind, the mouse, vim mode, and both ways of drawing, including what happens
-when the terminal will not say where the cursor is. It needs `pyte` and never touches the
-terminal it is run from.
+completion, the rewind, the mouse, vim mode, both ways of drawing (including what happens
+when the terminal will not say where the cursor is), pasted images, `/goal`, and a session
+driven by an init.lua. It needs `pyte` and never touches the terminal it is run from.
 
 ```sh
 pip install pyte

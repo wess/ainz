@@ -33,10 +33,10 @@ unreleased changes. To build and install the current checkout:
 cargo install --path . --locked
 ```
 
-For a CLI with Lua and process plugins but without the component runtime:
+For a CLI without the component runtime (the CLI always includes Lua):
 
 ```sh
-cargo install --path . --locked --no-default-features --features cli,lua
+cargo install --path . --locked --no-default-features --features cli
 ```
 
 Check `command -v ainz` and `ainz --version` if your shell still starts another installation.

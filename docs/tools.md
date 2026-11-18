@@ -95,3 +95,8 @@ answer; add `background` to keep working while it runs, then `collect` it by nam
 what is still running. Always risk: execute. `src/app.rs` builds the delegation closure that
 backs it; see [`docs/architecture.md`](architecture.md) for how a subagent's session and events
 relate to its parent's, and [`docs/synapse.md`](synapse.md) for what changes when the mesh is on.
+With `subagent_models` on, a `model` argument picks one of the active provider's saved models for
+the child; see [`docs/agents.md`](agents.md#choosing-a-model-for-each-child).
+
+**Your own** — tools an [init.lua](lua.md#tools-for-the-model) defines with `ainz.tool`, named
+as written. Risk: whatever the script declares.

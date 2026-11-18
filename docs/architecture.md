@@ -21,6 +21,12 @@ Ainz keeps the orchestration core independent from transports and user interface
    Steering has a bounded queue; cancellation has a separate signal. Closing steering at
    the final reply is atomic with taking the last batch, so an accepted message cannot fall
    between the last turn and the end hooks. Those hooks remain cancellable.
+6. The run recovers from replies that did not finish. Which effect comes next is decided by a
+   pure step function (`agent/step.rs`): a reply cut off at its output limit leads to a
+   continuation request, and three in a row without a successful tool call pause the run. A
+   reply that broke off mid-stream is requested again. The context estimate is learned from the
+   provider's own token counts and kept by the agent across runs, so compaction triggers when the
+   provider's window is actually full rather than when a fixed bytes-per-token guess says so.
 
 The terminal projects `EventSink` events into transcript and subagent views. Each worker
 retains its provider, session history, and subagent lifetime while the attached client switches
@@ -60,6 +66,20 @@ preview and editable starter so the site and terminal use the same artwork.
 
 See [embedding](embedding.md) for the feature boundary and host responsibilities, and
 [quality](quality.md) for limits that remain, including the unbounded convenience event queue.
+
+Commands the model runs can be confined by the operating system. `sandbox::confine` rewraps an
+already-built command under `sandbox-exec` or `bwrap` when `AINZ_SANDBOX` asks for it, and
+returns it untouched otherwise, so the shell tool, jobs, hooks, plugin commands, and checks each
+change by one call. An unavailable sandbox refuses the command; it never falls back to none.
+
+The person's own Lua runs in one long-lived runtime (`script`), made only when there is an
+init.lua to run. It never reaches into the interface or the agent. What a script asks for is
+queued as effects the interface carries out between frames, and what it draws (panels, status
+items, the topic) is read when a frame is drawn. Option writes are recorded as paths and applied
+to the configuration as it stands, so a keymap never undoes a change made in `/settings`. The
+agent sees scripts only through ordinary tools and a `pre_tool` gate. `Config::settle` records
+the configuration once scripts and flags have applied, and a save then writes only what changed
+after that. That is how a script's options stay out of `config.toml`.
 
 Named themes live in the optional CLI layer. The catalog reads bounded TOML files and the chat
 renderer maps palette roles over the visible terminal buffer. It does not traverse conversation

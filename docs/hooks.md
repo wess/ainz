@@ -58,6 +58,10 @@ blocks the call, and the tool returns an error quoting the hook's stderr instead
 Every other event is advisory — a failing `session_start`, `post_tool`, or `session_end` hook is
 reported and the session carries on, the same way a slow linter does not stop a save.
 
+For a check that needs no process, a Lua `pre_tool` handler in your
+[init.lua](lua.md#events) has the same vote. It runs before external hooks: returning `false`
+with a reason refuses the call.
+
 A hook gets ten seconds. Past that it is killed and treated as a failure — blocking for
 `pre_tool`, reported for everything else — because a hook that never returns must never be able
 to hang the session waiting for it.
