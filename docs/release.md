@@ -1,9 +1,9 @@
 # Release process
 
-Ainz versions come from `Cargo.toml`. Bump it, run `scripts/version.sh` to stamp the new number
-into the site and install docs, and commit both together. A matching `vMAJOR.MINOR.PATCH` tag then
-starts the release workflow, which verifies the tag against the package version, builds three native
-archives, generates a SHA-256 sidecar for each, and publishes a GitHub release with `--verify-tag`
+Ainz versions come from `Cargo.toml`. Update it and `Cargo.lock`, run `scripts/version.sh` to stamp
+the new number into the site and install docs, and commit them together. A matching
+`vMAJOR.MINOR.PATCH` tag starts the release workflow, which verifies the package version, builds
+three native archives, generates a SHA-256 sidecar for each, and publishes with `--verify-tag`
 and generated notes once every platform succeeds. A failed build leaves the tag with no release;
 fix the failure, bump the version, and publish a new tag.
 

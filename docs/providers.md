@@ -38,8 +38,7 @@ Every list ends in a row for naming a model by hand.
 
 ## Automatic model routing
 
-Routing and the cross-provider picker are available in source builds that include this
-feature. The 0.17.0 release uses `/model` to open provider setup.
+The cross-provider picker and Auto strategies are available starting in Ainz 0.18.0.
 
 1. Add provider profiles with `/provider` or `ainz providers add`. Run `ainz providers list`
    and `ainz models list PROFILE` to find the saved names. Use `ainz models add PROFILE MODEL`

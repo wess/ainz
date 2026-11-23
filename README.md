@@ -65,8 +65,7 @@ See [embedding](docs/embedding.md) for the public API and feature choices, and
 Running `ainz` with no configured model opens setup. `/config`, `/settings`, and F2 open
 searchable settings. Use `/provider` to add a profile and `/model` to find and switch between
 saved models across profiles. The picker saves its choice with the session. Enable `[boss]` in
-`config.toml` to let Ainz choose a model per task using Economy, Balanced, or Quality. The
-cross-provider picker and Auto strategies are available in the current source build. See
+`config.toml` to let Ainz choose a model per task using Economy, Balanced, or Quality. See
 [automatic model routing](docs/providers.md#automatic-model-routing) for setup and an example.
 
 The same provider operations are scriptable:
