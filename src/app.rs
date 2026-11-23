@@ -18,7 +18,8 @@ use ainz::{
   learn::Teacher,
   memory::{MemoryStore, recalled_section},
   protocol::{Image, ToolCall},
-  run_control, subagent_tool_with_models, synapse,
+  routing::{self, ModelMode, ModelRouter, ModelTarget},
+  run_control, synapse,
   synapse::Synapse,
   tool::{Risk, ToolSet, builtins},
 };
@@ -232,6 +233,7 @@ pub(crate) async fn make_agent_parts(
   let child_store = SessionStore::default_store()?;
   let child_profile = mcp_profile.clone();
   let child_mesh = config.mesh_active() && synapse.is_some();
+  let child_config = Arc::new(config.clone());
   let subagents: SubagentHandler = Arc::new(move |request: SubagentRequest| {
     let SubagentRequest {
       parent_id,
@@ -239,11 +241,14 @@ pub(crate) async fn make_agent_parts(
       prompt,
       role,
       model,
+      provider,
+      parent_model,
     } = request;
     let definition = role.as_deref().and_then(|role| agents.get(role)).cloned();
     // a named type's model is part of what the type is, so a pick that disagrees is refused
     // rather than quietly replaced
     let pinned = definition.as_ref().and_then(|agent| agent.model.clone());
+    let pinned_provider = definition.as_ref().and_then(|agent| agent.provider.clone());
     if let (Some(pinned), Some(asked)) = (&pinned, &model)
       && pinned != asked
     {
@@ -253,10 +258,23 @@ pub(crate) async fn make_agent_parts(
       );
       return Box::pin(async move { Err(error) });
     }
-    let provider = pinned.or(model).map_or_else(
-      || child_provider.clone(),
-      |model| child_provider.with_model(model),
-    );
+    if let (Some(pinned), Some(asked)) = (&pinned_provider, &provider)
+      && pinned != asked
+    {
+      let error = anyhow::anyhow!(
+        "agent type {} uses provider {pinned}",
+        role.as_deref().unwrap_or_default()
+      );
+      return Box::pin(async move { Err(error) });
+    }
+    let config = child_config.clone();
+    let active = ModelTarget::configured(&config);
+    let parent = parent_model.unwrap_or_else(|| active.clone());
+    let provider_name = pinned_provider
+      .or(provider)
+      .or_else(|| parent.provider.clone());
+    let model = pinned.or(model);
+    let provider = child_provider.clone();
     let mut tools = child_tools.clone();
     let workspace = child_workspace.clone();
     let mut options = child_options.clone();
@@ -265,7 +283,33 @@ pub(crate) async fn make_agent_parts(
     let store = child_store.clone();
     let profile = child_profile.clone();
     Box::pin(async move {
+      let model = match model {
+        Some(model) => model,
+        None if provider_name == parent.provider => parent.model.clone(),
+        None if provider_name == active.provider => active.model.clone(),
+        None => provider_name
+          .as_ref()
+          .and_then(|name| config.providers.get(name))
+          .and_then(|profile| profile.model.clone())
+          .context("a named agent on another provider needs a model or a provider default")?,
+      };
+      let target = ModelTarget {
+        provider: provider_name,
+        model,
+      };
+      let provider = if parent == active && target.provider == active.provider {
+        if target == active {
+          provider
+        } else {
+          provider.with_model(target.model.clone())
+        }
+      } else {
+        RuntimeProvider::from_target(&config, &target, &workspace).await?
+      };
       let mut session = Session::child(workspace.clone(), parent_id);
+      session.model_mode = Some(ModelMode::Fixed {
+        target: target.clone(),
+      });
       // a guardian on the mesh gets its own client, so it holds a seat of its own rather
       // than renaming the one its parent registered
       if child_mesh {
@@ -314,6 +358,7 @@ pub(crate) async fn make_agent_parts(
         parent_id: parent_id.to_string(),
         name: name.clone(),
         task: prompt.clone(),
+        target,
       });
       let session_id = session.id.to_string();
       let forwarded = events.clone();
@@ -338,39 +383,27 @@ pub(crate) async fn make_agent_parts(
       })
     })
   });
-  tools.insert(subagent_tool_with_models(
+  let model_choices = if config.subagent_models {
+    routing::models(config)
+  } else {
+    Default::default()
+  };
+  tools.insert(ainz::subagent::subagent_tool_with_targets(
     SubagentRegistry::new(subagents),
     child_mesh,
-    subagent_models(config)?,
+    if model_choices.len() > 1 {
+      model_choices
+    } else {
+      Default::default()
+    },
   ))?;
+  let router = Arc::new(ModelRouter::new(config.clone(), workspace.to_path_buf()));
   Ok((
-    Agent::new(provider, tools, workspace.to_path_buf(), events, approver),
+    Agent::new(provider, tools, workspace.to_path_buf(), events, approver)
+      .with_model_selector(router),
     options,
     mcp,
   ))
-}
-
-/// The models the agent may pick from for a subagent, each with what it is for. Off unless
-/// asked for, and nothing to pick from with only one model saved.
-fn subagent_models(config: &Config) -> Result<std::collections::BTreeMap<String, String>> {
-  if !config.subagent_models {
-    return Ok(Default::default());
-  }
-  let profile = config.active_provider()?;
-  let models: std::collections::BTreeMap<_, _> = profile
-    .models
-    .iter()
-    .chain(std::iter::once(&config.model))
-    .filter(|model| !model.trim().is_empty())
-    .map(|model| {
-      let hint = profile.model_hints.get(model).cloned().unwrap_or_default();
-      (model.clone(), hint)
-    })
-    .collect();
-  Ok(match models.len() {
-    0 | 1 => Default::default(),
-    _ => models,
-  })
 }
 
 pub async fn run_once(
@@ -438,7 +471,12 @@ pub async fn interactive(
       match outcome.next {
         crate::tui::ChatNext::Quit => return Ok(()),
         crate::tui::ChatNext::Configure => {
-          crate::tui::configure(&mut config).await?;
+          if crate::tui::configure(&mut config).await? {
+            session.set_model_mode(ModelMode::Fixed {
+              target: ModelTarget::configured(&config),
+            });
+            store.save(&session).await?;
+          }
           config.validate()?;
         }
         crate::tui::ChatNext::Import => {
@@ -446,8 +484,13 @@ pub async fn interactive(
         }
         crate::tui::ChatNext::Settings => {
           let headers = ainz::HeaderCatalog::discover(&workspace).await?;
-          if crate::tui::settings(&mut config, &headers).await? {
-            crate::tui::configure(&mut config).await?;
+          if crate::tui::settings(&mut config, &headers).await?
+            && crate::tui::configure(&mut config).await?
+          {
+            session.set_model_mode(ModelMode::Fixed {
+              target: ModelTarget::configured(&config),
+            });
+            store.save(&session).await?;
           }
           config.validate()?;
         }
@@ -598,7 +641,7 @@ pub(crate) async fn configure(
   lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
 ) -> Result<()> {
   if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-    return crate::tui::configure(config).await;
+    return crate::tui::configure(config).await.map(|_| ());
   }
   println!("\nAinz setup");
   println!("  1  Ollama");
@@ -871,6 +914,13 @@ pub(crate) fn output_events(json: bool) -> EventSink {
         drop(std::io::stdout().flush());
       }
       Event::ToolStart { call } => eprintln!("\n→ {}", call.name),
+      Event::ModelSelected {
+        target,
+        strategy,
+        reason,
+      } => {
+        eprintln!("\nAuto · {} · {target} ({reason})", strategy.label());
+      }
       Event::Notice { message } => eprintln!("\n{message}"),
       Event::ToolEnd {
         output,

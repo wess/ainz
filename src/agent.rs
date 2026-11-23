@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
+use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde_json::Value;
 
@@ -20,6 +21,7 @@ use crate::{
   event::{Event, EventSink},
   protocol::{Image, Message, Role, ToolCall, ToolSpec, Usage},
   provider::{ChatProvider, ProviderReply},
+  routing::{ModelTarget, RoutingStrategy},
   session::{Context, Session},
   tool::{Risk, ToolSet},
 };
@@ -44,12 +46,30 @@ use step::{Action, CONTINUATIONS, Effect, Turn, step};
 
 pub use options::RunOptions;
 
+pub struct RunSelection<P> {
+  pub provider: Option<P>,
+  pub target: ModelTarget,
+  pub decision: Option<(RoutingStrategy, String)>,
+  pub usage: Usage,
+}
+
+#[async_trait]
+pub trait ModelSelector<P>: Send + Sync {
+  async fn select(
+    &self,
+    session: &Session,
+    prompt: &Message,
+    continue_with: Option<&ModelTarget>,
+  ) -> Result<RunSelection<P>>;
+}
+
 pub struct Agent<P> {
   provider: P,
   tools: ToolSet,
   workspace: PathBuf,
   events: EventSink,
   approver: Approver,
+  selector: Option<Arc<dyn ModelSelector<P>>>,
   /// Bytes per token as the provider last counted them, stored as `f64` bits. It outlives a
   /// run, because the next run sends the same history to the same model.
   bytes_per_token: AtomicU64,
@@ -69,12 +89,18 @@ impl<P: ChatProvider> Agent<P> {
       workspace,
       events,
       approver,
+      selector: None,
       bytes_per_token: AtomicU64::new(context::BYTES_PER_TOKEN.to_bits()),
     }
   }
 
   pub fn provider(&self) -> &P {
     &self.provider
+  }
+
+  pub fn with_model_selector(mut self, selector: Arc<dyn ModelSelector<P>>) -> Self {
+    self.selector = Some(selector);
+    self
   }
 
   pub async fn run(

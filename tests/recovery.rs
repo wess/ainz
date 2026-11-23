@@ -25,6 +25,7 @@ fn options() -> RunOptions {
     preserve_messages: 4,
     memory_nudge: None,
     budget_usd: None,
+    continue_with: None,
     rules: Default::default(),
     hooks: HookRunner::default(),
   }

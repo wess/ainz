@@ -86,7 +86,7 @@ impl<P: ChatProvider> Agent<P> {
         self.events.emit(Event::ToolStart { call: call.clone() });
         match self.admit(call, options, session.id).await {
           Admission::Run(tool) => {
-            running.push(self.execute(tool, call, options, session.id));
+            running.push(self.execute(tool, call, options, session.id, state.target.clone()));
           }
           Admission::Refused(reason) => self.finish(state, call, (reason, true), false),
         }
@@ -221,11 +221,13 @@ impl<P: ChatProvider> Agent<P> {
     call: &ToolCall,
     options: &RunOptions,
     session_id: uuid::Uuid,
+    model_target: Option<ModelTarget>,
   ) -> (String, Outcome) {
     let context = ToolContext {
       workspace: self.workspace.clone(),
       session_id,
       max_output_bytes: options.max_output_bytes,
+      model_target,
       progress: Some((self.events.clone(), call.id.clone())),
     };
     // a tool that panics fails its call, not the run that holds the session

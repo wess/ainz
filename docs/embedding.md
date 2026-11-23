@@ -107,6 +107,14 @@ ignores. A save interrupted after replacement may already have committed; reload
 
 ## Providers and the run
 
+`Agent::with_model_selector` lets a host choose a provider at the start of each run. Implement
+`agent::ModelSelector<P>` to supply your own policy. For configured Ainz profiles, pair
+`RuntimeProvider::configured` with `routing::ModelRouter` to honor the session's model selection
+and the `[boss]` settings. Use `Session::set_model_mode` to pin a `routing::ModelTarget` or choose
+an Auto strategy. `RunOptions::continue_with` can retain an eligible Auto worker for a follow-up.
+An Auto selection emits `Event::ModelSelected` before the worker starts. See
+[automatic model routing](providers.md#automatic-model-routing) for the configuration.
+
 A `ChatProvider` implements `complete`. Two methods have defaults, so an existing provider keeps
 working unchanged:
 

@@ -326,6 +326,7 @@ def check_setup(binary, root):
     term = Terminal(binary, root, "config.toml")
     term.pump(6.0)
     term.send("/model" + ENTER, settle=1.5)
+    term.send("manage providers" + ENTER, settle=1.0)
     check("the provider list opens", "Claude Code" in term.body(), term.body()[:600])
     check("and offers a custom process", "Custom process" in term.body(), term.body()[:600])
     for _ in range(12):
@@ -369,7 +370,7 @@ def check_model_list(binary, root):
 
     term = Terminal(binary, root, "config.toml")
     term.pump(6.0)
-    term.send("/model" + ENTER, settle=1.5)
+    term.send("/provider" + ENTER, settle=1.5)
     for _ in range(12):
         if "Compatible endpoint" in term.body():
             break
@@ -405,6 +406,90 @@ def check_model_list(binary, root):
     term.send(ESC, settle=0.5)
     term.close()
     server.shutdown()
+
+
+def check_model_switch(binary, root):
+    print("\ncross-provider model switching")
+
+    class Router(http.server.BaseHTTPRequestHandler):
+        calls = 0
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            type(self).calls += 1
+            decision = json.dumps({"required": "basic", "preferred": 1, "reason": "routine"})
+            body = json.dumps({"choices": [{"message": {"content": decision}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Router)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    directory = os.path.join(root, "routing")
+    os.makedirs(directory)
+    with open(os.path.join(directory, "config.toml"), "w") as config:
+        config.write(CONFIG.format(inline="false") + f'''
+[update]
+auto = false
+
+[providers.alternate]
+kind = "process"
+command = "/bin/sh"
+args = ["worker.sh"]
+models = ["test"]
+
+[providers.router]
+kind = "http"
+endpoint = "http://127.0.0.1:{server.server_address[1]}"
+
+[boss]
+enabled = true
+router = {{ provider = "router", model = "route" }}
+candidates = [
+  {{ provider = "fake", model = "test", cost = "low", quality = "basic" }},
+  {{ provider = "alternate", model = "test", cost = "high", quality = "strong" }},
+]
+''')
+    with open(os.path.join(directory, "worker.sh"), "w") as worker:
+        worker.write('if grep -q "Continue toward the goal"; then echo "GOAL MET"; else echo "alternate provider answered"; fi\n')
+    env = {"HOME": directory, "XDG_DATA_HOME": directory}
+    first = Terminal(binary, directory, "config.toml", args=["--clean"], env=env)
+    resumed = None
+    try:
+        first.pump(1)
+        first.send("/model" + ENTER)
+        body = first.body()
+        check("the picker lists both profiles with the same model ID", "fake · test" in body and "alternate · test" in body, body[:500])
+        check("all three Auto strategies appear", all(f"Auto · {label}" in body for label in ["Economy", "Balanced", "Quality"]), body[:500])
+        first.send("alternate")
+        check("typing a provider filters the picker", "alternate · test" in first.body() and "fake · test" not in first.body(), first.body()[:500])
+        first.send(ENTER)
+        first.send("first prompt" + ENTER, settle=1)
+        check("manual switching uses the selected provider", "alternate provider answered" in first.body() and "alternate/test" in first.body(), first.body()[-500:])
+        check("manual switching skips the boss", Router.calls == 0, Router.calls)
+        first.send("/quit" + ENTER)
+
+        resumed = Terminal(binary, directory, "config.toml", args=["--clean", "-c"], env=env)
+        resumed.pump(1)
+        check("resuming keeps the manual model and transcript", "alternate/test" in resumed.body() and "first prompt" in resumed.body(), resumed.body()[-500:])
+        resumed.send("/model" + ENTER)
+        resumed.send("quality" + ENTER)
+        resumed.send("/goal check the worker" + ENTER, settle=2)
+        body = resumed.body()
+        check("Auto displays the chosen provider and model", "alternate/test" in body, body[-500:])
+        check("goal follow-ups keep their worker and skip another boss call", "goal met" in body and Router.calls == 1, body[-500:])
+        resumed.send("/quit" + ENTER)
+    finally:
+        first.close()
+        if resumed:
+            resumed.close()
+        server.shutdown()
+        server.server_close()
 
 
 def check_new_surface(binary, root):
@@ -515,6 +600,7 @@ def main():
         check_inline(binary, root)
         check_setup(binary, root)
         check_model_list(binary, root)
+        check_model_switch(binary, root)
         check_new_surface(binary, root)
         check_scripts(binary, root)
     finally:

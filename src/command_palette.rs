@@ -183,7 +183,7 @@ pub fn builtins() -> Vec<SlashCommand> {
     (
       "model",
       "/model",
-      "Choose the active provider and model",
+      "Choose a saved model or automatic routing",
       "config",
     ),
     ("new", "/new", "Start a new session", "session"),

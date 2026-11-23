@@ -158,6 +158,8 @@ async fn cancelling_collection_keeps_the_child_addressable() {
     prompt: "work".into(),
     role: None,
     model: None,
+    provider: None,
+    parent_model: None,
   });
   assert!(
     tokio::time::timeout(
@@ -205,6 +207,8 @@ async fn dropping_the_registry_aborts_the_tasks_it_owns() {
     prompt: "work".into(),
     role: None,
     model: None,
+    provider: None,
+    parent_model: None,
   });
   started.notified().await;
   drop(registry);

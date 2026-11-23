@@ -182,7 +182,7 @@ impl Row {
       Self::Fallback => ("Explicit backup profiles in order".into(), "Enter configured provider names separated by commas. Each backup can have its own default model. Empty disables fallback. Failed attempts are buffered, so only a successful reply reaches the transcript.".into()),
       Self::SubagentModels => (
         "A model for each child".into(),
-        "Lets the agent pick a model from the active provider's saved list for each subagent, \
+        "Lets the agent pick a saved provider and model for each subagent, \
          so a lookup can go to a small model and a design question to a strong one. Add a few \
          words for each in model_hints under the provider in config.toml to say what it is \
          for. Off by default; needs two or more saved models."

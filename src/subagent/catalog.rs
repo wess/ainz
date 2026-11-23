@@ -11,8 +11,9 @@ pub struct AgentDefinition {
   pub description: String,
   pub instructions: String,
   pub tools: Option<Vec<String>>,
-  /// The model the definition asks for, on the session's configured provider.
+  /// The model the definition asks for, inheriting the parent provider by default.
   pub model: Option<String>,
+  pub provider: Option<String>,
   pub permission_mode: Option<PermissionMode>,
   pub disallowed_tools: Option<Vec<String>>,
   pub max_steps: Option<usize>,
@@ -28,6 +29,9 @@ impl AgentDefinition {
     }
     if let Some(model) = &self.model {
       constraints.push(format!("asks for model {model}"));
+    }
+    if let Some(provider) = &self.provider {
+      constraints.push(format!("provider {provider}"));
     }
     if let Some(mode) = self.permission_mode {
       constraints.push(format!(
@@ -131,6 +135,9 @@ impl AgentCatalog {
             instructions: front.body.trim().to_string(),
             tools: front.field("tools").and_then(tool_list),
             model: front.field("model").filter(|model| model != "inherit"),
+            provider: front
+              .field("provider")
+              .filter(|provider| provider != "inherit"),
             permission_mode,
             disallowed_tools: field(["disallowedTools", "disallowed-tools", "disallowed_tools"])
               .and_then(tool_list),

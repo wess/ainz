@@ -114,7 +114,8 @@ reloads your scripts, `/lua CODE` runs Lua in the session, and `/trust` lets a p
 `.ainz/init.lua` run.
 
 `/settings`, `/config`, and F2 open [settings](settings.md), with sections, search, status-bar
-customization, and shortcut recording. `/model` opens provider setup. `/inline` chooses the
+customization, and shortcut recording. `/model` searches saved models across providers and
+offers Auto strategies when configured. `/provider` opens setup. `/inline` chooses the
 terminal's own scrollback instead of the full-screen buffer on the next launch. Inline mode
 has no agent roster or full-screen header preview. Expanded tool output already flushed into
 terminal scrollback retains its formatting.

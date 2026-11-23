@@ -38,6 +38,10 @@ pub struct SessionSummary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model_mode: Option<crate::routing::ModelMode>,
+  #[serde(skip)]
+  pub(crate) model_changed: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub label: Option<String>,
   pub id: Uuid,
   #[serde(default)]
@@ -57,6 +61,8 @@ impl Session {
   pub fn new(workspace: PathBuf) -> Self {
     let now = now();
     Self {
+      model_mode: None,
+      model_changed: false,
       label: None,
       id: Uuid::now_v7(),
       parent_id: None,
@@ -83,6 +89,11 @@ impl Session {
         .take(120)
         .collect()
     })
+  }
+
+  pub fn set_model_mode(&mut self, mode: crate::routing::ModelMode) {
+    self.model_mode = Some(mode);
+    self.model_changed = true;
   }
 
   pub fn child(workspace: PathBuf, parent_id: Uuid) -> Self {

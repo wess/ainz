@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
 
-use crate::{Config, HookRunner, PermissionMode, PermissionRules};
+use crate::{Config, HookRunner, PermissionMode, PermissionRules, routing::ModelTarget};
 
 #[derive(Clone)]
 pub struct RunOptions {
@@ -10,6 +10,8 @@ pub struct RunOptions {
   pub rules: PermissionRules,
   pub max_steps: usize,
   pub budget_usd: Option<f64>,
+  /// The worker for an explicit continuation of an existing task, if still eligible.
+  pub continue_with: Option<ModelTarget>,
   pub max_output_bytes: usize,
   pub context_tokens: usize,
   pub compact_at_tokens: usize,
@@ -36,6 +38,7 @@ impl From<&Config> for RunOptions {
       rules: config.rules.clone(),
       max_steps: config.max_steps,
       budget_usd: config.budget_usd,
+      continue_with: None,
       max_output_bytes: config.max_output_bytes,
       context_tokens: config.context_tokens,
       compact_at_tokens: config.compact_at_tokens,

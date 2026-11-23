@@ -21,6 +21,7 @@ fn options() -> RunOptions {
     preserve_messages: 4,
     memory_nudge: None,
     budget_usd: None,
+    continue_with: None,
     rules: Default::default(),
     hooks: HookRunner::default(),
   }
@@ -59,6 +60,7 @@ async fn agent_runs_tools_until_a_final_message() {
         thinking: None,
         response_items: Vec::new(),
         response_model: None,
+        provider_scope: None,
       },
       usage: Usage {
         input_tokens: 10,
@@ -251,6 +253,7 @@ async fn agent_compacts_before_the_context_limit() {
         compact_at_tokens: 200,
         preserve_messages: 2,
         budget_usd: None,
+        continue_with: None,
         memory_nudge: Some("write down anything durable".into()),
         rules: Default::default(),
         hooks: HookRunner::default(),
@@ -285,6 +288,7 @@ fn calls(calls: Vec<ToolCall>) -> ProviderReply {
       thinking: None,
       response_items: Vec::new(),
       response_model: None,
+      provider_scope: None,
     },
     usage: Usage::default(),
   }

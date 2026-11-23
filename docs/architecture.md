@@ -2,10 +2,10 @@
 
 Ainz keeps the orchestration core independent from transports and user interfaces.
 
-1. `Agent<P>` owns the bounded tool loop and accepts any `ChatProvider`. What the agent is —
-   provider, tool set, workspace, event sink, approver — stays fixed for the process; how a run
-   behaves — instructions, permission mode, standing rules, step and context limits, hooks —
-   travels separately in `RunOptions`, rebuilt whenever configuration changes.
+1. `Agent<P>` owns the bounded tool loop and accepts any `ChatProvider`. Its tool set, workspace,
+   event sink, and approver remain available across runs. Instructions, permission mode, rules,
+   limits, and hooks travel in `RunOptions`. An optional `ModelSelector<P>` chooses the provider
+   at the start of a run. The chosen provider handles the tool loop and any continuations.
 2. `ToolSet` gives built-ins, skills, external servers, subagents, and plugins one async
    interface and one permission path: a call's risk is checked against the standing rules
    first, then the permission mode, then a `pre_tool` hook that can still refuse it. See
@@ -25,8 +25,14 @@ Ainz keeps the orchestration core independent from transports and user interface
    pure step function (`agent/step.rs`): a reply cut off at its output limit leads to a
    continuation request, and three in a row without a successful tool call pause the run. A
    reply that broke off mid-stream is requested again. The context estimate is learned from the
-   provider's own token counts and kept by the agent across runs, so compaction triggers when the
-   provider's window is actually full rather than when a fixed bytes-per-token guess says so.
+   provider's own token counts. The agent keeps the estimate while it uses that provider.
+
+The CLI's `ModelRouter` resolves the session's fixed model or Auto strategy against its provider
+catalog. In Auto the boss receives a bounded task brief and eligible candidates. The selector
+validates its decision, emits `ModelSelected`, and passes reported routing usage into the worker's
+run budget. `Session` stores the picker selection for resume. Provider adapters replay ordinary
+messages and tool results across model switches and scope opaque reasoning to its originating
+connection and model. See [provider configuration](providers.md#automatic-model-routing).
 
 The terminal projects `EventSink` events into transcript and subagent views. Each worker
 retains its provider, session history, and subagent lifetime while the attached client switches

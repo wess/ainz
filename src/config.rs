@@ -555,7 +555,9 @@ pub struct Config {
   /// turn gives up; other 4xx are never retried
   pub provider_retries: usize,
   pub providers: BTreeMap<String, ProviderConfig>,
-  /// Let the agent pick a model from the active provider's saved list for each subagent.
+  #[serde(skip_serializing_if = "crate::routing::BossConfig::is_default")]
+  pub boss: crate::routing::BossConfig,
+  /// Let the agent pick from saved provider and model pairs for each subagent.
   pub subagent_models: bool,
   pub max_steps: usize,
   pub budget_usd: Option<f64>,
@@ -579,6 +581,8 @@ pub struct Config {
   // open is a decision about this run rather than a preference
   #[serde(skip)]
   pub yeet: bool,
+  #[serde(skip)]
+  pub pin_model: bool,
   /// The configuration as this session started using it, once init.lua and flags had their
   /// say. A save writes only what changed since, so neither ends up in config.toml.
   #[serde(skip)]
@@ -595,6 +599,7 @@ impl Default for Config {
       api_key_env: default_api_key_env(),
       provider_retries: 3,
       providers: BTreeMap::new(),
+      boss: crate::routing::BossConfig::default(),
       subagent_models: false,
       max_steps: 32,
       budget_usd: None,
@@ -612,6 +617,7 @@ impl Default for Config {
       hooks: BTreeMap::new(),
       mcp_config: None,
       yeet: false,
+      pin_model: false,
       baseline: None,
     }
   }
@@ -652,12 +658,15 @@ impl Config {
 
     if let Ok(endpoint) = env::var("AINZ_ENDPOINT") {
       config.endpoint = endpoint;
+      config.pin_model = true;
     }
     if let Ok(model) = env::var("AINZ_MODEL") {
       config.model = model;
+      config.pin_model = true;
     }
     if let Ok(provider) = env::var("AINZ_PROVIDER") {
       config.provider = Some(provider);
+      config.pin_model = true;
     }
     if let Ok(endpoint) = env::var("AINZ_ENDPOINT")
       && let Some(profile) = config
@@ -884,6 +893,9 @@ impl Config {
   /// The checks that hold for any configuration, whatever provider it names: limits that make
   /// sense on their own.
   pub fn validate_options(&self) -> Result<()> {
+    if !self.pin_model {
+      self.boss.validate(self)?;
+    }
     if self.improve.enabled {
       self.improve.validate()?;
     }

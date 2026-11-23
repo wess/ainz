@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Response};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Duration};
 /// Credentials are folded into headers so discovery and inference use the same identity.
 #[derive(Clone)]
@@ -12,6 +13,7 @@ pub(crate) struct Wire {
   client: Client,
   endpoint: String,
   pub(super) model: String,
+  profile: Option<String>,
   headers: BTreeMap<String, String>,
   retries: usize,
 }
@@ -35,6 +37,7 @@ impl Wire {
         .build()?,
       endpoint: endpoint.trim_end_matches('/').into(),
       model,
+      profile: None,
       headers,
       retries,
     })
@@ -45,6 +48,16 @@ impl Wire {
       model,
       ..self.clone()
     }
+  }
+
+  pub(super) fn with_profile(mut self, profile: Option<&str>) -> Self {
+    self.profile = profile.map(str::to_owned);
+    self
+  }
+
+  pub(super) fn scope(&self, api: &str) -> String {
+    let identity = serde_json::json!([api, self.profile, self.endpoint, self.model]);
+    format!("{:x}", Sha256::digest(identity.to_string()))
   }
 
   fn request(&self, builder: RequestBuilder) -> RequestBuilder {

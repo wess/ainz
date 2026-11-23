@@ -2,12 +2,14 @@
 
 Ainz keeps named provider profiles in `config.toml` under the platform config directory
 (`~/Library/Application Support/ainz` on macOS, `~/.config/ainz` on Linux; `AINZ_CONFIG`
-overrides the path). The active provider and model remain global CLI overrides through
-`--provider`, `--model`, `AINZ_PROVIDER`, and `AINZ_MODEL`.
+overrides the path). Override the startup selection with `--provider`, `--model`,
+`AINZ_PROVIDER`, or `AINZ_MODEL`.
 
-With no configured model, `ainz` opens an interactive setup flow before starting the first
-session. Enter `/model` later to add a provider or switch the active provider and model without
-leaving the app.
+With no configured model, `ainz` opens interactive setup. `/model` searches saved models across
+providers and pins the selection for the current session, including when you resume it. Press
+Esc to keep the current selection. Use `/provider` or **Add or manage providers** in the picker
+to open connection setup. Starting Ainz with an explicit provider, endpoint, or model override
+uses that connection for the invocation. You can still make a new selection in `/model`.
 
 ## Manage profiles
 
@@ -33,6 +35,54 @@ stored list the same way. Process providers have no common discovery protocol, s
 offer what can be known — the aliases the CLI's own help documents, plus the model that tool is
 already configured with on this machine (`~/.codex/config.toml`, `~/.claude/settings.json`).
 Every list ends in a row for naming a model by hand.
+
+## Automatic model routing
+
+Routing and the cross-provider picker are available in source builds that include this
+feature. The 0.17.0 release uses `/model` to open provider setup.
+
+1. Add provider profiles with `/provider` or `ainz providers add`. Run `ainz providers list`
+   and `ainz models list PROFILE` to find the saved names. Use `ainz models add PROFILE MODEL`
+   to save a model that the provider did not discover.
+2. Run `ainz doctor` to locate `config.toml`. Add a `[boss]` table with `enabled = true`,
+   a router model, and the provider and model pairs the boss may choose. Replace the example
+   names with your saved profiles and the model IDs they serve.
+3. Start Ainz. New sessions open in Auto with the configured strategy. Choose **Auto · Economy**,
+   **Auto · Balanced**, or **Auto · Quality** in `/model` to change the strategy for this
+   session. Choose any saved model in the same picker to pin that pair instead.
+
+```toml
+[boss]
+enabled = true
+strategy = "balanced"
+router = { provider = "gateway", model = "dispatcher" }
+candidates = [
+  { provider = "local", model = "quick", cost = "low", quality = "basic" },
+  { provider = "gateway", model = "general", cost = "medium", quality = "capable" },
+  { provider = "gateway", model = "reasoning", cost = "high", quality = "strong", images = true },
+]
+```
+
+Each candidate names a saved provider and model. The router uses one HTTP profile and model.
+Set `router` explicitly if your active provider is a process adapter. Otherwise the active
+pair is the default. Add descriptions under each profile's `model_hints`
+to guide specialization. Cost tiers are `low`, `medium`, `high`, and `unknown`. Capability
+tiers are `basic`, `capable`, and `strong`. Set `images = true` for candidates that can receive
+attached images. Image requirements apply to the task and its active conversation context.
+
+- **Economy** uses the lowest cost tier that meets the task's capability requirement.
+- **Balanced** uses the boss's preferred model when it meets the task's requirement.
+- **Quality** favors the highest capability tier and uses the boss's preference within that tier.
+
+The boss receives a bounded task brief and the eligible model list. One eligible model skips
+the boss call. A failed routing request prefers the configured active model when it's eligible,
+then uses the configured tiers. The selected model handles the run, including tools, steering,
+and automatic continuations. `/goal` keeps the same model across its follow-up turns. The status
+bar shows the chosen pair, and `model_selected` events record the strategy and reason.
+
+The boss and worker share the run's `budget_usd` based on what their providers report. Ainz
+checks that total before starting the next model request or tool call. Cost tiers guide
+routing choices and can represent local or subscription usage as well as metered API spend.
 
 ## LiteLLM
 
@@ -81,8 +131,7 @@ var = "OPENROUTER_API_KEY"
 ```
 
 A profile written before this existed keeps its `api_key_env` name and resolves exactly as it
-did. `/model` on a saved provider offers to keep what it uses or change it, which is the usual
-reason to open setup again.
+did. `/provider` on a saved provider offers to keep what it uses or change it.
 
 ## Custom HTTP providers
 
@@ -240,9 +289,10 @@ to clear the chain. Repeated `--fallback-provider NAME` flags override it for on
 HTTP profile's endpoint as well as the legacy endpoint.
 
 Responses requests set `store = false`. Output items, including encrypted reasoning, persist
-in the local session and replay only to the model that produced them. Hosted tools and
+in the local session and replay only to the connection and model that produced them. Hosted tools and
 WebSocket transport are not implemented. Native Messages retains signed/redacted thinking for
-the next tool turn. Reasoning deltas are JSON events; the IRC answer stays separate.
+the same connection and model. Switching models carries the ordinary transcript and tool results
+to the next model. Reasoning deltas are JSON events; the IRC answer stays separate.
 
 `doctor --check-provider` makes a billable request to the active model with no tools, retries,
 or fallback and a 45-second timeout. Listing models alone does not prove inference access.

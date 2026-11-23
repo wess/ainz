@@ -1,7 +1,8 @@
 # Settings and shortcuts
 
 Open `/settings`, `/config`, or press F2. Both commands open the same screen. Select
-**Provider and model** to open connection setup; `/model` opens that setup directly.
+**Provider and model** or use `/provider` for connection setup. `/model` searches across
+saved provider and model pairs and offers Auto strategies when the boss is enabled.
 
 Press Tab or Shift+Tab to change sections: **All**, **Connection**, **Interface**, **Sessions**,
 **Keys**, and **Memory**. Press `/` to search labels and section names. Enter leaves search
@@ -11,8 +12,8 @@ Use Up/Down to select a row and Enter or Left/Right to change its value. Read th
 beside the row before changing it. Close settings to save. Runtime setup changes apply when
 chat reopens; background hosting applies at the next launch.
 
-**Connection → Subagent models** lets the agent pick a model from the active provider's saved
-list for each subagent. See [named agents](agents.md#choosing-a-model-for-each-child) for
+**Connection → Subagent models** lets the agent pick a saved provider and model for each
+subagent. See [named agents](agents.md#choosing-a-model-for-each-child) for
 `model_hints`.
 
 **Memory → Automatic improvement** enables background experiments after saved runs. Turn it

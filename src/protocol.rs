@@ -22,6 +22,8 @@ pub struct Message {
   pub response_items: Vec<Value>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub response_model: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub provider_scope: Option<String>,
   pub role: Role,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub content: Option<String>,
@@ -113,6 +115,7 @@ impl Message {
       images: Vec::new(),
       response_items: Vec::new(),
       response_model: None,
+      provider_scope: None,
     }
   }
 

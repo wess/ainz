@@ -252,13 +252,16 @@ async fn run() -> Result<()> {
   }
   if let Some(model) = cli.model {
     config.model = model;
+    config.pin_model = true;
   }
   if let Some(endpoint) = cli.endpoint {
     config.endpoint = endpoint;
     config.provider = None;
+    config.pin_model = true;
   }
   if let Some(provider) = cli.provider {
     config.provider = Some(provider);
+    config.pin_model = true;
   }
   if !cli.fallback_providers.is_empty() {
     config.fallback_providers = cli.fallback_providers;

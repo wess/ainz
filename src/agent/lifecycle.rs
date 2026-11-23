@@ -6,6 +6,7 @@ use crate::control::cancelled;
 #[derive(Default)]
 pub(super) struct RunState {
   pub usage: Usage,
+  pub target: Option<ModelTarget>,
   pub pending: VecDeque<ToolCall>,
   // results that came back before they were written to the session: a cancel that lands
   // while a batch is running keeps the calls that did finish
@@ -54,9 +55,16 @@ impl<P: ChatProvider> Agent<P> {
             .await;
         }
         state.checkpoint()?;
-        let result = self
-          .run_turn(session, prompt, &options, inbox.as_deref_mut(), &mut state)
-          .await;
+        let result = match self.worker(session, &prompt, &options, &mut state).await {
+          Ok(worker) => {
+            worker
+              .as_ref()
+              .unwrap_or(self)
+              .run_turn(session, prompt, &options, inbox.as_deref_mut(), &mut state)
+              .await
+          }
+          Err(error) => Err(error),
+        };
         if let Some(inbox) = inbox.as_deref_mut() {
           inbox.close();
         }
@@ -110,5 +118,38 @@ impl<P: ChatProvider> Agent<P> {
       self.events.emit(Event::TurnEnd { usage: state.usage });
     }
     result
+  }
+
+  async fn worker(
+    &self,
+    session: &Session,
+    prompt: &Message,
+    options: &RunOptions,
+    state: &mut RunState,
+  ) -> Result<Option<Self>> {
+    let Some(selector) = &self.selector else {
+      return Ok(None);
+    };
+    let choice = selector
+      .select(session, prompt, options.continue_with.as_ref())
+      .await?;
+    state.usage = choice.usage;
+    if let Some((strategy, reason)) = choice.decision {
+      self.events.emit(Event::ModelSelected {
+        target: choice.target.clone(),
+        strategy,
+        reason,
+      });
+    }
+    state.target = Some(choice.target);
+    Ok(choice.provider.map(|provider| {
+      Agent::new(
+        provider,
+        self.tools.clone(),
+        self.workspace.clone(),
+        self.events.clone(),
+        self.approver.clone(),
+      )
+    }))
   }
 }

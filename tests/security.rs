@@ -25,6 +25,7 @@ fn options() -> RunOptions {
     preserve_messages: 4,
     memory_nudge: None,
     budget_usd: None,
+    continue_with: None,
     hooks: HookRunner::default(),
   }
 }
@@ -69,6 +70,7 @@ fn script(calls: Vec<ToolCall>) -> Script {
         thinking: None,
         response_items: Vec::new(),
         response_model: None,
+        provider_scope: None,
       },
       usage: Usage::default(),
     },

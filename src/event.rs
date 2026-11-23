@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::{
   protocol::{ToolCall, Usage},
+  routing::{ModelTarget, RoutingStrategy},
   todo::Todo,
 };
 
@@ -13,6 +14,11 @@ use crate::{
 pub enum Event {
   SessionStart {
     session_id: String,
+  },
+  ModelSelected {
+    target: ModelTarget,
+    strategy: RoutingStrategy,
+    reason: String,
   },
   ThinkingDelta {
     text: String,
@@ -63,6 +69,7 @@ pub enum Event {
     parent_id: String,
     name: String,
     task: String,
+    target: ModelTarget,
   },
   SubagentEnd {
     session_id: String,

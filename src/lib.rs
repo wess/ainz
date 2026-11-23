@@ -27,6 +27,7 @@ mod process;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;
+pub mod routing;
 pub mod sandbox;
 #[cfg(feature = "lua")]
 pub mod script;

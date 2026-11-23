@@ -34,6 +34,7 @@ mod chat;
 mod import;
 mod input;
 mod masthead;
+mod model;
 mod settings;
 
 pub(crate) use chat::{ChatNext, run_chat};
@@ -407,7 +408,7 @@ fn local_endpoints() -> Vec<String> {
   .collect()
 }
 
-pub async fn configure(config: &mut Config) -> Result<()> {
+pub async fn configure(config: &mut Config) -> Result<bool> {
   let mut terminal = enter_terminal()?;
   let result = configure_inner(&mut terminal, config).await;
   leave_terminal(&mut terminal)?;
@@ -424,9 +425,9 @@ pub async fn configure(config: &mut Config) -> Result<()> {
       config.model = model.clone();
       config.save().await?;
       println!("configured {name} · {model}");
-      Ok(())
+      Ok(true)
     }
-    None if config.validate().is_ok() => Ok(()),
+    None if config.validate().is_ok() => Ok(false),
     None => anyhow::bail!("setup cancelled before a provider was configured"),
   }
 }

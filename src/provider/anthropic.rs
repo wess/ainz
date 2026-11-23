@@ -49,6 +49,11 @@ impl AnthropicProvider {
     }
   }
 
+  pub(super) fn with_profile(mut self, profile: Option<&str>) -> Self {
+    self.wire = self.wire.with_profile(profile);
+    self
+  }
+
   pub async fn models(&self) -> Result<Vec<String>> {
     self.wire.models("models?limit=100").await
   }
@@ -62,7 +67,8 @@ impl ChatProvider for AnthropicProvider {
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
-    let (system, conversation) = split(messages);
+    let scope = self.wire.scope("messages");
+    let (system, conversation) = split(messages, &scope);
     let mut body = json!({
       "model": self.wire.model,
       "max_tokens": max_tokens(self.thinking_tokens),
@@ -90,7 +96,11 @@ impl ChatProvider for AnthropicProvider {
     let response = self.wire.post("messages", &body, events).await?;
     let mut state = StreamState::default();
     read_events(response, |data| state.push(data, events)).await?;
-    state.finish()
+    let mut reply = state.finish()?;
+    if reply.message.thinking.is_some() {
+      reply.message.provider_scope = Some(scope);
+    }
+    Ok(reply)
   }
 }
 
@@ -107,7 +117,7 @@ fn max_tokens(thinking: usize) -> usize {
 }
 
 /// Anthropic takes the system prompt out of band, and the rest as alternating turns.
-fn split(messages: &[&Message]) -> (String, Vec<Value>) {
+fn split(messages: &[&Message], scope: &str) -> (String, Vec<Value>) {
   let mut system = Vec::new();
   let mut conversation: Vec<Value> = Vec::new();
   for message in messages {
@@ -154,7 +164,9 @@ fn split(messages: &[&Message]) -> (String, Vec<Value>) {
       }
       Role::Assistant => {
         let mut blocks = Vec::new();
-        if let Some(thinking) = &message.thinking {
+        if message.provider_scope.as_deref() == Some(scope)
+          && let Some(thinking) = &message.thinking
+        {
           if !thinking.text.is_empty() {
             let mut block = json!({"type": "thinking", "thinking": thinking.text});
             if let Some(signature) = &thinking.signature {
@@ -459,7 +471,9 @@ mod tests {
       r#"{"type":"message_stop"}"#,
     ])
     .unwrap();
-    let (_, conversation) = split(&[&reply.message]);
+    let mut message = reply.message;
+    message.provider_scope = Some("scope".into());
+    let (_, conversation) = split(&[&message], "scope");
     let blocks = &conversation[0]["content"];
     assert_eq!(blocks[0]["type"], "redacted_thinking");
     assert_eq!(blocks[0]["data"], "sealed");

@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::{
   event::{Event, EventSink},
   protocol::ToolSpec,
+  routing::ModelTarget,
 };
 use uuid::Uuid;
 
@@ -35,6 +36,7 @@ pub struct ToolContext {
   pub workspace: PathBuf,
   pub session_id: Uuid,
   pub max_output_bytes: usize,
+  pub model_target: Option<ModelTarget>,
   // where a tool reports what it has produced so far, and the call it belongs to
   pub progress: Option<(EventSink, String)>,
 }
@@ -45,6 +47,7 @@ impl ToolContext {
       workspace,
       session_id,
       max_output_bytes,
+      model_target: None,
       progress: None,
     }
   }

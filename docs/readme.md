@@ -9,6 +9,9 @@ The tutorials cover [getting started](https://wess.io/ainz/tutorial/gettingstart
 [writing plugins](https://wess.io/ainz/tutorial/plugins/), and
 [advanced operation](https://wess.io/ainz/tutorial/advanced/).
 
+To switch across provider profiles or configure Economy, Balanced, or Quality routing, see
+[automatic model routing](providers.md#automatic-model-routing).
+
 | Guide | Covers |
 | --- | --- |
 | [Install](install.md) | Release binaries, source builds, updates, and uninstalling |
@@ -17,7 +20,7 @@ The tutorials cover [getting started](https://wess.io/ainz/tutorial/gettingstart
 | [Sessions](sessions.md) | Detach, reconnect, multiplex, attention, and notifications |
 | [Themes](themes.md) | Theme Designer, palette roles, installation, and live switching |
 | [Headers](headers.md) | Mascots, masthead studio, installing and sharing artwork |
-| [Providers](providers.md) | HTTP endpoints and process adapters |
+| [Providers](providers.md) | Provider profiles, cross-provider model switching, and automatic routing |
 | [Tools](tools.md) | Built-in tools and their arguments |
 | [Permissions](permissions.md) | Approval modes and standing rules |
 | [Hooks](hooks.md) | Start/end hooks, tool hooks, cancellation, and limits |

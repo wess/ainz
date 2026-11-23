@@ -10,6 +10,7 @@ const BLOCKED: &str = "GOAL BLOCKED";
 
 pub(super) struct Goal {
   pub text: String,
+  pub worker: Option<ainz::routing::ModelTarget>,
   /// Turns taken so far, the opening one included.
   pub rounds: usize,
 }
@@ -103,6 +104,7 @@ pub(super) fn command(goal: &mut Option<Goal>, args: &str) -> Next {
     objective => {
       *goal = Some(Goal {
         text: objective.to_string(),
+        worker: None,
         rounds: 1,
       });
       Next::Run {
@@ -155,6 +157,7 @@ mod tests {
   fn open(rounds: usize) -> Option<Goal> {
     Some(Goal {
       text: "ship it".into(),
+      worker: None,
       rounds,
     })
   }

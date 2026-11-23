@@ -112,13 +112,15 @@ ainz.off(id)
 | `tool_start` | `id`, `name`, `arguments`, `subject` |
 | `tool_end` | `id`, `error`, `output` (first 4 KiB) |
 | `turn_end` | `ok`, `cancelled`, and `text` or `error` |
+| `model_selected` | Auto worker `target` with `provider` and `model`, plus `strategy` and `reason` |
 | `notice`, `error` | `message` |
 | `context` | `used`, `limit`: the share of the context window the last request took |
 | `compaction` | `archived_messages`, `summary` |
 | `todos` | `items` |
 | `steering` | `message` |
 | `cancelled` | nothing |
-| `subagent_start`, `subagent_end` | the child's `session_id`, `name`, `task`, `error` |
+| `subagent_start` | the child's `session_id`, `parent_id`, `name`, `task`, and model `target` |
+| `subagent_end` | the child's `session_id` and `error` |
 | `resize` | `width`, `height` |
 
 `pre_tool` runs before every tool call, in every permission mode, subagents included, and in
@@ -207,6 +209,9 @@ Item, bar, and topic functions get the same state `ainz.state()` returns:
 
 They run when the screen is drawn, so keep them quick. A script that runs longer than two
 seconds is stopped.
+
+`provider` and `model` describe the selected buffer. In an Auto session they show the chosen
+worker once routing completes.
 
 ## Format codes
 

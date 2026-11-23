@@ -30,7 +30,9 @@ You can change them in **Settings → Keys**.
 | `Ctrl+B ]` / `Ctrl+B [` | Visit the next / previous live session |
 | `Ctrl+B A` | Visit the next session needing attention; `/attention` also works |
 
-Each session keeps its transcript, prompt, provider, and agent runtime. You view one at a time.
+Each session keeps its transcript, prompt, and agent runtime. `/model` saves the chosen provider
+and model or Auto strategy with that session, so the choice follows you through detach and resume.
+You view one session at a time.
 Detaching and switching also work while an agent waits for approval. Answer the approval after
 reconnecting. Only one terminal can control a session at a time.
 

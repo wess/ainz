@@ -13,6 +13,7 @@ use ainz::{
   SkillCatalog,
   command_palette::{SlashCommand, builtins as builtin_commands, matches as command_matches},
   protocol::{Image, ToolCall, Usage},
+  routing::{ModelMode, ModelTarget, RoutingStrategy, model_mode},
   run_control,
   tool::Risk,
 };
@@ -292,6 +293,8 @@ struct AgentView {
   tools: BTreeMap<String, String>,
   assistant: Option<usize>,
   usage: Usage,
+  model: Option<ModelTarget>,
+  strategy: Option<RoutingStrategy>,
   // the plan as this agent's last todo call left it; each view has its own
   todos: Vec<ainz::Todo>,
   // tokens the last request took and the window it had, once a request has said
@@ -326,9 +329,31 @@ impl AgentView {
       tools: BTreeMap::new(),
       assistant: None,
       usage: Usage::default(),
+      model: None,
+      strategy: None,
       todos: Vec::new(),
       context: None,
     }
+  }
+
+  fn set_model(&mut self, mode: ModelMode) {
+    (self.model, self.strategy) = match mode {
+      ModelMode::Fixed { target } => (Some(target), None),
+      ModelMode::Auto { strategy } => (None, Some(strategy)),
+    };
+  }
+
+  fn model_label<'a>(&'a self, config: &'a Config) -> (&'a str, String) {
+    if let Some(target) = &self.model {
+      return (target.provider_name(), target.model.clone());
+    }
+    if let Some(strategy) = self.strategy {
+      return ("auto", format!("Auto · {}", strategy.label()));
+    }
+    (
+      config.provider.as_deref().unwrap_or("default"),
+      config.model.clone(),
+    )
   }
 }
 
@@ -392,6 +417,7 @@ struct ChatState {
   pictures: usize,
   // an objective each turn is followed by another toward, until it is met
   goal: Option<goal::Goal>,
+  running_goal: bool,
   // what the person's scripts asked for and have not had yet
   scripted: lua::Scripted,
   // the terminal's size at the last frame, for scripts that ask
@@ -443,6 +469,7 @@ impl Default for ChatState {
       attached: Vec::new(),
       pictures: 0,
       goal: None,
+      running_goal: false,
       scripted: lua::Scripted::default(),
       size: Cell::new((0, 0)),
       files: Vec::new(),
@@ -454,6 +481,14 @@ impl Default for ChatState {
 }
 
 impl ChatState {
+  fn goal_options(&mut self, options: &ainz::RunOptions) -> ainz::RunOptions {
+    self.running_goal = true;
+    ainz::RunOptions {
+      continue_with: self.goal.as_ref().and_then(|goal| goal.worker.clone()),
+      ..options.clone()
+    }
+  }
+
   /// Puts a picture's placeholder in the line where the caret is; the picture goes with the
   /// prompt for as long as its placeholder stays in it.
   fn attach(&mut self, path: PathBuf) {
@@ -869,6 +904,9 @@ async fn run_chat_inner(
     custom_header,
     ..ChatState::default()
   };
+  state
+    .primary
+    .set_model(model_mode(config, session.as_ref().unwrap()));
   state.primary.refresh_topic();
   themes::initialize(&mut state, config).await?;
   if let Some(notice) = notice {
@@ -1185,6 +1223,7 @@ async fn run_chat_inner(
         while let Ok(message) = rx.try_recv() {
           apply_event(&mut state, message);
         }
+        state.running_goal = false;
         // a run that never returned took the agent and the session with it. The last save is
         // what is left of the conversation, and a rebuilt agent can carry on from it; losing
         // the session as well would only make it worse.
@@ -1195,6 +1234,9 @@ async fn run_chat_inner(
               Ok(session) => session,
               Err(_) => Session::new(workspace.clone()),
             });
+            state
+              .primary
+              .set_model(model_mode(config, session.as_ref().unwrap()));
             controller = None;
             match make_agent_with(&workspace, config, events.clone(), approver.clone()).await {
               Ok((rebuilt, rebuilt_options)) => {
@@ -1269,11 +1311,12 @@ async fn run_chat_inner(
               .primary
               .entries
               .push(Entry::new(EntryKind::System, shown));
+            let goal_options = state.goal_options(&options);
             task = Some(launch(
               &mut agent,
               &mut session,
               &mut controller,
-              &options,
+              &goal_options,
               &mut state,
               prompt,
               Vec::new(),
@@ -1900,6 +1943,32 @@ async fn run_chat_inner(
           }
         };
         match command_result {
+          CommandResult::Model => {
+            let current = session.as_mut().unwrap();
+            match super::model::pick(terminal, config, current)? {
+              Some(super::model::Pick::Mode(mode)) => {
+                current.set_model_mode(mode.clone());
+                state.primary.set_model(mode);
+                if let Some(goal) = &mut state.goal {
+                  goal.worker = None;
+                }
+                if let Err(error) = store.save(current).await {
+                  state.primary.entries.push(Entry::new(
+                    EntryKind::Error,
+                    format!("could not save model selection: {error:#}"),
+                  ));
+                }
+              }
+              Some(super::model::Pick::Providers) => {
+                return Ok(ChatOutcome {
+                  session: session.take().unwrap(),
+                  next: ChatNext::Configure,
+                });
+              }
+              None => {}
+            }
+            terminal.clear()?;
+          }
           CommandResult::Goal(args) => match goal::command(&mut state.goal, &args) {
             goal::Next::Note(note) => {
               state
@@ -1912,11 +1981,12 @@ async fn run_chat_inner(
                 .primary
                 .entries
                 .push(Entry::new(EntryKind::User, shown));
+              let goal_options = state.goal_options(&options);
               task = Some(launch(
                 &mut agent,
                 &mut session,
                 &mut controller,
-                &options,
+                &goal_options,
                 &mut state,
                 prompt,
                 Vec::new(),
@@ -2266,6 +2336,7 @@ async fn remember(state: &mut ChatState, config: &Config) {
 }
 
 enum CommandResult {
+  Model,
   Improve(String),
   Goal(String),
   Quit,
@@ -2303,7 +2374,8 @@ fn command(
     input if input.starts_with("/goal ") => Ok(CommandResult::Goal(input[6..].trim().into())),
     input if input.starts_with("/improve ") => Ok(CommandResult::Improve(input[9..].trim().into())),
     "/exit" | "/quit" => Ok(CommandResult::Quit),
-    "/model" | "/provider" => Ok(CommandResult::Configure),
+    "/model" => Ok(CommandResult::Model),
+    "/provider" => Ok(CommandResult::Configure),
     "/config" | "/settings" => Ok(CommandResult::Settings),
     "/import" | "/mcp import" => Ok(CommandResult::Import),
     "/memory" => Ok(CommandResult::Recall(String::new())),
@@ -2447,6 +2519,7 @@ fn command(
     }
     "/new" | "/clear" => {
       *session = Session::new(session.workspace.clone());
+      state.primary.set_model(model_mode(config, session));
       state.primary.entries.clear();
       state.primary.topic.clear();
       state.outcome = None;
@@ -2458,6 +2531,7 @@ fn command(
       state.primary.usage = Usage::default();
       state.agents.clear();
       state.active = None;
+      state.goal = None;
       Ok(CommandResult::Handled)
     }
     "/status" => {
@@ -2466,13 +2540,15 @@ fn command(
         .values()
         .filter(|view| matches!(view.state, AgentState::Running))
         .count();
-      let usage = &state.active_view().usage;
+      let view = state.active_view();
+      let usage = &view.usage;
+      let (provider, model) = view.model_label(config);
       let text = format!(
         "session {}\nprovider {}\nmodel {}\npermissions {}\nagents {running}/{} running\n\
          usage {} input · {} output",
         session.id,
-        config.provider.as_deref().unwrap_or("default"),
-        config.model,
+        provider,
+        model,
         permission_name(config.permissions),
         state.agents.len(),
         usage.input_tokens,
@@ -2668,6 +2744,19 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     lua::event(&event);
   }
   match event {
+    Event::ModelSelected {
+      target, strategy, ..
+    } => {
+      if session_id.is_none()
+        && state.running_goal
+        && let Some(goal) = &mut state.goal
+      {
+        goal.worker = Some(target.clone());
+      }
+      let view = state.view_mut(session_id);
+      view.model = Some(target);
+      view.strategy = Some(strategy);
+    }
     Event::SubagentEvent { session_id, event } => {
       apply_agent_event(state, Some(&session_id), *event);
     }
@@ -2759,6 +2848,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       session_id,
       name,
       task,
+      target,
       ..
     } => {
       let view = state
@@ -2767,6 +2857,7 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
         .or_insert_with(|| AgentView::new(AgentState::Running));
       view.state = AgentState::Running;
       view.name = name;
+      view.set_model(ModelMode::Fixed { target });
       view.topic = title::excerpt(&task);
     }
     Event::SubagentEnd { session_id, error } => {
@@ -3510,13 +3601,17 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       .input_tokens
       .saturating_add(view.usage.output_tokens),
   );
-  let provider = config.provider.as_deref().unwrap_or("default");
+  let (provider, model) = view.model_label(config);
+  let model_display = if provider == "auto" && view.model.is_none() {
+    model.clone()
+  } else {
+    format!("{provider}/{model}")
+  };
   let permissions = if config.yeet {
     "yeet"
   } else {
     permission_name(config.permissions)
   };
-  let model = &config.model;
   // what memory this session has, since it changes what the model can be expected to know
   let memory = match (config.memory.backend, config.mesh_active()) {
     (ainz::MemoryBackend::Off, _) => String::new(),
@@ -3632,21 +3727,21 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ChatState, config: &Conf
       .collect();
     format!(" {} ", fields.join(" │ "))
   } else if !attention.is_empty() {
-    format!(" {attention} │ {model} │ Σ{total} tok ")
+    format!(" {attention} │ {model_display} │ Σ{total} tok ")
   } else if area.width >= 108 {
     format!(
-      " {provider}/{model} │ {permissions}{memory} │ tokens in {input} out {output} total \
+      " {model_display} │ {permissions}{memory} │ tokens in {input} out {output} total \
        {total}{cost} │ {context} │ agents {running}/{total_agents}{plan} │ {} local · {} mesh ",
       ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::Roster),
       ainz::keybind::label(&config.ui.keybindings, ainz::keybind::Action::MeshRoster)
     )
   } else if area.width >= 72 {
     format!(
-      " {provider}/{model} │ {permissions} │ tok {input}↓ {output}↑ Σ{total}{cost} │ \
+      " {model_display} │ {permissions} │ tok {input}↓ {output}↑ Σ{total}{cost} │ \
        ag {running}/{total_agents}{plan} "
     )
   } else {
-    format!(" {} │ Σ{total} tok ", config.model)
+    format!(" {model_display} │ Σ{total} tok ")
   };
   frame.render_widget(Paragraph::new(text).style(bar), area);
 }

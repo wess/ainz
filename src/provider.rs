@@ -19,6 +19,7 @@ use crate::{
   config::PermissionMode,
   event::{Event, EventSink},
   protocol::{Message, ToolSpec, Usage},
+  routing::ModelTarget,
   sse::SseDecoder,
 };
 
@@ -185,22 +186,44 @@ impl RuntimeProvider {
   }
 
   pub async fn configured(config: &crate::Config, workspace: &std::path::Path) -> Result<Self> {
-    let active = Self::from_profile(
+    Self::configured_for(config, &ModelTarget::configured(config), workspace).await
+  }
+
+  pub async fn from_target(
+    config: &crate::Config,
+    target: &ModelTarget,
+    workspace: &std::path::Path,
+  ) -> Result<Self> {
+    let provider = Self::from_profile(
       config,
-      &config.active_provider()?,
-      config.model.clone(),
+      &target.profile(config)?,
+      target.model.clone(),
       workspace,
     )
     .await?;
+    Ok(match provider {
+      Self::Anthropic(provider) => {
+        Self::Anthropic(provider.with_profile(target.provider.as_deref()))
+      }
+      Self::Responses(provider) => {
+        Self::Responses(provider.with_profile(target.provider.as_deref()))
+      }
+      provider => provider,
+    })
+  }
+
+  pub async fn configured_for(
+    config: &crate::Config,
+    target: &ModelTarget,
+    workspace: &std::path::Path,
+  ) -> Result<Self> {
+    let active = Self::from_target(config, target, workspace).await?;
     if config.fallback_providers.is_empty() {
       return Ok(active);
     }
-    let mut providers = vec![(
-      config.provider.clone().unwrap_or_else(|| "default".into()),
-      Box::new(active),
-    )];
+    let mut providers = vec![(target.provider_name().to_string(), Box::new(active))];
     for name in &config.fallback_providers {
-      if config.provider.as_ref() == Some(name) {
+      if target.provider.as_ref() == Some(name) {
         continue;
       }
       let profile = config
@@ -210,10 +233,14 @@ impl RuntimeProvider {
       let model = profile
         .model
         .clone()
-        .unwrap_or_else(|| config.model.clone());
+        .unwrap_or_else(|| target.model.clone());
+      let fallback = ModelTarget {
+        provider: Some(name.clone()),
+        model,
+      };
       providers.push((
         name.clone(),
-        Box::new(Self::from_profile(config, profile, model, workspace).await?),
+        Box::new(Self::from_target(config, &fallback, workspace).await?),
       ));
     }
     Ok(Self::Fallback(providers))

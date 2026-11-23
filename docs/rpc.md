@@ -50,10 +50,12 @@ it, for the same reason every other write does.
 ## Event consumers
 
 `text_delta`, `tool_start`, `tool_delta`, and `tool_end` describe incremental output.
+With [automatic routing](providers.md#automatic-model-routing), `model_selected` carries the
+worker `target`, the selected `strategy`, and a short `reason` before the worker runs.
 `context` carries `used` and `limit` after each model request: the share of the context window
 that request took. `notice` reports something worth showing that is not output, such as a reply
 that reached its output limit being continued or one that broke off being requested again. A
-`subagent_start` event includes the child `session_id`, `parent_id`, `name`, and `task`.
+`subagent_start` event includes the child `session_id`, `parent_id`, `name`, `task`, and `target`.
 `subagent_event` wraps that child's events. The task field lets a host label an agent's buffer
 without an extra model request. `subagent_end` records its outcome.
 

@@ -43,6 +43,7 @@ pub(super) struct Scripted {
 /// arrive a piece at a time, and a handler on each would cost more than it could show.
 pub(super) fn event(event: &Event) {
   let name = match event {
+    Event::ModelSelected { .. } => "model_selected",
     Event::ToolStart { .. } => "tool_start",
     Event::ToolEnd { .. } => "tool_end",
     Event::Notice { .. } => "notice",
@@ -112,9 +113,10 @@ pub(super) fn view(state: &ChatState, config: &ainz::Config) -> View {
     .filter(|todo| todo.status == ainz::TodoStatus::Done)
     .count();
   let (width, height) = state.size.get();
+  let (provider, model) = active.model_label(config);
   View {
-    provider: config.provider.clone().unwrap_or_else(|| "default".into()),
-    model: config.model.clone(),
+    provider: provider.into(),
+    model,
     mode: match config.yeet {
       true => "yeet".into(),
       false => super::permission_name(config.permissions).into(),

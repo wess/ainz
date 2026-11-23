@@ -688,3 +688,93 @@ async fn a_line_that_is_not_text_is_skipped_and_the_run_goes_on() {
   ));
   assert_eq!(reply(provider).await, "finished");
 }
+
+#[tokio::test]
+async fn opaque_state_replays_only_to_the_connection_and_model_that_produced_it() {
+  use ainz::{Config, ProviderConfig, RuntimeProvider, WireApi, routing::ModelTarget};
+  use serde_json::Value;
+
+  for api in [WireApi::Responses, WireApi::Messages] {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let reply = match api {
+      WireApi::Responses => canned_response(
+        "200 OK",
+        r#"{"status":"completed","output":[{"type":"reasoning","encrypted_content":"opaque-state"},{"type":"message","content":[{"type":"output_text","text":"portable answer"}]}]}"#,
+        "",
+      ),
+      WireApi::Messages => {
+        let body = concat!(
+          "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque-state\"}}\n\n",
+          "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"portable answer\"}}\n\n",
+          "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        format!(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+          body.len()
+        )
+      }
+      WireApi::Chat => unreachable!(),
+    };
+    let server = tokio::spawn(async move {
+      let mut requests = Vec::new();
+      for _ in 0..4 {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut socket).await;
+        let (_, body) = std::str::from_utf8(&request)
+          .unwrap()
+          .split_once("\r\n\r\n")
+          .unwrap();
+        requests.push(serde_json::from_str::<Value>(body).unwrap());
+        socket.write_all(reply.as_bytes()).await.unwrap();
+      }
+      requests
+    });
+    let mut profile = ProviderConfig::http(format!("http://{address}"), "");
+    profile.wire_api = api;
+    let mut config = Config::default();
+    config.providers.insert("origin".into(), profile.clone());
+    config.providers.insert("other".into(), profile);
+    let workspace = std::env::temp_dir();
+    let events = EventSink::default();
+    let first = ModelTarget {
+      provider: Some("origin".into()),
+      model: "same-id".into(),
+    };
+    let origin = RuntimeProvider::from_target(&config, &first, &workspace)
+      .await
+      .unwrap();
+    let prompt = Message::text(Role::User, "start");
+    let reply = origin.complete(&[&prompt], &[], &events).await.unwrap();
+    let mut legacy = reply.message.clone();
+    legacy.provider_scope = None;
+    let second = Message::text(Role::User, "continue");
+    let history = [&prompt, &reply.message, &legacy, &second];
+
+    origin.complete(&history, &[], &events).await.unwrap();
+    for target in [
+      ModelTarget {
+        provider: Some("other".into()),
+        ..first.clone()
+      },
+      ModelTarget {
+        model: "different-id".into(),
+        ..first
+      },
+    ] {
+      let destination = RuntimeProvider::from_target(&config, &target, &workspace)
+        .await
+        .unwrap();
+      destination.complete(&history, &[], &events).await.unwrap();
+    }
+
+    let requests = server.await.unwrap();
+    let same = requests[1].to_string();
+    assert_eq!(same.matches("opaque-state").count(), 1);
+    for request in &requests[2..] {
+      let body = request.to_string();
+      assert!(!body.contains("opaque-state"), "{body}");
+      assert!(body.contains("portable answer"), "{body}");
+    }
+  }
+}

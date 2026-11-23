@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
   protocol::{ToolSpec, Usage},
+  routing::ModelTarget,
   tool::{Risk, Tool, ToolContext, truncate},
 };
 
@@ -39,6 +40,8 @@ pub struct SubagentRequest {
   /// The model the parent picked for this child; `None` inherits the parent's. A named agent
   /// type's own model takes precedence.
   pub model: Option<String>,
+  pub provider: Option<String>,
+  pub parent_model: Option<ModelTarget>,
 }
 
 pub type SubagentFuture = Pin<Box<dyn Future<Output = Result<SubagentResult>> + Send + 'static>>;
@@ -185,6 +188,20 @@ pub fn subagent_tool_with_models(
     registry,
     mesh,
     models,
+    targets: BTreeMap::new(),
+  })
+}
+
+pub fn subagent_tool_with_targets(
+  registry: Arc<SubagentRegistry>,
+  mesh: bool,
+  targets: BTreeMap<ModelTarget, String>,
+) -> Arc<dyn Tool> {
+  Arc::new(SubagentTool {
+    registry,
+    mesh,
+    models: BTreeMap::new(),
+    targets,
   })
 }
 
@@ -192,6 +209,7 @@ struct SubagentTool {
   registry: Arc<SubagentRegistry>,
   mesh: bool,
   models: BTreeMap<String, String>,
+  targets: BTreeMap<ModelTarget, String>,
 }
 
 #[derive(Deserialize)]
@@ -202,23 +220,32 @@ struct SubagentArgs {
   role: Option<String>,
   name: Option<String>,
   model: Option<String>,
+  provider: Option<String>,
   #[serde(default)]
   background: bool,
 }
 
 impl SubagentTool {
   fn routing(&self) -> String {
-    if self.models.is_empty() {
+    if self.models.is_empty() && self.targets.is_empty() {
       return String::new();
     }
     let hints: String = self
       .models
       .iter()
+      .map(|(model, hint)| (model.clone(), hint))
+      .chain(
+        self
+          .targets
+          .iter()
+          .map(|(target, hint)| (target.to_string(), hint)),
+      )
       .filter(|(_, hint)| !hint.trim().is_empty())
       .map(|(model, hint)| format!(" {model}: {}.", hint.trim().trim_end_matches('.')))
       .collect();
     format!(
-      " Pick a model for each delegation with the model parameter.{hints} Match the model to \
+      " Pick a model for each delegation with the model parameter. Use provider to choose a \
+       different provider when offered.{hints} Match the model to \
        the task: a small inexpensive one for bounded lookups, summaries, and mechanical edits; \
        a capable coding model for implementation and tests; a strong reasoning model for \
        design, hard debugging, and security review. Do not assume a name you have no hint for \
@@ -246,10 +273,26 @@ impl Tool for SubagentTool {
         "background": {"type": "boolean"}
       }, "additionalProperties": false
     });
-    if !self.models.is_empty() {
+    let models: std::collections::BTreeSet<_> = self
+      .models
+      .keys()
+      .chain(self.targets.keys().map(|target| &target.model))
+      .collect();
+    if !models.is_empty() {
       parameters["properties"]["model"] = json!({
-        "type": "string", "enum": self.models.keys().collect::<Vec<_>>(),
+        "type": "string", "enum": models,
         "description": "Model suited to this task; leave out to use your own."
+      });
+    }
+    let providers: std::collections::BTreeSet<_> = self
+      .targets
+      .keys()
+      .filter_map(|target| target.provider.as_deref())
+      .collect();
+    if !providers.is_empty() {
+      parameters["properties"]["provider"] = json!({
+        "type": "string", "enum": providers,
+        "description": "Provider profile for model; omit to use your provider."
       });
     }
     ToolSpec {
@@ -275,10 +318,26 @@ impl Tool for SubagentTool {
     let output = match action {
       "delegate" => {
         let prompt = args.prompt.context("prompt is required")?;
-        if let Some(model) = &args.model
-          && !self.models.contains_key(model)
-        {
-          bail!("model {model} is not one of the active provider's saved models");
+        if args.provider.is_some() && args.model.is_none() {
+          bail!("a provider requires a model");
+        }
+        if let Some(model) = &args.model {
+          if self.targets.is_empty() {
+            if args.provider.is_some() || !self.models.contains_key(model) {
+              bail!("model {model} is not one of the active provider's saved models");
+            }
+          } else {
+            let target = ModelTarget {
+              provider: args
+                .provider
+                .clone()
+                .or_else(|| context.model_target.as_ref()?.provider.clone()),
+              model: model.clone(),
+            };
+            if !self.targets.contains_key(&target) {
+              bail!("{target} is not a saved model");
+            }
+          }
         }
         let request = SubagentRequest {
           parent_id: context.session_id,
@@ -286,6 +345,8 @@ impl Tool for SubagentTool {
           prompt,
           role: args.role,
           model: args.model,
+          provider: args.provider,
+          parent_model: context.model_target.clone(),
         };
         if args.background {
           let name = self.registry.start(request);

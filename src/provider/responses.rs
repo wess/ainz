@@ -44,6 +44,11 @@ impl ResponsesProvider {
     }
   }
 
+  pub(super) fn with_profile(mut self, profile: Option<&str>) -> Self {
+    self.wire = self.wire.with_profile(profile);
+    self
+  }
+
   pub async fn models(&self) -> Result<Vec<String>> {
     self.wire.models("models").await
   }
@@ -57,9 +62,10 @@ impl ChatProvider for ResponsesProvider {
     tools: &[ToolSpec],
     events: &EventSink,
   ) -> Result<ProviderReply> {
+    let scope = self.wire.scope("responses");
     let mut body = json!({
       "model": self.wire.model,
-      "input": input(messages, &self.wire.model)?,
+      "input": input(messages, &scope)?,
       "stream": true,
       "store": false,
       "include": ["reasoning.encrypted_content"],
@@ -88,7 +94,7 @@ impl ChatProvider for ResponsesProvider {
     if !streaming {
       let value = serde_json::from_slice(&crate::output::response(response, MAX_TRANSFER).await?)
         .context("invalid Responses reply")?;
-      return reply(value, &self.wire.model, events, false);
+      return reply(value, &self.wire.model, &scope, events, false);
     }
     let mut completed = None;
     let mut streamed = false;
@@ -127,13 +133,14 @@ impl ChatProvider for ResponsesProvider {
     reply(
       completed.context("model stream ended before completion")?,
       &self.wire.model,
+      &scope,
       events,
       streamed,
     )
   }
 }
 
-fn input(messages: &[&Message], model: &str) -> Result<Vec<Value>> {
+fn input(messages: &[&Message], scope: &str) -> Result<Vec<Value>> {
   let mut items = Vec::new();
   for message in messages {
     if message.role == Role::Tool {
@@ -142,9 +149,9 @@ fn input(messages: &[&Message], model: &str) -> Result<Vec<Value>> {
         "output": message.content.as_deref().unwrap_or_default()}));
       continue;
     }
-    // Encrypted reasoning is tied to the model that produced it.
+    // Encrypted reasoning belongs to the connection and model that produced it.
     if message.role == Role::Assistant
-      && message.response_model.as_deref() == Some(model)
+      && message.provider_scope.as_deref() == Some(scope)
       && !message.response_items.is_empty()
     {
       items.extend(message.response_items.iter().cloned());
@@ -182,7 +189,13 @@ fn cut_off(response: &Value) -> bool {
       == Some("max_output_tokens")
 }
 
-fn reply(value: Value, model: &str, events: &EventSink, streamed: bool) -> Result<ProviderReply> {
+fn reply(
+  value: Value,
+  model: &str,
+  scope: &str,
+  events: &EventSink,
+  streamed: bool,
+) -> Result<ProviderReply> {
   let truncated = cut_off(&value);
   if value["status"].as_str() != Some("completed") && !truncated {
     bail!("model reply failed: {}", failure_message(&value));
@@ -258,6 +271,7 @@ fn reply(value: Value, model: &str, events: &EventSink, streamed: bool) -> Resul
   if !truncated {
     message.response_items = output.clone();
     message.response_model = Some(model.into());
+    message.provider_scope = Some(scope.into());
   }
   let usage = &value["usage"];
   let count = |key: &str| usage[key].as_u64().unwrap_or(0);
@@ -306,7 +320,7 @@ mod tests {
       {"type": "reasoning", "status": "completed", "encrypted_content": "sealed"},
       {"type": "message", "status": "incomplete", "content": [{"type": "output_text", "text": "half"}]},
     ]));
-    let reply = reply(value, "m", &EventSink::default(), false).unwrap();
+    let reply = reply(value, "m", "scope", &EventSink::default(), false).unwrap();
     assert!(reply.truncated);
     assert!(reply.message.content.unwrap().starts_with("half"));
     // unfinished items are not sent back as they are
@@ -319,7 +333,7 @@ mod tests {
       {"type": "function_call", "status": "incomplete", "call_id": "c1", "name": "write",
        "arguments": "{\"path\": \"a\", \"content\": \"ha"},
     ]));
-    let reply = reply(value, "m", &EventSink::default(), false).unwrap();
+    let reply = reply(value, "m", "scope", &EventSink::default(), false).unwrap();
     assert!(reply.truncated);
     let call = &reply.message.tool_calls[0];
     assert!(
@@ -337,6 +351,6 @@ mod tests {
       "incomplete_details": {"reason": "content_filter"},
       "output": [{"type": "message", "status": "incomplete", "content": [{"type": "output_text", "text": "x"}]}],
     });
-    assert!(reply(value, "m", &EventSink::default(), false).is_err());
+    assert!(reply(value, "m", "scope", &EventSink::default(), false).is_err());
   }
 }

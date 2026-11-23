@@ -309,6 +309,7 @@ pub(super) fn parse_response(body: &[u8], events: &EventSink) -> Result<Provider
       thinking: None,
       response_items: Vec::new(),
       response_model: None,
+      provider_scope: None,
     },
     usage: response.usage.map(Usage::from).unwrap_or_default(),
     truncated,
