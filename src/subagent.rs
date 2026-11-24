@@ -3,15 +3,17 @@ pub use catalog::{AgentCatalog, AgentDefinition};
 use std::{
   collections::BTreeMap,
   future::Future,
+  panic::AssertUnwindSafe,
   pin::Pin,
   sync::{
     Arc, Mutex, PoisonError,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
   },
 };
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -77,7 +79,14 @@ pub fn guardian(index: usize) -> String {
 pub struct SubagentRegistry {
   handler: SubagentHandler,
   spawned: AtomicUsize,
-  running: Mutex<BTreeMap<String, JoinHandle<Result<SubagentResult>>>>,
+  running: Mutex<BTreeMap<String, Delegation>>,
+}
+
+struct Delegation {
+  parent: Uuid,
+  task: JoinHandle<Result<SubagentResult>>,
+  failed: Arc<AtomicBool>,
+  reported: bool,
 }
 
 impl SubagentRegistry {
@@ -93,9 +102,7 @@ impl SubagentRegistry {
     guardian(self.spawned.fetch_add(1, Ordering::Relaxed))
   }
 
-  fn tasks(
-    &self,
-  ) -> std::sync::MutexGuard<'_, BTreeMap<String, JoinHandle<Result<SubagentResult>>>> {
+  fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Delegation>> {
     self.running.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
@@ -107,8 +114,27 @@ impl SubagentRegistry {
   /// collects the result later, so several can work at once.
   pub fn start(&self, request: SubagentRequest) -> String {
     let name = request.name.clone();
-    let task = (self.handler)(request);
-    self.tasks().insert(name.clone(), tokio::spawn(task));
+    let parent = request.parent_id;
+    let handler = self.handler.clone();
+    let failed = Arc::new(AtomicBool::new(false));
+    let outcome = failed.clone();
+    let task = tokio::spawn(async move {
+      let result = AssertUnwindSafe(async move { handler(request).await })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the background worker panicked")));
+      outcome.store(result.is_err(), Ordering::Relaxed);
+      result
+    });
+    self.tasks().insert(
+      name.clone(),
+      Delegation {
+        parent,
+        task,
+        failed,
+        reported: false,
+      },
+    );
     name
   }
 
@@ -122,11 +148,12 @@ impl SubagentRegistry {
       name: name.into(),
       task: Some(task),
     };
-    let result = pending
+    let task = &mut pending
       .task
       .as_mut()
       .expect("collection owns its task")
-      .await;
+      .task;
+    let result = task.await;
     pending.task = None;
     result.context("subagent task failed")?
   }
@@ -135,7 +162,40 @@ impl SubagentRegistry {
     self
       .tasks()
       .iter()
-      .map(|(name, task)| (name.clone(), task.is_finished()))
+      .map(|(name, job)| (name.clone(), job.task.is_finished()))
+      .collect()
+  }
+
+  fn listing(&self, parent: Uuid) -> Vec<String> {
+    self
+      .tasks()
+      .iter()
+      .filter(|(_, job)| job.parent == parent)
+      .map(|(name, job)| {
+        let status = if job.failed.load(Ordering::Relaxed) {
+          "failed"
+        } else if job.task.is_finished() {
+          "ready"
+        } else {
+          "working"
+        };
+        format!("{name}  {status}")
+      })
+      .collect()
+  }
+
+  fn take_failures(&self, parent: Uuid) -> Vec<String> {
+    let mut tasks = self.tasks();
+    tasks
+      .iter_mut()
+      .filter(|(_, job)| {
+        job.parent == parent && !job.reported && job.failed.load(Ordering::Relaxed)
+      })
+      .take(32)
+      .map(|(name, job)| {
+        job.reported = true;
+        name.clone()
+      })
       .collect()
   }
 }
@@ -143,7 +203,7 @@ impl SubagentRegistry {
 struct Collection<'a> {
   registry: &'a SubagentRegistry,
   name: String,
-  task: Option<JoinHandle<Result<SubagentResult>>>,
+  task: Option<Delegation>,
 }
 
 impl Drop for Collection<'_> {
@@ -154,7 +214,7 @@ impl Drop for Collection<'_> {
         std::collections::btree_map::Entry::Vacant(entry) => {
           entry.insert(task);
         }
-        std::collections::btree_map::Entry::Occupied(_) => task.abort(),
+        std::collections::btree_map::Entry::Occupied(_) => task.task.abort(),
       }
     }
   }
@@ -162,13 +222,13 @@ impl Drop for Collection<'_> {
 
 impl Drop for SubagentRegistry {
   fn drop(&mut self) {
-    for task in self
+    for job in self
       .running
       .get_mut()
       .unwrap_or_else(PoisonError::into_inner)
       .values()
     {
-      task.abort();
+      job.task.abort();
     }
   }
 }
@@ -257,6 +317,10 @@ impl SubagentTool {
 
 #[async_trait]
 impl Tool for SubagentTool {
+  fn failed_background_workers(&self, session_id: Uuid) -> Vec<String> {
+    self.registry.take_failures(session_id)
+  }
+
   fn spec(&self) -> ToolSpec {
     let mesh = if self.mesh {
       " Each one joins the Synapse mesh under its guardian name, so it can be messaged with \
@@ -300,8 +364,9 @@ impl Tool for SubagentTool {
       description: format!(
         "Delegate a focused task to a durable child session. `delegate` runs one and returns \
          its answer; add background to start it and keep working, then `collect` it by name. \
-         `list` shows what is still running. Give the child everything it needs in the prompt: \
-         it cannot see this conversation.{mesh}{}",
+         `list` shows working, ready, and failed children. Collect a failed child to see the \
+         error, then check its changes before assigning any remaining work. Give the child \
+         everything it needs in the prompt: it cannot see this conversation.{mesh}{}",
         self.routing()
       ),
       parameters,
@@ -362,17 +427,11 @@ impl Tool for SubagentTool {
         serde_json::to_string_pretty(&self.registry.collect(&name).await?)?
       }
       "list" => {
-        let running = self.registry.running();
+        let running = self.registry.listing(context.session_id);
         if running.is_empty() {
           "no background subagents".to_string()
         } else {
-          running
-            .into_iter()
-            .map(|(name, finished)| {
-              format!("{name}  {}", if finished { "ready" } else { "working" })
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+          running.join("\n")
         }
       }
       other => bail!("unknown subagent action: {other}"),

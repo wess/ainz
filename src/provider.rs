@@ -37,6 +37,7 @@ mod responses;
 mod stream;
 mod transport;
 pub(crate) mod wire;
+mod workers;
 pub use anthropic::AnthropicProvider;
 pub use process::ProcessProvider;
 pub use responses::ResponsesProvider;

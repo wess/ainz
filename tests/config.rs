@@ -364,7 +364,7 @@ async fn an_option_a_script_changes_mid_session_is_not_saved_either() {
 }
 
 #[tokio::test]
-async fn a_codex_preset_from_before_the_git_check_was_skipped_gains_it() {
+async fn only_unmodified_exec_presets_gain_structured_output() {
   let dir = tempfile::tempdir().unwrap();
   let path = dir.path().join("config.toml");
   tokio::fs::write(
@@ -377,13 +377,32 @@ model = "gpt"
 kind = "process"
 command = "codex"
 args = ["exec", "--ephemeral", "--color", "never", "--sandbox", "{sandbox}", "-C", "{workspace}", "--model", "{model}", "-"]
+
+[providers.stock]
+kind = "process"
+command = "codex"
+args = ["exec", "--skip-git-repo-check", "--ephemeral", "--color", "never", "--sandbox", "{sandbox}", "-C", "{workspace}", "--model", "{model}", "-"]
+
+[providers.custom]
+kind = "process"
+command = "codex"
+args = ["exec", "-C", "{workspace}", "-"]
 "#,
   )
   .await
   .unwrap();
   let loaded = Config::load_from(&path).await.unwrap();
+  let preset = ainz::config::ProviderConfig::codex();
+  for name in ["codex", "stock"] {
+    assert_eq!(loaded.providers[name].args, preset.args);
+    assert_eq!(
+      loaded.providers[name].output,
+      ainz::ProcessOutput::StreamJson
+    );
+  }
   assert_eq!(
-    loaded.providers["codex"].args,
-    ainz::config::ProviderConfig::codex().args
+    loaded.providers["custom"].args,
+    ["exec", "-C", "{workspace}", "-"]
   );
+  assert_eq!(loaded.providers["custom"].output, ainz::ProcessOutput::Text);
 }

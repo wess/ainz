@@ -39,6 +39,106 @@ async fn process_provider_passes_the_transcript_over_stdin() {
   );
 }
 
+async fn stream_fixture(output: &str) -> (ainz::provider::ProviderReply, Vec<ainz::Event>) {
+  let script = format!("cat >/dev/null\ncat <<'EVENTS'\n{output}\nEVENTS");
+  let provider = ProcessProvider::new(
+    "/bin/sh".into(),
+    vec!["-c".into(), script],
+    "test".into(),
+    std::env::current_dir().unwrap(),
+    PermissionMode::ReadOnly,
+    ProcessOutput::StreamJson,
+  );
+  let (events, mut received) = EventSink::channel();
+  let reply = provider
+    .complete(&[&Message::text(Role::User, "delegate")], &[], &events)
+    .await
+    .unwrap();
+  let mut observed = Vec::new();
+  while let Ok(event) = received.try_recv() {
+    observed.push(event);
+  }
+  (reply, observed)
+}
+
+#[tokio::test]
+async fn background_task_status_and_output_reach_the_correct_worker() {
+  use ainz::{Event, event::WorkerStatus};
+
+  let (reply, events) = stream_fixture(r#"
+{"type":"system","subtype":"task_started","task_id":"cmd","task_type":"local_bash","description":"a shell command"}
+{"type":"system","subtype":"task_started","task_id":"agent","run_id":"01","task_type":"local_agent","description":"phase 2b","tool_use_id":"call"}
+{"type":"stream_event","parent_tool_use_id":"call","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"worker only"}}}
+{"type":"system","subtype":"task_notification","task_id":"agent","run_id":"01","status":"failed","summary":"provider disconnected"}
+{"type":"system","subtype":"task_started","task_id":"agent","run_id":"02","task_type":"local_agent","description":"resume phase 2b"}
+{"type":"system","subtype":"task_notification","task_id":"agent","run_id":"01","status":"failed","summary":"stale notification"}
+{"type":"system","subtype":"task_notification","task_id":"agent","status":"completed","summary":"verified"}
+{"type":"system","subtype":"task_progress","task_id":"agent","run_id":"02","description":"stale progress"}
+{"type":"result","result":"main result"}
+"#).await;
+  assert_eq!(reply.message.content.as_deref(), Some("main result"));
+  let updates: Vec<_> = events
+    .iter()
+    .filter_map(|event| match event {
+      Event::WorkerUpdate { id, status, .. } => Some((id, *status)),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(
+    updates
+      .iter()
+      .map(|(_, status)| *status)
+      .collect::<Vec<_>>(),
+    [
+      WorkerStatus::Running,
+      WorkerStatus::Failed,
+      WorkerStatus::Running,
+      WorkerStatus::Completed
+    ]
+  );
+  assert!(updates.iter().all(|(id, _)| *id == updates[0].0));
+  assert!(events.iter().any(|event| matches!(event, Event::SubagentEvent { session_id, event } if session_id == updates[0].0 && matches!(event.as_ref(), Event::TextDelta { text } if text == "worker only"))));
+  assert!(
+    !events
+      .iter()
+      .any(|event| matches!(event, Event::TextDelta { text } if text.contains("worker only")))
+  );
+}
+
+#[tokio::test]
+async fn exec_stream_distinguishes_completed_and_unconfirmed_workers() {
+  use ainz::{Event, event::WorkerStatus};
+
+  let (reply, events) = stream_fixture(r#"
+{"type":"thread.started","thread_id":"parent"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed","receiver_thread_ids":["a","b"],"agents_states":{"a":{"status":"pending_init"}},"prompt":"implement phase 2b"}}
+{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed","agents_states":{"a":{"status":"completed","message":"checked"}}}}
+{"type":"item.completed","item":{"type":"agent_message","text":"main result"}}
+{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}
+"#).await;
+  assert_eq!(reply.message.content.as_deref(), Some("main result"));
+  assert_eq!(reply.usage.input_tokens, 12);
+  assert_eq!(reply.usage.output_tokens, 3);
+  let mut workers = std::collections::BTreeMap::new();
+  for event in events {
+    if let Event::WorkerUpdate { id, status, .. } = event {
+      workers.entry(id).or_insert_with(Vec::new).push(status);
+    }
+  }
+  assert_eq!(workers.len(), 2);
+  assert!(
+    workers
+      .values()
+      .any(|statuses| *statuses == [WorkerStatus::Running, WorkerStatus::Completed])
+  );
+  assert!(
+    workers
+      .values()
+      .any(|statuses| *statuses == [WorkerStatus::Running, WorkerStatus::Unconfirmed])
+  );
+}
+
 #[tokio::test]
 async fn provider_lists_http_models() {
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -260,28 +360,30 @@ async fn process_provider_reports_a_streaming_command_as_it_works() {
 #[tokio::test]
 async fn process_provider_surfaces_a_streaming_failure() {
   let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"out of turns"}"#;
-  let provider = ProcessProvider::new(
-    "/bin/sh".into(),
-    vec![
-      "-c".into(),
-      format!("cat > /dev/null; printf '%s\\n' '{line}'"),
-    ],
-    "test".into(),
-    std::env::current_dir().unwrap(),
-    PermissionMode::ReadOnly,
-    ProcessOutput::StreamJson,
-  );
+  for exit in [0, 1] {
+    let provider = ProcessProvider::new(
+      "/bin/sh".into(),
+      vec![
+        "-c".into(),
+        format!("cat > /dev/null; printf '%s\\n' '{line}'; exit {exit}"),
+      ],
+      "test".into(),
+      std::env::current_dir().unwrap(),
+      PermissionMode::ReadOnly,
+      ProcessOutput::StreamJson,
+    );
 
-  let error = provider
-    .complete(
-      &[&Message::text(Role::User, "hi")],
-      &[],
-      &EventSink::default(),
-    )
-    .await
-    .unwrap_err();
+    let error = provider
+      .complete(
+        &[&Message::text(Role::User, "hi")],
+        &[],
+        &EventSink::default(),
+      )
+      .await
+      .unwrap_err();
 
-  assert!(format!("{error:#}").contains("out of turns"));
+    assert!(format!("{error:#}").contains("out of turns"));
+  }
 }
 
 #[tokio::test]

@@ -121,6 +121,7 @@ ainz.off(id)
 | `cancelled` | nothing |
 | `subagent_start` | the child's `session_id`, `parent_id`, `name`, `task`, and model `target` |
 | `subagent_end` | the child's `session_id` and `error` |
+| `worker_update` | a process provider's worker `id`, `name`, `task`, `status`, and `detail` |
 | `resize` | `width`, `height` |
 
 `pre_tool` runs before every tool call, in every permission mode, subagents included, and in

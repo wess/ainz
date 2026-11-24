@@ -455,6 +455,7 @@ impl ProviderConfig {
         // would fail every turn in it
         "--skip-git-repo-check",
         "--ephemeral",
+        "--json",
         "--color",
         "never",
         "--sandbox",
@@ -465,7 +466,7 @@ impl ProviderConfig {
         "{model}",
         "-",
       ]),
-      ProcessOutput::Text,
+      ProcessOutput::StreamJson,
     )
   }
 
@@ -752,12 +753,17 @@ impl Config {
       "{model}",
       "-",
     ];
+    let exec = ProviderConfig::codex();
+    let mut buffered_exec = exec.args.clone();
+    buffered_exec.retain(|arg| arg != "--json");
     for provider in self.providers.values_mut() {
       if provider.kind == ProviderKind::Process
         && provider.command.as_deref() == Some("codex")
-        && provider.args == GIT_ONLY_CODEX
+        && provider.output == ProcessOutput::Text
+        && (provider.args == GIT_ONLY_CODEX || provider.args == buffered_exec)
       {
-        provider.args = ProviderConfig::codex().args;
+        provider.args.clone_from(&exec.args);
+        provider.output = exec.output;
       }
       if provider.kind == ProviderKind::Process
         && provider.command.as_deref() == Some("claude")

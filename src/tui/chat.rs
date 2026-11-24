@@ -12,6 +12,7 @@ use ainz::{
   PluginCatalog, PromptCatalog, RunController, RuntimeProvider, Session, SessionStore,
   SkillCatalog,
   command_palette::{SlashCommand, builtins as builtin_commands, matches as command_matches},
+  event::WorkerStatus as AgentState,
   protocol::{Image, ToolCall, Usage},
   routing::{ModelMode, ModelTarget, RoutingStrategy, model_mode},
   run_control,
@@ -273,13 +274,6 @@ impl Entry {
       ..Self::new(EntryKind::Tool, String::new())
     }
   }
-}
-
-#[derive(Clone, Copy)]
-enum AgentState {
-  Running,
-  Done,
-  Error,
 }
 
 struct AgentView {
@@ -2860,17 +2854,68 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       view.set_model(ModelMode::Fixed { target });
       view.topic = title::excerpt(&task);
     }
-    Event::SubagentEnd { session_id, error } => {
-      let view = state
-        .agents
-        .entry(session_id)
-        .or_insert_with(|| AgentView::new(AgentState::Running));
-      view.state = if error {
-        AgentState::Error
-      } else {
-        AgentState::Done
-      };
+    Event::SubagentEnd {
+      session_id: id,
+      error,
+    } => {
+      let view = state.view_mut(Some(&id));
       view.finish_message();
+      if view.state != AgentState::Stopped {
+        view.state = if error {
+          AgentState::Failed
+        } else {
+          AgentState::Completed
+        };
+      }
+      if error {
+        let detail = view
+          .entries
+          .last()
+          .filter(|entry| matches!(entry.kind, EntryKind::Error))
+          .map(|entry| entry.text.as_str());
+        let notice = worker_notice(&view.name, view.state, detail);
+        state
+          .view_mut(session_id)
+          .entries
+          .push(Entry::new(EntryKind::Error, notice));
+      }
+    }
+    Event::WorkerUpdate {
+      id,
+      name,
+      task,
+      status,
+      detail,
+    } => {
+      let view = state.view_mut(Some(&id));
+      let changed = view.state != status;
+      view.state = status;
+      view.name = name;
+      if let Some(task) = task {
+        view.topic = title::excerpt(&task);
+      }
+      if status != AgentState::Running {
+        view.finish_message();
+        let notice = worker_notice(&view.name, status, detail.as_deref());
+        let alert = matches!(
+          status,
+          AgentState::Failed | AgentState::Stopped | AgentState::Unconfirmed
+        );
+        let kind = if alert {
+          EntryKind::Error
+        } else {
+          EntryKind::System
+        };
+        if view.entries.last().is_none_or(|entry| entry.text != notice) {
+          view.entries.push(Entry::new(kind, notice.clone()));
+        }
+        if alert && changed {
+          state
+            .view_mut(session_id)
+            .entries
+            .push(Entry::new(kind, notice));
+        }
+      }
     }
     Event::Compaction {
       archived_messages, ..
@@ -2897,8 +2942,9 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
       if session_id.is_none() {
         state.cancelled = true;
       } else {
-        state
-          .view_mut(session_id)
+        let view = state.view_mut(session_id);
+        view.state = AgentState::Stopped;
+        view
           .entries
           .push(Entry::new(EntryKind::Cancelled, "Run cancelled".into()));
       }
@@ -2922,6 +2968,14 @@ fn apply_agent_event(state: &mut ChatState, session_id: Option<&str>, event: Eve
     }
     Event::Todos { items } => state.view_mut(session_id).todos = items,
     Event::SessionStart { .. } | Event::ThinkingDelta { .. } => {}
+  }
+}
+
+fn worker_notice(name: &str, status: AgentState, detail: Option<&str>) -> String {
+  let label = status.label();
+  match detail.filter(|text| !text.trim().is_empty()) {
+    Some(detail) => format!("{name} {label} · {}", title::excerpt(detail)),
+    None => format!("{name} {label}"),
   }
 }
 
@@ -3386,8 +3440,10 @@ fn render_roster(frame: &mut Frame, area: Rect, state: &ChatState) {
   items.extend(state.agents.iter().enumerate().map(|(index, (id, view))| {
     let (marker, color) = match view.state {
       AgentState::Running => ("+", CYAN),
-      AgentState::Done => (" ", MUTED),
-      AgentState::Error => ("!", RED),
+      AgentState::Completed => (" ", MUTED),
+      AgentState::Failed => ("!", RED),
+      AgentState::Stopped => ("−", YELLOW),
+      AgentState::Unconfirmed => ("?", YELLOW),
     };
     let selected = state.active.as_deref() == Some(id.as_str());
     let slot = index + 2;

@@ -3,6 +3,12 @@
 Subagents keep their guardian names and their own switchable IRC buffers. A named agent type
 adds instructions and can narrow a child's tools, permissions, model, and number of turns.
 
+Background subagents appear in the local roster while they work and stay visible when they
+finish. The primary transcript shows worker failures. Ainz also tells the lead about a new
+failure at its next model request so it can collect the error, check partial changes, and
+reassign any remaining work. `subagent` with `action = "list"` shows working, ready, and
+failed delegations until the lead collects them.
+
 Definitions are Markdown files in `~/.claude/agents`, the Ainz config directory's `agents/`,
 and `.claude/agents` or `.ainz/agents` from the filesystem root down to the workspace.
 The nearest definition wins by name. `ainz agents` lists the discovered types. The model sees

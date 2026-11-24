@@ -26,6 +26,8 @@ use ainz::{
 
 use crate::command::{ProviderPreset, preset_profile};
 
+mod worker;
+
 async fn make_agent(
   workspace: &std::path::Path,
   config: &Config,
@@ -249,24 +251,14 @@ pub(crate) async fn make_agent_parts(
     // rather than quietly replaced
     let pinned = definition.as_ref().and_then(|agent| agent.model.clone());
     let pinned_provider = definition.as_ref().and_then(|agent| agent.provider.clone());
-    if let (Some(pinned), Some(asked)) = (&pinned, &model)
-      && pinned != asked
-    {
-      let error = anyhow::anyhow!(
-        "agent type {} uses model {pinned}; leave model out or pick {pinned}",
-        role.as_deref().unwrap_or_default()
-      );
-      return Box::pin(async move { Err(error) });
-    }
-    if let (Some(pinned), Some(asked)) = (&pinned_provider, &provider)
-      && pinned != asked
-    {
-      let error = anyhow::anyhow!(
-        "agent type {} uses provider {pinned}",
-        role.as_deref().unwrap_or_default()
-      );
-      return Box::pin(async move { Err(error) });
-    }
+    let mismatched_model = pinned
+      .as_ref()
+      .zip(model.as_ref())
+      .is_some_and(|(pinned, asked)| pinned != asked);
+    let mismatched_provider = pinned_provider
+      .as_ref()
+      .zip(provider.as_ref())
+      .is_some_and(|(pinned, asked)| pinned != asked);
     let config = child_config.clone();
     let active = ModelTarget::configured(&config);
     let parent = parent_model.unwrap_or_else(|| active.clone());
@@ -284,97 +276,115 @@ pub(crate) async fn make_agent_parts(
     let profile = child_profile.clone();
     Box::pin(async move {
       let model = match model {
-        Some(model) => model,
-        None if provider_name == parent.provider => parent.model.clone(),
-        None if provider_name == active.provider => active.model.clone(),
+        Some(model) => Some(model),
+        None if provider_name == parent.provider => Some(parent.model.clone()),
+        None if provider_name == active.provider => Some(active.model.clone()),
         None => provider_name
           .as_ref()
           .and_then(|name| config.providers.get(name))
-          .and_then(|profile| profile.model.clone())
-          .context("a named agent on another provider needs a model or a provider default")?,
+          .and_then(|profile| profile.model.clone()),
       };
+      let missing_model = model.is_none();
       let target = ModelTarget {
         provider: provider_name,
-        model,
-      };
-      let provider = if parent == active && target.provider == active.provider {
-        if target == active {
-          provider
-        } else {
-          provider.with_model(target.model.clone())
-        }
-      } else {
-        RuntimeProvider::from_target(&config, &target, &workspace).await?
+        model: model.unwrap_or_default(),
       };
       let mut session = Session::child(workspace.clone(), parent_id);
-      session.model_mode = Some(ModelMode::Fixed {
-        target: target.clone(),
-      });
-      // a guardian on the mesh gets its own client, so it holds a seat of its own rather
-      // than renaming the one its parent registered
-      if child_mesh {
-        let hub = Arc::new(McpHub::new(profile));
-        let synapse = Synapse::new(hub.clone(), workspace.clone());
-        let role = role.unwrap_or_else(|| "worker".into());
-        match synapse.register(&name, &role).await {
-          Ok(roster) => {
-            tools.replace(hub.tool());
-            options.instructions.push_str(&format!(
-              "\n\nYou are on the Synapse agent mesh as `{name}`. Other agents can message \
+      let run = worker::WorkerRun::start(
+        events.clone(),
+        &session,
+        parent_id,
+        &name,
+        &prompt,
+        target.clone(),
+      );
+      let child_events = run.sink();
+      let result: Result<String> = async {
+        let agent_type = role.as_deref().unwrap_or_default();
+        anyhow::ensure!(
+          !mismatched_model,
+          "agent type {agent_type} uses model {}; leave model out or pick {}",
+          target.model,
+          target.model
+        );
+        anyhow::ensure!(
+          !mismatched_provider,
+          "agent type {agent_type} uses provider {}",
+          target.provider.as_deref().unwrap_or_default()
+        );
+        anyhow::ensure!(
+          !missing_model,
+          "a named agent on another provider needs a model or a provider default"
+        );
+        session.model_mode = Some(ModelMode::Fixed {
+          target: target.clone(),
+        });
+        let provider = if parent == active && target.provider == active.provider {
+          if target == active {
+            provider
+          } else {
+            provider.with_model(target.model.clone())
+          }
+        } else {
+          RuntimeProvider::from_target(&config, &target, &workspace).await?
+        };
+        // a guardian on the mesh gets its own client, so it holds a seat of its own rather
+        // than renaming the one its parent registered
+        if child_mesh {
+          let hub = Arc::new(McpHub::new(profile));
+          let synapse = Synapse::new(hub.clone(), workspace.clone());
+          let role = role.unwrap_or_else(|| "worker".into());
+          match synapse.register(&name, &role).await {
+            Ok(roster) => {
+              tools.replace(hub.tool());
+              options.instructions.push_str(&format!(
+                "\n\nYou are on the Synapse agent mesh as `{name}`. Other agents can message \
                you; use the mcp tool's synapse/inbox to read what arrived, synapse/send to \
                answer, and synapse/reportstatus to say what you are doing.\n{}",
-              roster.trim()
-            ));
-          }
-          Err(error) => events.emit(Event::Error {
-            message: format!("{name} could not join the mesh: {error:#}"),
-          }),
-        }
-      }
-      if let Some(definition) = definition {
-        options.instructions.push_str(&format!(
-          "\n\nInstructions for agent type {}:\n{}",
-          definition.name, definition.instructions
-        ));
-        tools = tools.restricted(
-          definition.tools.as_deref(),
-          definition.disallowed_tools.as_deref(),
-        );
-        if let Some(steps) = definition.max_steps {
-          options.max_steps = options.max_steps.min(steps);
-        }
-        if let Some(mode) = definition.permission_mode {
-          options.permissions = match (options.permissions, mode) {
-            (PermissionMode::ReadOnly, _) | (_, PermissionMode::ReadOnly) => {
-              PermissionMode::ReadOnly
+                roster.trim()
+              ));
             }
-            (PermissionMode::Ask, _) | (_, PermissionMode::Ask) => PermissionMode::Ask,
-            _ => PermissionMode::Auto,
-          };
+            Err(error) => events.emit(Event::Error {
+              message: format!("{name} could not join the mesh: {error:#}"),
+            }),
+          }
         }
+        if let Some(definition) = definition {
+          options.instructions.push_str(&format!(
+            "\n\nInstructions for agent type {}:\n{}",
+            definition.name, definition.instructions
+          ));
+          tools = tools.restricted(
+            definition.tools.as_deref(),
+            definition.disallowed_tools.as_deref(),
+          );
+          if let Some(steps) = definition.max_steps {
+            options.max_steps = options.max_steps.min(steps);
+          }
+          if let Some(mode) = definition.permission_mode {
+            options.permissions = match (options.permissions, mode) {
+              (PermissionMode::ReadOnly, _) | (_, PermissionMode::ReadOnly) => {
+                PermissionMode::ReadOnly
+              }
+              (PermissionMode::Ask, _) | (_, PermissionMode::Ask) => PermissionMode::Ask,
+              _ => PermissionMode::Auto,
+            };
+          }
+        }
+        let agent = Agent::new(provider, tools, workspace, child_events, approver);
+        agent.run(&mut session, prompt, options).await
       }
-      events.emit(Event::SubagentStart {
-        session_id: session.id.to_string(),
-        parent_id: parent_id.to_string(),
-        name: name.clone(),
-        task: prompt.clone(),
-        target,
-      });
-      let session_id = session.id.to_string();
-      let forwarded = events.clone();
-      let child_events = EventSink::new(move |event| {
-        forwarded.emit(Event::SubagentEvent {
-          session_id: session_id.clone(),
-          event: Box::new(event),
-        });
-      });
-      let agent = Agent::new(provider, tools, workspace, child_events, approver);
-      let result = agent.run(&mut session, prompt, options).await;
-      store.save(&session).await?;
-      events.emit(Event::SubagentEnd {
-        session_id: session.id.to_string(),
-        error: result.is_err(),
-      });
+      .await;
+      let saved = store.save(&session).await;
+      let result = match (result, saved) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error.context("could not save the worker session")),
+        (Err(error), Err(save)) => {
+          Err(error.context(format!("could not save the worker session: {save:#}")))
+        }
+      };
+      run.finish(&result);
       Ok(SubagentResult {
         session_id: session.id,
         name,

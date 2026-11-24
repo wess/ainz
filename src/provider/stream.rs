@@ -1,6 +1,5 @@
-//! The line-by-line report a headless coding agent writes while it works, in the shape
-//! `claude -p --output-format stream-json` produces: one JSON object per line, mixing token
-//! deltas, whole messages, and a final result.
+//! Newline-delimited reports from headless commands. They carry messages, tool activity, worker
+//! status, and a final result.
 
 use std::io;
 
@@ -8,6 +7,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
+use super::workers::Workers;
 use crate::{
   event::{Event, EventSink},
   protocol::{ToolCall, Usage},
@@ -31,33 +31,88 @@ impl Completion {
   }
 }
 
-#[derive(Default)]
 pub(super) struct StreamState {
   text: String,
   result: Option<String>,
   usage: Usage,
   failure: Option<String>,
+  workers: Workers,
+  exec: bool,
   /// The final result has arrived; a command still reading stdin can be let go.
   pub done: bool,
 }
 
 impl StreamState {
+  pub fn new(events: EventSink) -> Self {
+    Self {
+      text: String::new(),
+      result: None,
+      usage: Usage::default(),
+      failure: None,
+      workers: Workers::new(events),
+      exec: false,
+      done: false,
+    }
+  }
+
   /// Reads one line, and hands back a request the command is now waiting on an answer to.
-  pub fn push(&mut self, line: &str, events: &EventSink) -> Option<Value> {
+  pub fn push(&mut self, line: &str) -> Option<Value> {
     // anything that is not a JSON object is the command talking to a human; skip it
     let value = serde_json::from_str::<Value>(line.trim()).ok()?;
     match field(&value, "type") {
-      Some("stream_event") => self.delta(value.get("event"), events),
-      Some("assistant") => tool_starts(&value, events),
-      Some("user") => tool_ends(&value, events),
+      Some("system") => self.workers.task(&value),
+      Some("stream_event") => {
+        if let Some(sink) = self.workers.sink_for(&value) {
+          self.delta(
+            value.get("event"),
+            &sink,
+            field(&value, "parent_tool_use_id").is_none(),
+          );
+        }
+      }
+      Some("assistant") => {
+        self.workers.observe_calls(&value);
+        if let Some(sink) = self.workers.sink_for(&value) {
+          tool_starts(&value, &sink);
+        }
+      }
+      Some("user") => {
+        if let Some(sink) = self.workers.sink_for(&value) {
+          tool_ends(&value, &sink);
+        }
+      }
       Some("result") => self.result(&value),
+      Some("thread.started" | "turn.started") => self.exec = true,
+      Some(kind @ ("item.started" | "item.updated" | "item.completed")) => {
+        let item = &value["item"];
+        match field(item, "type") {
+          Some("collab_tool_call") => self.workers.collaboration(item),
+          Some("agent_message") if kind == "item.completed" => {
+            self.result = field(item, "text").map(str::to_owned)
+          }
+          _ => {}
+        }
+      }
+      Some("turn.completed") => {
+        self.done = true;
+        self.usage.input_tokens = value["usage"]["input_tokens"].as_u64().unwrap_or(0);
+        self.usage.output_tokens = value["usage"]["output_tokens"].as_u64().unwrap_or(0);
+      }
+      Some("turn.failed") => {
+        self.done = true;
+        self.failure = Some(
+          field(&value["error"], "message")
+            .unwrap_or("turn failed")
+            .into(),
+        );
+      }
       Some("control_request") => return Some(value),
       _ => {}
     }
     None
   }
 
-  fn delta(&mut self, event: Option<&Value>, events: &EventSink) {
+  fn delta(&mut self, event: Option<&Value>, events: &EventSink, primary: bool) {
     let Some(event) = event else { return };
     if field(event, "type") != Some("content_block_delta") {
       return;
@@ -70,7 +125,9 @@ impl StreamState {
     let Some(text) = field(delta, "text") else {
       return;
     };
-    self.text.push_str(text);
+    if primary {
+      self.text.push_str(text);
+    }
     events.emit(Event::TextDelta { text: text.into() });
   }
 
@@ -100,9 +157,16 @@ impl StreamState {
     };
   }
 
+  pub fn failure(&self) -> Option<&str> {
+    self.failure.as_deref()
+  }
+
   pub fn finish(self) -> Result<Completion> {
     if let Some(failure) = self.failure {
       bail!("provider reported an error: {failure}");
+    }
+    if self.exec && !self.done {
+      bail!("provider stream ended before the turn completed");
     }
     if self.text.is_empty() {
       // no partial messages were asked for, so the final result is the whole reply
@@ -170,11 +234,11 @@ fn tool_ends(value: &Value, events: &EventSink) {
   }
 }
 
-fn blocks(value: &Value) -> impl Iterator<Item = &Value> {
+pub(super) fn blocks(value: &Value) -> impl Iterator<Item = &Value> {
   value["message"]["content"].as_array().into_iter().flatten()
 }
 
-fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+pub(super) fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
   value.get(key).and_then(Value::as_str)
 }
 

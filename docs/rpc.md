@@ -59,6 +59,11 @@ that reached its output limit being continued or one that broke off being reques
 `subagent_event` wraps that child's events. The task field lets a host label an agent's buffer
 without an extra model request. `subagent_end` records its outcome.
 
+`worker_update` reports process-provider workers with `id`, `name`, `task`, `status`, and
+`detail`. The `status` is `running`, `completed`, `failed`, `stopped`, or `unconfirmed`. The
+`id` identifies a worker for display in this process. A nested `subagent_event` can use the
+same `id` to identify the worker that emitted it.
+
 A final text chunk is not a completed run. Keep the UI active through tool and hook work, and
 use the prompt response as the completion boundary for an RPC request. For a Rust host that
 wants these primitives directly, see [embedding](embedding.md).

@@ -68,8 +68,9 @@ impl ChatState {
     self.primary.tools.clear();
     self.primary.finish_message();
     self.primary.state = match status {
-      RunStatus::Completed => AgentState::Done,
-      _ => AgentState::Error,
+      RunStatus::Completed => AgentState::Completed,
+      RunStatus::Cancelled => AgentState::Stopped,
+      _ => AgentState::Failed,
     };
     let kind = match status {
       RunStatus::Completed => EntryKind::Completed,
@@ -105,8 +106,10 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &ChatState) {
   let (label, color) = if state.active.is_some() {
     match state.active_view().state {
       AgentState::Running => ("● Working".into(), YELLOW),
-      AgentState::Done => ("✓ Completed".into(), ACTIVE),
-      AgentState::Error => ("✗ Failed".into(), RED),
+      AgentState::Completed => ("✓ Completed".into(), ACTIVE),
+      AgentState::Failed => ("✗ Failed".into(), RED),
+      AgentState::Stopped => ("− Stopped".into(), YELLOW),
+      AgentState::Unconfirmed => ("? Status unconfirmed".into(), YELLOW),
     }
   } else if let Some(started) = state.started {
     let phase = if state.cancelled {

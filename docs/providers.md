@@ -179,13 +179,16 @@ ainz providers add runner \
 
 Plain process providers return stdout as the assistant response. Add `--json-result` when the
 command returns a JSON object whose `result` field contains the final text, or `--stream-json`
-when it writes one JSON object per line while it works, the way `claude -p --output-format
-stream-json` does. A streaming command reports itself as it runs: its text appears a piece at
-a time, its tool calls show up in the transcript and the status bar, and the run's token counts
-come back with the result. The other two modes stay silent until the command exits.
+when it writes one JSON object per line while it works. Streaming commands can report text
+and tool calls while they run and return token counts with the result. The other two modes
+stay silent until the command exits.
 
 The Claude Code preset uses the streaming mode. A profile saved by an earlier version on the
 buffered `--output-format json` arguments is moved onto it when the config loads.
+
+When a streaming command reports worker status, the local roster shows it. If the stream
+closes while a worker is still running, the roster marks its final status unconfirmed.
+The provider manages recovery for its own workers.
 
 ### Claude Code asks through Ainz
 
@@ -212,14 +215,13 @@ Process providers are adapters around complete coding agents, not raw model APIs
 tools and session behavior remain authoritative; Ainz does not pass them its tool schemas.
 They report token usage only in the streaming mode.
 
-Images go to a command in the form it reads. A stream-json command such as Claude Code gets
-the image itself. A text command such as Codex gets `[image file: PATH]`, which its own model
-opens: the file the image was attached from, or, for a pasted image or one in a resumed session,
-a copy written once to `ainz/images` under your cache directory, readable only by you.
+Commands that accept images in a structured input stream get the image itself. Commands that
+read prompts as text get `[image file: PATH]`. The path points to the attachment or to a private
+copy under `ainz/images` in your cache directory for pasted images and resumed sessions.
 
-The Codex preset passes `--skip-git-repo-check`, because Ainz has already chosen the workspace
-and Codex otherwise refuses to run outside a git checkout it trusts. A profile saved on the
-previous preset gains the flag when the config loads.
+The `exec` preset passes `--skip-git-repo-check` so it can run in the chosen workspace outside
+a git checkout, and `--json` so worker updates reach the roster. Profiles with the exact older
+preset arguments gain these settings on load.
 
 ## When a reply stops early
 

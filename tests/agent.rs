@@ -1,11 +1,16 @@
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+  collections::VecDeque,
+  sync::{Arc, Mutex},
+  time::Duration,
+};
 
 use ainz::{
-  Agent, EventSink, HookRunner, PermissionMode, RunOptions, Session,
+  Agent, EventSink, HookRunner, PermissionMode, RunOptions, Session, SubagentRegistry,
+  SubagentResult,
   protocol::{Message, Role, ToolCall, ToolSpec, Usage},
   provider::{ChatProvider, ProviderReply},
-  run_control,
-  tool::{ToolSet, builtins},
+  run_control, subagent_tool,
+  tool::{ToolContext, ToolSet, builtins},
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -103,6 +108,165 @@ async fn agent_runs_tools_until_a_final_message() {
     "yes"
   );
   assert_eq!(session.messages().unwrap().len(), 4);
+}
+
+struct DelegatingProvider {
+  calls: Mutex<usize>,
+  registry: Arc<SubagentRegistry>,
+  fail: Arc<tokio::sync::Notify>,
+  parent: uuid::Uuid,
+}
+
+#[async_trait]
+impl ChatProvider for DelegatingProvider {
+  async fn complete(
+    &self,
+    messages: &[&Message],
+    _: &[ToolSpec],
+    _: &EventSink,
+  ) -> anyhow::Result<ProviderReply> {
+    let call = {
+      let mut calls = self.calls.lock().unwrap();
+      *calls += 1;
+      *calls
+    };
+    let mut message = Message::text(Role::Assistant, "");
+    let args = match call {
+      1 => json!({"prompt": "implement phase 2b", "background": true}),
+      2 => {
+        self.fail.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+          while self.registry.running() != [("shalltear".into(), true)] {
+            tokio::task::yield_now().await;
+          }
+        })
+        .await
+        .unwrap();
+        let tool = subagent_tool(self.registry.clone(), false);
+        assert!(tool.failed_background_workers(uuid::Uuid::nil()).is_empty());
+        let context = ToolContext::new(Default::default(), self.parent, 1024);
+        assert_eq!(
+          tool
+            .execute(&context, json!({"action": "list"}))
+            .await
+            .unwrap(),
+          "shalltear  failed"
+        );
+        message = Message::text(Role::Assistant, "GOAL MET");
+        json!(null)
+      }
+      3 => {
+        assert!(
+          messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("Background subagents failed: shalltear.")
+        );
+        json!({"action": "collect", "name": "shalltear"})
+      }
+      4 => {
+        assert!(
+          messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("phase 2b worker lost its connection")
+        );
+        json!({"prompt": "verify and finish remaining phase 2b work"})
+      }
+      5 => {
+        assert!(
+          messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("phase 2b verified")
+        );
+        let notices = messages
+          .iter()
+          .filter(|message| {
+            message
+              .content
+              .as_deref()
+              .is_some_and(|text| text.starts_with("[Ainz background worker status]"))
+          })
+          .count();
+        assert_eq!(notices, 1);
+        message = Message::text(Role::Assistant, "phase 2b done\nGOAL MET");
+        json!(null)
+      }
+      _ => panic!("unexpected request {call}"),
+    };
+    if !args.is_null() {
+      message.tool_calls.push(ToolCall {
+        id: format!("delegate-{call}"),
+        name: "subagent".into(),
+        arguments: args,
+      });
+    }
+    Ok(ProviderReply {
+      message,
+      usage: Usage::default(),
+      truncated: false,
+    })
+  }
+}
+
+#[tokio::test]
+async fn the_lead_recovers_a_background_failure_before_finishing() {
+  let workspace = tempfile::tempdir().unwrap();
+  let fail = Arc::new(tokio::sync::Notify::new());
+  let failure = fail.clone();
+  let registry = SubagentRegistry::new(Arc::new(move |request| {
+    let failure = failure.clone();
+    Box::pin(async move {
+      if request.prompt == "implement phase 2b" {
+        failure.notified().await;
+        anyhow::bail!("phase 2b worker lost its connection");
+      }
+      Ok(SubagentResult {
+        name: request.name,
+        session_id: uuid::Uuid::now_v7(),
+        output: "phase 2b verified".into(),
+        usage: Usage::default(),
+      })
+    })
+  }));
+  let mut session = Session::new(workspace.path().into());
+  let provider = DelegatingProvider {
+    calls: Mutex::new(0),
+    registry: registry.clone(),
+    fail,
+    parent: session.id,
+  };
+  let mut tools = ToolSet::default();
+  tools.insert(subagent_tool(registry, false)).unwrap();
+  let agent = Agent::new(
+    provider,
+    tools,
+    workspace.path().into(),
+    EventSink::default(),
+    ainz::deny_all(),
+  );
+  let result = agent
+    .run(
+      &mut session,
+      "finish the goal".into(),
+      RunOptions {
+        max_steps: 5,
+        ..options()
+      },
+    )
+    .await
+    .unwrap();
+  assert_eq!(result, "phase 2b done\nGOAL MET");
 }
 
 struct SteeringProvider(Mutex<usize>);

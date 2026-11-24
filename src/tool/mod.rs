@@ -76,6 +76,10 @@ pub trait Tool: Send + Sync {
   fn concurrent(&self, _arguments: &Value) -> bool {
     false
   }
+  /// Newly failed background workers this tool owns for the given session.
+  fn failed_background_workers(&self, _session_id: Uuid) -> Vec<String> {
+    Vec::new()
+  }
   async fn execute(&self, context: &ToolContext, arguments: Value) -> Result<String>;
 }
 

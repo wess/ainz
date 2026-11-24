@@ -9,6 +9,28 @@ use crate::{
   todo::Todo,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatus {
+  Running,
+  Completed,
+  Failed,
+  Stopped,
+  Unconfirmed,
+}
+
+impl WorkerStatus {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Running => "working",
+      Self::Completed => "completed",
+      Self::Failed => "failed",
+      Self::Stopped => "stopped",
+      Self::Unconfirmed => "status unconfirmed",
+    }
+  }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -78,6 +100,13 @@ pub enum Event {
   SubagentEvent {
     session_id: String,
     event: Box<Event>,
+  },
+  WorkerUpdate {
+    id: String,
+    name: String,
+    task: Option<String>,
+    status: WorkerStatus,
+    detail: Option<String>,
   },
   Error {
     message: String,

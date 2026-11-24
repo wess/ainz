@@ -169,6 +169,7 @@ impl<P: ChatProvider> Agent<P> {
     let fixed = options.instructions.len() + tool_bytes(&specs);
     context::admit(&prompt, options, fixed, self.bytes_per_token())?;
     session.append(prompt);
+    let failures = self.report_worker_failures(session);
     let system = Message::text(Role::System, &options.instructions);
     state.asks = Some(tool::asking(
       self.workspace.clone(),
@@ -180,7 +181,7 @@ impl<P: ChatProvider> Agent<P> {
       state.plan = plan::recalled(session.context()?.messages);
     }
     let mut turn = Turn::new(options.max_steps);
-    let mut final_text = String::new();
+    let mut final_text = failures.unwrap_or_default();
     let mut effect = step(&mut turn, Action::Begin);
     loop {
       state.checkpoint()?;
@@ -219,18 +220,25 @@ impl<P: ChatProvider> Agent<P> {
           step(&mut turn, Action::ToolsDone { progress })
         }
         Effect::Drain => {
+          let failure = self.report_worker_failures(session);
           let steering = inbox
             .as_deref_mut()
-            .map(|inbox| inbox.drain(turn.settled))
+            .map(|inbox| inbox.drain(turn.settled && failure.is_none()))
             .unwrap_or_default();
-          let messages = steering.len();
+          let messages = steering.len() + usize::from(failure.is_some());
           for message in steering {
             self.events.emit(Event::Steering {
               message: message.clone(),
             });
             session.append(Message::text(Role::User, message));
           }
-          step(&mut turn, Action::Steered { messages })
+          let next = step(&mut turn, Action::Steered { messages });
+          if next == Effect::Pause
+            && let Some(failure) = failure
+          {
+            final_text = failure;
+          }
+          next
         }
         Effect::Finish => return Ok(final_text),
         Effect::Pause => {
@@ -253,6 +261,25 @@ impl<P: ChatProvider> Agent<P> {
         }
       };
     }
+  }
+
+  fn report_worker_failures(&self, session: &mut Session) -> Option<String> {
+    let workers = self
+      .tools
+      .get("subagent")?
+      .failed_background_workers(session.id);
+    if workers.is_empty() {
+      return None;
+    }
+    let notice = format!("Background subagents failed: {}.", workers.join(", "));
+    session.append(Message::text(
+      Role::User,
+      format!(
+        "[Ainz background worker status]\n{notice} Collect each failed worker for its error, \
+         check what it already changed, and assign any remaining work needed for the current task."
+      ),
+    ));
+    Some(notice)
   }
 
   #[allow(clippy::too_many_arguments)]

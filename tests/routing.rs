@@ -379,3 +379,48 @@ async fn a_named_child_can_pin_a_different_provider() {
       .contains("answered by /strong")
   );
 }
+
+#[tokio::test]
+async fn a_worker_that_cannot_start_still_reports_its_failure() {
+  let server = Fixture::start(r#"{"required":"basic","preferred":1,"reason":"routine"}"#).await;
+  let root = tempfile::tempdir().unwrap();
+  configure(root.path(), &server.endpoint, "economy", "auto");
+  let agents = root.path().join(".ainz/agents");
+  std::fs::create_dir_all(&agents).unwrap();
+  std::fs::write(
+    agents.join("reviewer.md"),
+    "---\nname: reviewer\nprovider: missing\nmodel: shared\n---\nReview.",
+  )
+  .unwrap();
+  let output = ask(root.path(), &[], &[], "delegate a job").await;
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let events = events(&output);
+  let lifecycle: Vec<_> = events
+    .iter()
+    .filter(|event| {
+      matches!(
+        event["type"].as_str(),
+        Some("subagent_start" | "subagent_event" | "subagent_end")
+      )
+    })
+    .collect();
+  assert_eq!(lifecycle.len(), 3, "{events:?}");
+  assert_eq!(lifecycle[0]["type"], "subagent_start");
+  assert_eq!(lifecycle[0]["target"]["provider"], "missing");
+  assert_eq!(lifecycle[1]["event"]["type"], "error");
+  assert!(
+    lifecycle[1]["event"]["message"]
+      .as_str()
+      .unwrap()
+      .contains("missing")
+  );
+  assert_eq!(lifecycle[2]["type"], "subagent_end");
+  assert_eq!(lifecycle[2]["error"], true);
+  for event in &lifecycle[1..] {
+    assert_eq!(event["session_id"], lifecycle[0]["session_id"]);
+  }
+}

@@ -589,6 +589,43 @@ def check_scripts(binary, root):
     term.close()
 
 
+def check_workers(binary, root):
+    print("\nbackground workers")
+    gate = os.path.join(root, "finish-worker")
+    adapter = os.path.join(root, "worker-fixture.sh")
+    with open(adapter, "w") as file:
+        file.write("""\
+cat >/dev/null
+printf '%s\\n' '{"type":"system","subtype":"task_started","task_id":"a","task_type":"local_agent","description":"phase 2b"}'
+for attempt in $(seq 100); do
+  [ -f "$1" ] && break
+  sleep 0.05
+done
+printf '%s\\n' '{"type":"system","subtype":"task_notification","task_id":"a","status":"failed","summary":"connection lost in phase 2b"}'
+printf '%s\\n' '{"type":"result","result":"parent finished"}'
+""")
+    config = CONFIG.format(inline="false").replace(
+        'command = "/bin/echo"\nargs = ["a reply from the fake provider"]',
+        f'command = "/bin/sh"\noutput = "stream_json"\nargs = {json.dumps([adapter, gate])}',
+    )
+    with open(os.path.join(root, "workers.toml"), "w") as file:
+        file.write(config)
+    term = Terminal(binary, root, "workers.toml", args=["--clean"])
+    try:
+        term.pump(2.0)
+        term.send("implement the plan" + ENTER, settle=0.9)
+        body = term.body()
+        check("a running worker appears in the roster", "+ worker 1" in body, body)
+        open(gate, "w").close()
+        term.pump(1.0)
+        body = term.body()
+        check("the failed worker remains in the roster", "! worker 1" in body, body)
+        check("the parent transcript shows the failure", "connection lost in phase 2b" in body, body)
+        check("the parent still receives its own result", "parent finished" in body, body)
+    finally:
+        term.close()
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/ainz"
     binary = os.path.abspath(binary)
@@ -601,6 +638,7 @@ def main():
         check_setup(binary, root)
         check_model_list(binary, root)
         check_model_switch(binary, root)
+        check_workers(binary, root)
         check_new_surface(binary, root)
         check_scripts(binary, root)
     finally:

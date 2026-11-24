@@ -55,6 +55,7 @@ pub(super) fn event(event: &Event) {
     Event::Cancelled => "cancelled",
     Event::SubagentStart { .. } => "subagent_start",
     Event::SubagentEnd { .. } => "subagent_end",
+    Event::WorkerUpdate { .. } => "worker_update",
     _ => return,
   };
   let Some(script) = script() else {

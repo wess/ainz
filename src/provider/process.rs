@@ -185,7 +185,7 @@ impl ProcessProvider {
     };
     // stderr drains on its own task for the same reason the prompt is fed on one
     let errors = tokio::spawn(async move { crate::output::capture(stderr, MAX_TRANSFER).await });
-    let mut stream = StreamState::default();
+    let mut stream = StreamState::new(events.clone());
     let read = async {
       // owned here, so stdin closes however reading ends, an error included
       let mut writer = writer;
@@ -199,7 +199,7 @@ impl ProcessProvider {
           .await
           .context("read provider output")?
         {
-          let request = stream.push(&String::from_utf8_lossy(&line), events);
+          let request = stream.push(&String::from_utf8_lossy(&line));
           // the command waits on the answer, so nothing else is read until it is given
           if let (Some(request), Some(sender)) = (request, &writer)
             && let Some(answer) = bridge::answer(&request, asks).await
@@ -230,7 +230,7 @@ impl ProcessProvider {
     if !status.success() {
       // a command that dies early may explain itself on either pipe
       let detail = match errors.trim() {
-        "" => buffered.trim(),
+        "" => stream.failure().unwrap_or_else(|| buffered.trim()),
         error => error,
       };
       bail!("provider command failed ({status}): {detail}");
