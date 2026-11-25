@@ -83,7 +83,7 @@ fn tiny_buffers_keep_room_for_the_message() {
 }
 
 #[test]
-fn streaming_code_stays_open_until_the_message_finishes() {
+fn finishing_a_stream_leaves_code_borderless() {
   use super::{ChatState, Event, Usage, apply_agent_event};
   let mut state = ChatState::default();
   state.begin_run();
@@ -100,7 +100,11 @@ fn streaming_code_stays_open_until_the_message_finishes() {
       .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
       .collect::<String>()
   };
-  assert!(!text(&state.primary.entries[0]).contains('└'));
+  let entry = &state.primary.entries[0];
+  assert!(entry.stream.is_some());
+  let streaming = text(entry);
+  assert!(streaming.contains("let x = 1;"));
+  assert!(!streaming.contains(['┌', '│', '└', '`']));
   apply_agent_event(
     &mut state,
     None,
@@ -108,6 +112,8 @@ fn streaming_code_stays_open_until_the_message_finishes() {
       usage: Usage::default(),
     },
   );
-  assert!(text(&state.primary.entries[0]).contains('└'));
+  let entry = &state.primary.entries[0];
+  assert!(entry.stream.is_none());
+  assert_eq!(text(entry), streaming);
   assert!(state.busy());
 }
