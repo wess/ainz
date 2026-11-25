@@ -56,7 +56,7 @@ fn reference_links_revise_previous_rows() {
 }
 
 #[test]
-fn open_fences_do_not_paint_a_closing_border_until_closed_or_finished() {
+fn streaming_code_adds_no_decoration_when_closed_or_finished() {
   let options = Options::default();
   for prefix in ["", "> ", "- "] {
     let mut stream = Stream::default();
@@ -64,17 +64,15 @@ fn open_fences_do_not_paint_a_closing_border_until_closed_or_finished() {
       "{prefix}```rust\n{}let x = 1;\n",
       if prefix == "- " { "  " } else { prefix }
     ));
-    assert!(!stream.snapshot(&options).plain().contains('└'));
-    assert!(stream.clone().finish(&options).plain().contains('└'));
+    let open = stream.snapshot(&options);
+    assert!(open.plain().contains("let x = 1;"));
+    assert!(!open.plain().contains(['┌', '└', '`']));
+    assert_eq!(stream.clone().finish(&options), open);
     stream.push(&format!(
       "{}```",
       if prefix == "- " { "  " } else { prefix }
     ));
-    assert!(
-      stream.snapshot(&options).plain().contains('└'),
-      "{}",
-      stream.source()
-    );
+    assert_eq!(stream.snapshot(&options), open, "{}", stream.source());
   }
 }
 

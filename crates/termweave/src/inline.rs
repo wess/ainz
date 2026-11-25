@@ -26,7 +26,7 @@ fn push(lines: &mut Vec<Line>, text: &str, style: Style) {
 fn visit(nodes: &[Node], theme: &Theme, style: Style, output: &mut Vec<Line>) {
   for node in nodes {
     match node {
-      Node::Element(tag, children, _) => {
+      Node::Element(tag, children) => {
         let emphasis = match tag {
           Tag::Strong => Style {
             bold: true,

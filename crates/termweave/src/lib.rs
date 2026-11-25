@@ -46,7 +46,7 @@ impl Default for Options {
 
 /// Render a complete Markdown document. CommonMark plus tables, tasks, and strikethrough.
 pub fn render(source: &str, options: &Options) -> Document {
-  layout::document(parse::markdown(source, options, true), options)
+  layout::document(parse::markdown(source, options), options)
 }
 
 /// Wrap already styled lines without interpreting them as Markdown.
@@ -76,7 +76,7 @@ impl Stream {
   }
 
   pub fn snapshot(&self, options: &Options) -> Document {
-    layout::document(parse::markdown(&self.source, options, false), options)
+    layout::document(parse::markdown(&self.source, options), options)
   }
 
   pub fn finish(self, options: &Options) -> Document {

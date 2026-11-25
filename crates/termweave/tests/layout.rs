@@ -83,9 +83,8 @@ fn fenced_code_preserves_spaces_and_wraps_without_eating_indentation() {
     },
   );
   let rows: Vec<_> = document.lines.iter().map(Line::text).collect();
-  assert_eq!(rows[1], "│     a  b");
-  assert!(rows[2].starts_with("│     long"));
-  assert!(rows[3].starts_with("│ "));
+  assert_eq!(rows[0], "    a  b");
+  assert_eq!(rows[1..].concat(), "    longlonglonglonglonglong");
   assert!(document.lines.iter().all(|line| line.width() <= 14));
 }
 
@@ -117,4 +116,43 @@ fn a_grapheme_crossing_style_boundaries_is_not_split() {
   assert_eq!(document.lines[1].text(), "e\u{301}");
   assert_eq!(document.lines[0].spans[0].style, red);
   assert_eq!(document.lines[1].spans[0].style, green);
+}
+
+#[test]
+fn copied_commands_have_no_decoration_on_any_wrapped_row() {
+  let command = "node .gitlab/ci/audit-lockfile.cjs --level critical | tee audit.log";
+  for width in [8, 24, 80] {
+    let options = Options {
+      width,
+      ..Options::default()
+    };
+    let document = render(&format!("```bash\n{command}\n```"), &options);
+    let copied: String = document.lines.iter().map(Line::text).collect();
+    assert_eq!(copied, command);
+    assert!(document.lines.iter().all(|line| line.width() <= width));
+    assert!(
+      document
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .all(|span| span.style.foreground == options.theme.code.foreground)
+    );
+  }
+}
+
+#[test]
+fn code_keeps_blank_lines_and_indented_blocks_without_fence_labels() {
+  let options = Options::default();
+  assert_eq!(
+    render("```bash\nfirst\n\n  second\n```", &options).plain(),
+    "first\n\n  second"
+  );
+  assert_eq!(
+    render("    first\n    second\n", &options).plain(),
+    "first\nsecond"
+  );
+  assert_eq!(
+    render("before\n\n```bash\ncommand\n```\n\nafter", &options).plain(),
+    "before\n\ncommand\n\nafter"
+  );
 }

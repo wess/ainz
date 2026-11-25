@@ -15,7 +15,7 @@ pub(crate) fn render(
   let rows: Vec<Vec<Line>> = nodes
     .iter()
     .filter_map(|node| {
-      let Node::Element(tag @ (Tag::TableHead | Tag::TableRow), children, _) = node else {
+      let Node::Element(tag @ (Tag::TableHead | Tag::TableRow), children) = node else {
         return None;
       };
       let style = if matches!(tag, Tag::TableHead) {
@@ -27,7 +27,7 @@ pub(crate) fn render(
         children
           .iter()
           .filter_map(|cell| {
-            let Node::Element(Tag::TableCell, children, _) = cell else {
+            let Node::Element(Tag::TableCell, children) = cell else {
               return None;
             };
             let mut line = Line::default();

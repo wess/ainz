@@ -58,9 +58,8 @@ assert_eq!(completed.plain(), "partial");
 Push valid UTF-8 string chunks and take a snapshot when ready to redraw. Each snapshot
 reparses the accumulated source. Later delimiters and reference definitions can change earlier
 rows, so **replace the previous snapshot**, rather than appending every snapshot to scrollback.
-Unclosed inline delimiters remain readable. An open code fence has no closing border until its
-closing fence arrives or `finish` is called. Reusing the stream with different `Options` reflows
-its text after a resize.
+Unclosed inline delimiters remain readable. Code blocks stay borderless while streaming and
+after completion. Reusing the stream with different `Options` reflows its text after a resize.
 
 Coalesce incoming chunks before drawing. Parsing and layout are linear in document size per
 snapshot; the stream retains the full source and does not impose a byte limit. Applications own
@@ -76,7 +75,8 @@ is room and labeled records when the terminal is narrow. Soft line breaks become
 explicit hard breaks remain line breaks.
 
 HTML is displayed literally. Images are never fetched. Code is styled as a block without
-language-specific syntax highlighting. Terminal control characters are shown visibly and tabs
+language-specific syntax highlighting. Code blocks omit borders and language labels so terminal
+selections contain only the code, including on wrapped rows. Terminal control characters are shown visibly and tabs
 expand to four spaces. ANSI output emits only SGR styles and resets at row boundaries; it
 never emits cursor commands or OSC hyperlinks from document content. The application chooses
 `plain()` for redirected output or `NO_COLOR`; the library does not inspect environment variables.
